@@ -1,0 +1,1095 @@
+Title: 2026.acl-long.327.pdf
+
+URL Source: https://aclanthology.org/2026.acl-long.327.pdf
+
+Published Time: Thu, 11 Jun 2026 01:09:35 GMT
+
+Number of Pages: 26
+
+Markdown Content:
+Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 7205–7230 July 2-7, 2026 ©2026 Association for Computational Linguistics When KV Cache Reuse Fails in Multi-Agent Systems: Cross-Candidate Interaction is Crucial for LLM Judges 
+
+Sichu Liang 1*, Zhenglin Wang 1*, Jiajia Chu 2, Pengfei Xia 2, Hui Zang 2†, Deyu Zhou 1†1School of Computer Science and Engineering, Key Laboratory of Computer Network and Information Integration, Ministry of Education, Southeast University, China 
+
+> 2
+
+Huawei Technologies Co., Ltd. 
+
+{coder_liang, zhenglin, d.zhou}@seu.edu.cn {chujiajia1, xiapengfei12, zanghui}@huawei.com 
+
+Abstract 
+
+Multi-agent LLM systems routinely generate multiple candidate responses that are aggre-gated by an LLM judge. To reduce the dom-inant prefill cost in such pipelines, recent work advocates KV cache reuse across par-tially shared contexts and reports substantial speedups for generation agents. In this work, we show that these efficiency gains do not transfer uniformly to judge-centric inference. Across GSM8K, MMLU, and HumanEval, we find that reuse strategies that are effective for execution agents can severely perturb judge behavior: end-task accuracy may appear sta-ble, yet the judge’s selection becomes highly inconsistent with dense prefill. We quantify this risk using Judge Consistency Rate (JCR) and provide diagnostics showing that reuse sys-tematically weakens cross-candidate attention, especially for later candidate blocks. Our ab-lation further demonstrates that explicit cross-candidate interaction is crucial for preserving dense-prefill decisions. Overall, our results identify a previously overlooked failure mode of KV cache reuse and highlight judge-centric inference as a distinct regime that demands ded-icated, risk-aware system design. 1
+
+1 Introduction 
+
+Modern intelligent systems often reason by con-sidering multiple alternatives rather than commit-ting to a single trajectory—a pattern observed in human decision-making and in AI systems that rely on search, sampling, and planning (Church-land et al., 2008; Browne et al., 2012; Silver et al., 2016). Large language models (LLMs) have be-gun to exhibit similar behavior through techniques such as multi-sample decoding (Leviathan et al., 2023; Gui et al., 2024; Sun et al., 2024), self-consistency (Wang et al., 2023; Li et al., 2025c), 
+
+> *
+
+Equal Contribution, †Corresponding Author 
+
+> 1
+
+The code is available in https://github.com/dbsxfz/ kv_reuse_fails Final Answer: √           
+
+> Best Agent: 2
+> Final Answer: √
+> Best Agent: 1
+> Prefill
+> (1) Dense Prefill
+> Agent1 Agent2 Agent3 Agent4
+> (2) KV Cache Reuse
+> Agent1 Agent2 Agent3 Agent4
+> Modify
+> The answer is correct, but
+> the judgment of the best
+> agent is inconsistent.
+> Text KV Cache
+
+Figure 1: Illustration of decision non-invariance under judge-side KV cache reuse. Top : dense prefill recom-putes the judge KV cache and selects Agent 1. Bottom :KV reuse stitches/modifies cached KV blocks, keeping the final answer correct but changing the selected best agent, despite identical candidate texts. 
+
+preference modeling (Rafailov et al., 2023; Ouyang et al., 2022; Sun et al., 2025; Ye et al., 2025b), and search-based inference (Yao et al., 2023; Besta et al., 2024), where multiple candidate solutions are generated and subsequently evaluated. LLM-based multi-agent systems (MAS) (Hong et al., 2024; Wu et al., 2024) represent a concrete instantiation of this paradigm, where multiple ex-ecution agents generate diverse candidate outputs that are aggregated by a central meta-agent (Zhang et al., 2025c) responsible for planning, coordina-tion or judging (Chen et al., 2024; Fourney et al., 2024; Zhang et al., 2025b). To enable such collab-oration, execution agents and the meta-agent must repeatedly exchange intermediate reasoning, can-didate outputs, and contextual information, lead-ing to substantial overlap in their effective input contexts (Wang et al., 2025; Zhang et al., 2025a). 
+
+7205 While this interaction improves robustness and rea-soning quality, it also introduces severe computa-tional redundancy: each agent repeatedly performs a full prefill pass over largely overlapping context, causing inference cost to scale rapidly with the number of agents (Ye et al., 2025a). A natural solution is KV cache reuse (Kwon et al., 2023; Zheng et al., 2024b). During LLM inference, the prefill stage encodes the entire in-put context and constructs key–value (KV) caches for attention, which can be reused directly when multiple inputs share overlapping prefixes. How-ever, in multi-agent settings, simple prefix-based reuse is often ineffective: although agents typically share substantial contextual overlap (e.g., task in-structions or exchanged messages), their prompts frequently diverge due to role specifications, inter-mediate reasoning, or agent-specific context. Con-sequently, KV caches across agents are similar but not identical, preventing direct reuse (Zhao et al., 2025; Liu et al., 2025). This has motivated 
+
+cross-prefix (approximate) reuse methods that en-able reuse under partially shared prefixes and have reported substantial speedups for generation agents in multi-agent pipelines and serving systems (Yao et al., 2025; Ye et al., 2025a; Yang et al., 2025b). Most existing studies evaluate KV reuse pri-marily from the perspective of execution agents, implicitly assuming that efficiency gains transfer uniformly across all components of a multi-agent pipeline. Yet the impact of KV reuse on judge 
+
+agents—which must compare multiple candidates jointly and produce a selection (Li et al., 2024a)— remains largely unexplored. This gap is non-trivial, as judging constitutes a qualitatively different inference regime from gener-ation (Li et al., 2025b). Prior work has examined the reliability of LLM-based judges (Zheng et al., 2024a), documenting systematic biases such as po-sition preference (Li et al., 2024b) and sensitivity to irrelevant contexts (Shi et al., 2023). However, these failures are typically attributed to model lim-itations or task-level biases, rather than to system-level efficiency optimizations that modify the in-ference procedure. Consequently, how KV cache reuse alters judge behavior in multi-candidate com-parison settings remains an open question. As shown in Figure 1, KV reuse may keep the final an-swer unchanged while altering which candidate the judge selects, motivating judge-centric diagnostics beyond accuracy. In this paper, we revisit KV cache reuse from a judge-centric perspective, where an LLM judge must jointly compare multiple candidates within a single context and output both a final answer and the selected candidate. We show that judge-side reuse can be decision-non-invariant : it may pre-serve end-task accuracy while substantially chang-ing which candidate the judge selects, especially under order perturbations. These results high-light judge-centric inference as a distinct regime in which preserving cross-candidate interactions is critical. Our key contributions are: • Judge-centric evaluation of KV reuse. We provide a systematic study of KV reuse in multi-candidate judging across tasks, candidate-generation regimes, and candidate orderings. • Decision instability beyond accuracy. We introduce Judge Consistency Rate (JCR) to quantify decision non-invariance relative to dense prefill, and show that Acc. and JCR can be decoupled—accuracy may appear stable while selection behavior becomes inconsistent under reuse. • Mechanistic diagnostics and implications. 
+
+Through attention analyses and controlled ab-lations, we attribute the failure to disrupted cross-candidate interaction; we further de-velop PAL-KV as a probe to rule out agent identity as the dominant bottleneck and dis-cuss practical directions such as interaction-aware reuse and risk-aware gating. 
+
+2 Related Work 
+
+KV Cache Reuse. KV cache reuse is a widely studied approach for reducing the high prefill cost of large language model (LLM) inference. Early systems (Kwon et al., 2023; Zheng et al., 2024b) fo-cus on exact-prefix caching, where KV tensors are reused only when the input context remains iden-tical. Recent work extends KV reuse beyond ex-act prefix matching. One line studies cross-model 
+
+cache sharing, enabling cache reuse across model variants (Liu et al., 2026; Li et al., 2025a) or even heterogeneous model families (Fu et al., 2026). More closely related to our study is cross-prefix 
+
+KV reuse, which enables approximate reuse when prompts share partial prefixes but are not identical. Representative methods explore reuse through sim-ple position adjustment (Lu et al., 2025), linking 7206 tokens (Yang et al., 2025c), or reuse-time repair/fu-sion mechanisms (Yao et al., 2025; Hu et al., 2025; Yang et al., 2025a; Cao et al., 2026), and are typi-cally evaluated in settings where cross-segment in-teractions are limited. KVCOMM (Ye et al., 2025a) further brings cross-prefix reuse to multi-agent sys-tems by using anchor examples to correct cache deviations across agent-specific prompts. We study KV reuse in judge-centric multi-candidate inference and show that reuse strategies effective for agent-side generation can be decision-non-invariant for judges, revealing a failure mode overlooked by prior work. 
+
+LLM-Based Multi-Agent Systems. LLM-based multi-agent systems coordinate multiple spe-cialized agents through structured communication graphs (Chen et al., 2024; Zhuge et al., 2024), where execution agents produce candidate outputs under different roles or prompts (Wang et al., 2025; Zhang et al., 2025a). A common pattern is a central LLM meta-agent that aggregates and verifies multi-ple agent responses within a single context window to produce the final decision (Li et al., 2023; Hong et al., 2024; Zhang et al., 2025c), making it a key component for both quality and efficiency. We show that KV reuse, while effective for ex-ecution agents, is not always behavior-preserving 
+
+for judge agents, often changing which candidate is selected relative to dense prefill. 
+
+LLM-as-a-Judge. LLM-based judges are in-creasingly deployed as decision modules in high-stakes workflows including healthcare, finance, and legal analysis (Xie et al., 2024, 2023; Raju et al., 2024), where selection robustness is critical. Most existing formulations treat judging as either pair-wise comparison or scalar scoring , where candi-dates are evaluated independently or in pairs (Sun et al., 2024, 2025). In contrast, many practical applications require a judge to process multiple candidates jointly within a single context and di-rectly select the best output (Tran et al., 2025; Gera et al., 2025). This setting is especially common in multi-agent systems, where a judge must aggregate and attribute outputs from several execution agents. Such judges require cross-candidate compari-son and relative reasoning, unlike standard genera-tion (Li et al., 2025b). We study KV cache reuse under this joint multi-candidate judging setting and show it can change the judge’s selection relative to dense prefill. 
+
+3 Preliminaries 
+
+We study judge-centric multi-candidate inference with N execution agents and a central judge agent. Given an input question x, each execution agent 
+
+Ai is instantiated as a large language model with an agent-specific prompt pi (e.g., role description or instruction), and produces a candidate response 
+
+yi. A judge agent J with a judge-specific prompt 
+
+pJ then takes all candidate responses as input and outputs (i) a final answer ˆy and (ii) the index of the selected candidate ˆi:
+
+(ˆ y, ˆi) = J(pJ , x, y 1: N ) , ˆi ∈ { 1, . . . , N }.
+
+(1) Unlike pairwise comparison or scalar scoring, the judge must jointly reason over multiple candidates within a single context, performing explicit cross-candidate comparison and selection. 
+
+Candidate generation regimes. We consider two common ways to construct multi-candidate inputs in multi-agent pipelines. 
+
+(1) Progressive refinement. Candidates are gen-erated sequentially, where later agents may condi-tion on earlier candidates: 
+
+yi = Ai(pi, x, y 1: i−1) , i = 1 , . . . , N. (2) 
+
+(2) Parallel exploration. Candidates are gener-ated independently without observing each other: 
+
+yi = Ai(pi, x ) , i = 1 , . . . , N. (3) 
+
+Judge input ordering. To disentangle content-based judging from potential ordering effects, we optionally randomize the presentation order of can-didates to the judge. Let π be a permutation over 
+
+{1, . . . , N }. The judge observes candidates in the permuted order yπ(1: N ):
+
+(ˆ y, ˆi) = J(pJ , x, y π(1: N )
+
+) , (4) where no-shuffle uses the identity permutation and shuffle samples π per example. Under shuf-fle, the predicted index ˆi is mapped back to the original candidate index via π.
+
+4 KV Reuse for Multi-Candidate Judging 
+
+Figure 2 summarizes the judge-side cache construc-tion strategies compared in this work. We consider judge-centric inference where a judge processes N
+
+candidate responses within a single context. We 7207 Prefill        
+
+> (1) Dense Prefill
+> (3) KVCOMM
+> (2) Na ïve Reuse
+> RoPE
+> (4) PAL-KV
+> Saved KV Offset
+> Retrieve
+> Retrieve
+> Modify
+> Modify
+> Anchor Matching
+> Anchor Matching
+> Text KV Cache
+> Agent1 Use Self-Offset （Agent1 ）
+> Agent1 Use Cross-Offset （Agent2 ）
+
+Figure 2: Judge-side KV cache construction for multi-candidate judging. Dense prefill recomputes the full judge cache, while Naïve Reuse aligns and stitches execution-side candidate KV chunks. KVCOMM retrieves anchor-based cache offsets to correct reused chunks, and PAL-KV pools anchors across agents for offset retrieval. 
+
+use K(·) to denote the KV cache obtained by en-coding a token sequence, and K(s)[ u] to denote the KV entries in K(s) corresponding to a subsequence 
+
+u ⊆ s. For each candidate response yi, the execu-tion agent has already computed and cached its KV entries under its execution-time context Sexec  
+
+> i
+
+:
+
+Ci = K(Sexec  
+
+> i
+
+) [ yi]. (5) We use ⊕ to denote concatenation of KV-cache chunks in the displayed candidate order (i.e., stitch-ing cache segments into a single judge cache). Let 
+
+oi be the starting token position (index) of candi-date yi in the judge input, and let C→oi 
+
+> i
+
+denote the position-aligned version of Ci (e.g., via RoPE (Su et al., 2024) re-indexing) so that it is valid start-ing at position oi in the judge sequence. For a KV cache reuse method m, we denote by CJm the as-sembled KV cache segment corresponding to the concatenation of the N candidate responses in the judge prompt . 
+
+Dense Prefill. Let SJ = ( pJ , x, y 1, . . . , y N ) de-note the full judge input sequence. Dense prefill recomputes the judge KV cache from scratch as 
+
+K(SJ ). In particular, the KV chunk for candidate 
+
+yi under dense judging is 
+
+Cdense  
+
+> i
+
+= K(SJ ) [yi], (6) which differs from the execution-time chunk Ci due to the different conditioning context. Then the full judge cache can be written as 
+
+CJ 
+
+> dense
+
+= Cdense  
+
+> 1
+
+⊕ C dense  
+
+> 2
+
+⊕ · · · ⊕ C dense  
+
+> N
+
+. (7) 
+
+Naïve Reuse (Position-Only Reuse). Naïve reuse stitches cached response chunks into the judge context by position alignment and concate-nation: 
+
+CJ 
+
+> naive
+
+= C→o1 
+
+> 1
+
+⊕ C →o2 
+
+> 2
+
+⊕ · · · ⊕ C →oN 
+
+> N
+
+. (8) This approach reuses execution-side KV as-is and does not account for prefix-dependent KV devi-ations induced by the judge-side context. This position-only stitching strategy has been used in prior KV reuse settings, e.g., in RAG-style cache reuse (Lu et al., 2025) and in multi-agent interac-tion setups that reuse cached internal states (Zou et al., 2025). 
+
+KVCOMM (Anchor-based Offset Correction). 
+
+KVCOMM improves reuse by adding an anchor-retrieved correction to each reused chunk (Ye et al., 2025a). For candidate i, KVCOMM constructs a matching view vi under the current judge-side prefix and retrieves a correction ̂
+
+∆i = RetrieveOffset (vi; A(i)), (9) where A(i) is the agent-specific anchor pool used by KVCOMM. It then corrects the aligned chunk as ˜CJi = C→oi 
+
+> i
+
++̂ ∆i, (10) 7208 and assembles the judge cache by concatenation: 
+
+CJ 
+
+> kvcomm
+
+= ˜CJ 
+
+> 1
+
+⊕ ˜CJ 
+
+> 2
+
+⊕ · · · ⊕ ˜CJN . (11) We follow KVCOMM for anchor construction, matching, and correction estimation, and use its reliability criterion to fall back to dense computa-tion when reuse is deemed unreliable. 
+
+PAL-KV (Pooled-Anchor Lookup). PAL-KV (Pooled-Anchor Lookup KV reuse) is a minimal modification of KVCOMM that changes only the retrieval scope of anchors. While KVCOMM re-trieves ̂ ∆i from an agent-specific pool A(i), PAL-KV retrieves from the union of all pools: ̂
+
+∆pal  
+
+> i
+
+= RetrieveOffset 
+
+vi;
+
+> N
+
+⋃
+
+> j=1
+
+A(j)
+
+ . (12) and applies 
+
+˜CJi, pal = C→oi 
+
+> i
+
++̂ ∆pal  
+
+> i
+
+. (13) The assembled judge cache is 
+
+CJ 
+
+> pal
+
+= ˜CJ 
+
+> 1,pal
+
+⊕ ˜CJ 
+
+> 2,pal
+
+⊕ · · · ⊕ ˜CJN, pal . (14) Thus, PAL-KV modifies which correction is selected, while keeping the reuse and correction mechanism identical to KVCOMM. 
+
+5 Experiments 
+
+5.1 Experimental Setup Multi-candidate generation. We use the two candidate-generation regimes in Sec. 3, and gener-ate N =4 candidates per example. To isolate judge-side effects, we disable execution-side reuse and 
+
+fix the candidate set : for each example we generate the candidates once with dense prefill and reuse the identical candidate texts for all judge-side meth-ods. We evaluate both no-shuffle and shuffle 
+
+candidate orders to quantify ordering effects on judge-side reuse. 
+
+Models and implementation. Our primary ex-periments use Llama-3.2-3B-Instruct (Meta, 2024) for both execution agents and the judge, while ablations consider models from the Llama-3.1/3.2 (Grattafiori et al., 2024) and Qwen-2.5 (Yang et al., 2024) families across a range of sizes (3B–72B). To induce candidate diversity while keeping the judge deterministic, execution agents use temperature 0.2 and the judge uses tem-perature 0. For KVCOMM and PAL-KV, we use an anchor pool of size |A (i)| = 5 per agent. 
+
+Hardware and precision. Our main experiments are run on 2 NVIDIA RTX 4090 GPUs (24GB each). For the larger-scale model extension, we use 8 Ascend 910B NPUs with 64GB memory per card. For both execution agents and the judge, the max-imum generation length is set to 512 tokens. All models are run in bfloat16 for numerical stability. 
+
+5.2 Benchmarks 
+
+We evaluate judge-centric KV reuse on three representative benchmarks spanning reasoning, programming, and knowledge-intensive domains: 
+
+GSM8K. A grade-school math reasoning bench-mark (Cobbe et al., 2021); HumanEval. A code generation benchmark consisting of programming tasks with unit tests (Chen, 2021). MMLU. Amulti-domain knowledge benchmark covering di-verse subjects (Hendrycks et al., 2021). 
+
+5.3 Evaluation Metrics Task Acc. The primary metric for the judge’s final answer: exact-match accuracy for GSM8K and MMLU, and Pass@1 for HumanEval (also denoted as Acc. in tables). 
+
+Judge Consistency Rate (JCR). The percentage of examples for which KV reuse and dense-prefill judging select the same candidate under the same candidate set and presentation order. JCR measures whether reuse preserves the dense-prefill judge’s se-lection behavior, rather than merely the correctness of the final answer. For shuffle , we use identi-cal permutations for both runs and map predicted indices back to the original candidate IDs. 
+
+Reuse Rate (Reuse). The fraction of candidate blocks ( y1: N ) assembled via reuse versus dense recomputation. It excludes the shared judge prefix and output tokens. We disable execution-side reuse to ensure an identical candidate set across methods. 
+
+6 Results and Analysis 
+
+6.1 Main Results Overview: judge decisions are not invariant under KV reuse. Table 1 reports task accuracy (Acc.), Judge Consistency Rate (JCR), and the judge-side candidate Reuse Rate (Reuse) across all benchmarks. A central observation is that 
+
+KV reuse can substantially change which can-didate the judge selects, even when end-task ac-curacy remains comparable . This decision non-invariance appears consistently under both multi-7209 Table 1: Judge-side KV cache reuse results on three benchmarks under different settings. Bold denotes the best Acc., and the JCR column additionally reports the performance drop under shuffle relative to no-shuffle .                                                                                                                                                             
+
+> Settings Shuffle Method MMLU GSM8K HumanEval Acc. JCR Reuse Acc. JCR Reuse Acc. JCR Reuse Progressive Refinement No Dense Prefill 45.09 100.00 00.00 71.34 100.00 00.00 33.54 100.00 00.00
+> Naïve Reuse 49.02 31.37 100.00 11.83 50.87 100.00 45.96 64.60 100.00
+> KVCOMM 39.22 66.67 32.55 64.14 87.91 29.93 51.55 57.14 48.32
+> PAL-KV 42.48 69.28 32.55 64.59 89.23 29.93 49.69 66.46 48.32
+> Yes Dense Prefill 44.44 100.00 (+00.00) 00.00 70.51 100.00 (+00.00) 00.00 31.68 100.00 (+00.00) 00.00
+> Naïve Reuse 39.86 27.45 (-03.92) 100.00 16.98 19.88 (-30.99) 100.00 49.06 23.60 (-41.00) 100.00
+> KVCOMM 39.87 39.87 (-26.80) 32.29 63.84 51.75 (-36.16) 31.86 49.69 21.74 (-35.40) 44.84
+> PAL-KV 47.06 31.37 (-37.91) 32.29 62.53 51.27 (-37.96) 31.86 49.07 24.22 (-42.24) 44.84
+> Parallel Exploration No Dense Prefill 49.02 100.00 00.00 67.32 100.00 00.00 28.57 100.00 00.00
+> Naïve Reuse 61.44 26.14 100.00 20.34 23.93 100.00 40.99 39.75 100.00
+> KVCOMM 47.06 58.16 44.84 39.63 59.19 63.12 31.68 61.49 66.96
+> PAL-KV 45.10 62.75 44.84 41.17 59.55 63.12 32.30 64.60 66.96
+> Yes Dense Prefill 51.63 100.00 (+00.00) 00.00 70.28 100.00 (+00.00) 00.00 25.63 100.00 (+00.00) 00.00
+> Naïve Reuse 36.60 24.18 (-1.96) 100.00 19.86 24.92 (+0.99) 100.00 50.31 27.95 (-11.80) 100.00
+> KVCOMM 43.14 46.41 (-11.75) 44.84 38.89 34.43 (-24.76) 63.21 37.27 32.92 (-28.57) 66.96
+> PAL-KV 43.14 45.75 (-17.00) 44.84 39.95 35.32 (-24.23) 63.21 36.02 36.65 (-27.95) 66.96
+
+agent candidate-generation regimes ( Progressive Refinement and Parallel Exploration ), sug-gesting that the phenomenon is not tied to a partic-ular collaboration pattern. Overall, these results expose a failure mode that would be missed if one monitors task metrics alone: KV reuse may preserve outcomes while silently perturbing the judge’s underlying selection behavior. 
+
+Accuracy can mask instability: reuse per-turbs selection beyond what Acc reveals. Un-der dense prefill, changing the candidate order (shuffle vs. no-shuffle ) often affects Acc. only moderately. In contrast, reuse-based methods fre-quently exhibit low JCR even when Acc. remains close to the dense-prefill baseline, indicating that the judge’s cross-candidate comparison is highly sensitive to judge-side reuse. This decoupling is critical for judge-centric pipelines where down-stream properties—such as attribution, explanation, and auditability—depend on which candidate is chosen, not only whether the final answer is correct. Appendix A.2 further analyzes this phenomenon and shows that Acc. and JCR are weakly corre-lated. 
+
+Candidate-order perturbation (shuffle) ampli-fies inconsistency. A striking pattern is that 
+
+shuffle sharply reduces JCR for all reuse-based methods. This indicates that judge-side reuse is strongly layout-dependent : the effective prefix for each candidate block is determined by the entire preceding candidate configuration in the judge prompt. When the order changes, reuse approxima-
+
+Table 2: Effect of masking cross-candidate attention under dense prefill.                       
+
+> Settings Shuffle Acc. (%) JCR (%) Original Masked Original Masked Progressive Refinement No 45.09 43.79 100.00 28.76
+> Yes 44.44 45.10 100.00 32.03
+> Parallel Exploration No 49.02 48.37 100.00 22.22
+> Yes 51.63 47.71 100.00 31.37
+
+tions become much less reliable, leading to large drops in JCR even when Acc. changes little. 
+
+PAL-KV as a probe: agent identity is not the dominant bottleneck. We use PAL-KV as a con-trolled variant to test whether judge inconsistency is mainly caused by agent-specific offset distri-butions assumed by KVCOMM. By pooling an-chors across agents, PAL-KV relaxes the agent-identity constraint in offset retrieval. Empirically, pooled retrieval yields small but consistent gains in the fixed-layout setting ( no-shuffle ), suggest-ing that some offset patterns transfer across agents when the presentation structure is stable. How-ever, under shuffle , PAL-KV does not mitigate the large JCR drop and behaves similarly to KV-COMM; other probes show the same limitation (Appendix A.4). Together, these results suggest that the dominant driver of judge-centric fail-ures is the changing cross-candidate context/lay-out, rather than agent identity per se . In the next subsection, we provide direct evidence that preserving cross-candidate interaction is crucial for maintaining dense-prefill judge decisions. 7210 prefix        
+
+> slot1
+> slot2
+> slot3
+> slot4
+> Region
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> 1.2
+> Relative Attention  1.00 1.00 1.00 1.00 1.00
+> 1.09
+> 0.89
+> 0.37
+> 0.24 0.29
+> 1.06
+> 0.98
+> 0.22
+> 0.82
+> 0.22
+> 1.09 1.02
+> 0.23 0.21
+> 0.29
+> Dense Prefill
+> Naïve Reuse
+> KVCOMM
+> PAL-KV
+
+Figure 3: Relative attention mass over regions (prefix and candidate slots) under different KV reuse methods. 
+
+6.2 Why Does Judge-Centric Reuse Fail? Interaction Diagnostics Attention diagnostics: reuse weakens cross-candidate attention, especially for later slots. 
+
+To understand why judge selections change un-der reuse, we analyze attention patterns during the judge’s first-token generation. Figure 3 shows a consistent trend: attention over the shared prefix and the first candidate block is relatively similar across methods, but attention to later candidate blocks is substantially weaker and more erratic under reuse-based methods than under dense pre-fill. Representative attention maps for individual methods are provided in Appendix A.5. This is consistent with the interpretation that reuse per-turbs the fine-grained cross-candidate interactions needed for joint comparison, causing the judge to under-attend to late-arriving evidence. 
+
+Masking ablation: cross-candidate interaction is necessary beyond judge-style formatting. Anatural alternative explanation is that reuse fails simply because execution-side KV caches are “in-compatible” with the judge prompt. To isolate the role of interaction from format , we conduct a masking ablation where candidates are placed in the judge prompt but cross-candidate attention is explicitly blocked (candidate i cannot attend to candidates 1: i−1). As shown in Table 2, masking has only a limited effect on Acc but causes a dra-matic collapse in JCR , approaching random-choice behavior for N =4 . This provides direct evidence that judge-centric inference critically relies on cross-candidate interaction , and that removing such interaction—even under the same judge-style prompt—destroys decision invariance relative to dense prefill. 
+
+6.3 Ablation Studies and Additional Baselines 
+
+Unless otherwise specified, all ablations focus on the shuffle regime, which is particularly challeng-ing for judge-side reuse due to order-induced lay-5 10 15 20       
+
+> AnchorNum
+> 35.0
+> 40.0
+> 45.0
+> ACC (%)
+> 510 15 20
+> AnchorNum
+> 50.0
+> 100.0
+> JCR (%)
+> Dense Prefill Naïve Reuse KVCOMM PAL-KV
+
+(a) Effect of anchor pool size. 2 3 4 5       
+
+> AgentNum
+> 30.0
+> 40.0
+> 50.0
+> ACC (%)
+> 2345
+> AgentNum
+> 25.0
+> 50.0
+> 75.0
+> 100.0
+> JCR (%)
+> Dense Prefill Naïve Reuse KVCOMM PAL-KV Random
+
+(b) Effect of the number of candidates (agents). 3 7/8 14 32 70/72         
+
+> Model Size (B)
+> 40.0
+> 60.0
+> 80.0
+> ACC (%)
+> 37/8 14 32 70/72
+> Model Size (B)
+> 25.0
+> 50.0
+> 75.0
+> 100.0
+> JCR (%)
+> Dense Prefill Naïve Reuse KVCOMM PAL-KV
+> Qwen-2.5 Series LLaMA-3.1/3.2 Series
+
+(c) Effect of model family and size. 
+
+Figure 4: Ablations under shuffle : judge-side deci-sion non-invariance persists. Varying anchor pool size, candidate count, or model size does not reliably restore JCR for KV reuse methods. 
+
+out changes; we use MMLU under Progressive Refinement with shuffled candidate order as a representative testbed. 
+
+Anchor pool size is not the bottleneck under shuffle. A plausible hypothesis is that poor an-chor matches cause offset correction to fail. We therefore increase the anchor pool size (Figure 4a); as expected, a larger pool increases the Reuse Rate (Appendix Table 6). Nevertheless, JCR under 
+
+shuffle stays low and changes little as the pool grows, suggesting that the failure is not driven by insufficient anchor coverage. Instead, when the preceding candidate configuration changes, anchor similarity becomes an unreliable proxy for preserv-ing the interaction effects needed for judging. 
+
+More candidates can improve Acc but make de-cision invariance harder. We vary the number of candidates N (Figure 4b). Increasing N often improves Acc by providing stronger candidates, but JCR decreases monotonically across reuse-based methods. This highlights a key tension in judge-centric systems: adding candidates improves solution quality but expands the space of cross-candidate interactions that reuse must preserve, 7211 Table 3: Additional related baselines on MMLU under the shuffle judge setting. Despite additional local repair mechanisms, all three baselines remain low JCR across both candidate-generation regimes.                    
+
+> Settings Method Acc. (%) JCR (%) Progressive Refinement Dense Prefill 44.44 100.00
+> EPIC 51.63 28.10
+> CacheClip 48.37 32.68
+> SamKV 45.75 30.06
+> Parallel Exploration Dense Prefill 51.63 100.00
+> EPIC 49.02 33.33
+> CacheClip 47.71 34.21
+> SamKV 50.98 28.76
+
+making invariant selection increasingly fragile. 
+
+Scaling model size improves Acc but does not re-liably restore JCR. We evaluate different model families and sizes (Figure 4c). While larger models tend to improve Acc , JCR does not show a cor-responding improvement and remains unstable under reuse. This indicates that judge inconsistency is not merely a capacity issue; rather, it reflects sen-sitivity to interaction patterns that current reuse schemes fail to preserve. 
+
+Additional related baselines also fail to restore judge-side invariance. We further adapt three representative KV cache reuse baselines originally proposed for Retrieval Augmented Generation (RAG)—EPIC (Hu et al., 2025), CacheClip (Yang et al., 2025a), and SamKV (Cao et al., 2026)—to our judge-side setting. Table 3 reports their re-sults on MMLU under the representative shuffle 
+
+setting used in this subsection. Although these methods introduce local repair mechanisms, their JCR remains far below dense prefill across both Progressive Refinement and Parallel Exploration, with the best JCR reaching only 34.21. A plausi-ble explanation is that chunk-wise token selection, sparse candidate views, or partial recomputation tends to preserve problem-solving salience within each candidate, but may still miss the fine-grained comparative cues that determine which candidate wins under cross-candidate judging. Full imple-mentation details and complete results on GSM8K and HumanEval are reported in Appendix A.6. 
+
+7 Discussion and Future Directions 
+
+Our study highlights a judge-centric failure mode of KV cache reuse: when a judge must jointly 
+
+compare multiple candidate blocks, reuse can sub-5% 10% 25% 50% 75% 
+
+> Top-k% Tokens
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Jaccard Similarity
+> Median
+> Mean
+
+Figure 5: Jaccard similarity of selected Top-k% tokens between the small and large models. 
+
+stantially alter the selected candidate (low JCR), especially under unstable layouts such as shuffle .Together with attention diagnostics and the mask-ing ablation, the evidence points to a central mech-anism: judge-centric inference relies on fine-grained cross-candidate interactions that cur-rent reuse schemes do not reliably preserve .A straightforward workaround is to always run dense prefill for the judge while keeping reuse for other components (e.g., execution agents or retrieval modules). However, this can substantially increase end-to-end latency, undermining the origi-nal systems objective of KV cache reuse: balancing behavior preservation and efficiency. We therefore do not view this as a satisfying solution. Instead, we discuss two preliminary directions suggested by the mechanism above. Rather than presenting complete solutions, we use them as initial evidence for how future judge-centric systems might better balance efficiency and decision invariance. 
+
+From the perspective of interaction-preserving reuse. A promising direction is to enhance judge-side reuse by selectively retaining interaction-relevant context. Removing low-salience tokens (e.g., redundant rationales) may mitigate attention dilution (Shi et al., 2023), helping the judge focus on informative evidence across candidates. Cru-cially, this aims to concentrate rather than restrict cross-candidate visibility. In a pilot analysis, we find substantial overlap in token selections between Llama-3.2-1B and 3B models, with Jaccard similar-ity increasing alongside the retention budget (Fig-ure 5). This suggests that small-to-large model co-operation (Zhao et al., 2025; Liu et al., 2025) could help identify judge-relevant tokens. However, fully restoring judge invariance likely requires more so-phisticated, interaction-aware objectives beyond simple token-level overlap. We further conduct a pilot experiment along this direction. We identify interaction-critical to-7212 Table 4: Pilot results for Direction (i) (interaction-aware selective recomputation) on the representative shuffled MMLU setting.                  
+
+> Method Original +Dir. (i) Acc. (%) JCR (%) Acc. (%) JCR (%) Naïve Reuse 39.87 27.45 37.90 28.76
+> KVCOMM 39.87 39.87 41.83 47.05
+> PAL-KV 47.06 31.37 51.63 45.75
+
+kens globally over the full judge input using the same model, rather than selecting tokens separately within each chunk using an auxiliary model (Cao et al., 2026). As shown in Table 4, this Direction (i) intervention improves both Acc. and JCR over the original methods, but the gains remain limited and come with extra latency. These results suggest that even when token selection is performed globally without prioritizing efficiency, restoring judge-side invariance remains difficult: the key challenge lies in recovering the interaction structure that emerges over the full multi-candidate context. 
+
+Future Direction (i) : Interaction-preserving reuse via selective context retention. 
+
+From the perspective of meta-reasoning for risk-aware gating. Given the judge’s sensitivity to KV reuse, a promising direction is to apply meta-reasoning —deciding which inference strategy to employ based on the specific situation (Yan et al., 2025). While proactive segment prediction is ef-fective in standard KV systems (Pan et al., 2025), judge-centric reuse requires conservative gating with reliable fallbacks. Rather than predicting the success of a specific strategy (AUC ≈ 0.6), a more robust meta-goal is to identify instances that are 
+
+universally safe for reuse (i.e., unlikely to alter the judge’s selection across all three reuse meth-ods studied here). Using features derived from the candidate set—such as correctness signals and pairwise similarities—a simple classifier can dis-tinguish “universally safe” vs. “unsafe” instances with an AUC of 0.82 (Figure 6). This suggests that future gating mechanisms should prioritize conser-vative safety detection over fine-grained strategy selection to ensure decision invariance. We also test this direction with a pilot risk-aware gating policy using the proposed safe-instance clas-sifier. As shown in Table 5, Direction (ii) yields a much clearer JCR improvement, but only at the cost of a sharply reduced reuse rate, in some cases 0.0 0.2 0.4 0.6 0.8 1.0      
+
+> False Positive Rate
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> True Positive Rate
+> AUC = 0.82
+> Random
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Recall
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> 1.0
+> Precision
+> AP = 0.77
+> Base = 0.50
+
+Figure 6: Detecting universally safe vs. unsafe instances for judge-side reuse (AUC ≈ 0.82 , AP ≈ 0.77 ). Table 5: Pilot results for Direction (ii) (risk-aware gat-ing) on the representative shuffled MMLU setting.                  
+
+> Method Original +Dir. (ii) JCR (%) Reuse (%) JCR (%) Reuse (%) Naïve Reuse 27.45 100.00 85.62 16.99
+> KVCOMM 39.87 32.29 88.88 5.07
+> PAL-KV 31.37 32.29 87.58 5.07
+
+approaching dense-prefill usage in practice. This trade-off indicates that conservative gating can re-cover decision invariance more effectively than lo-cal repair alone, but does so by sacrificing much of the efficiency benefit that motivates reuse in the first place. 
+
+Future Direction (ii) : Meta-reasoning and risk-aware fallback gating for judge-side reuse. 
+
+Outlook. Overall, our pilot results suggest that mitigation is possible but non-trivial: interaction restoration improves invariance only partially and introduces additional cost, while conservative gat-ing improves invariance by sacrificing reuse. Accel-erating judge-centric inference will therefore likely require more careful judge-aware designs that ex-plicitly preserve cross-candidate interactions under variable layouts, potentially combining interaction-aware reuse, selective retention/compression, and principled fallback policies. 
+
+8 Conclusion 
+
+Our results reveal that KV reuse in judge-centric tasks is not inherently behavior-preserving. While task accuracy remains stable, JCR exposes a criti-cal decoupling: judges frequently switch selections due to disrupted cross-candidate interactions, espe-cially under variable layouts. These findings estab-lish JCR as a vital diagnostic and motivate future research into interaction-preserving and risk-aware KV acceleration. 7213 Limitations 
+
+Judge biases and reliability are not the focus. 
+
+LLM-based judges are known to exhibit intrinsic biases and instability (e.g., position preference and sensitivity to formatting). This work does not aim to assess the judge’s absolute fairness, calibration, or stability, nor do we analyze whether KV reuse amplifies specific biases of LLM judges. Instead, we focus on a narrower question: whether judge-side KV reuse is behavior-preserving relative to dense prefill in multi-candidate joint judging, i.e., whether reuse introduces decision non-invariance even when task accuracy appears stable. 
+
+Scope of reuse and system coverage. Our study focuses on judge-centric KV reuse—reusing KV chunks of candidate blocks when constructing the judge’s prefill cache—and uses dense prefill as the reference behavior. We do not claim comprehen-sive end-to-end optimization for all components of a full multi-agent stack, nor do we report system-wide latency/throughput under different serving configurations. Consequently, our reported Reuse Rate and analyses are intentionally centered on the judge stage rather than end-to-end efficiency. 
+
+Protocol and prompt dependence. Our find-ings are obtained under a specific judging protocol (joint multi-candidate selection with structured out-puts) and candidate-generation settings (few-shot prompting and chain-of-thought style rationales). Different judge prompts (e.g., pairwise ranking vs. joint selection), output constraints (selection-only vs. judge rewriting), or candidate formatting may change the sensitivity profile. While we expect the core phenomenon—that joint judging relies on delicate cross-candidate interactions—to persist, quantitative results may vary with protocol choices. 
+
+Limited cross-model and cross-architecture reuse. We do not systematically evaluate judge-centric KV reuse across heterogeneous model fam-ilies, sizes, or architectures (e.g., a stronger judge supervising weaker generators, or mixed-family agent systems). Recent work has begun to explore cross-model KV communication or sharing beyond same-backbone variants (Fu et al., 2026; Liu et al., 2026; Li et al., 2025a), but these methods target multi-model communication or model-sharing set-tings rather than judge-centric multi-candidate com-parison. Extending judge-side reuse to heteroge-neous model mixtures, and understanding whether reuse remains behavior-preserving in such settings, remains an important direction for future work. 
+
+Model scale and architecture coverage. Al-though we extend our evaluation to larger dense models, we do not claim that the magnitude of decision non-invariance will transfer unchanged to larger frontier-scale models or to Mixture-of-Experts (MoE) architectures. In particular, MoE in-ference introduces additional complexity in routing and cache management. Evaluating judge-centric KV reuse under larger-scale and MoE settings re-mains important future work. 
+
+Implementation stack and deployment variabil-ity. All experiments are conducted under an open-source inference stack (HuggingFace Transform-ers 2) on a fixed GPU setup. Different kernels, serv-ing systems, attention implementations, or cache-management policies could affect absolute accu-racy and the magnitude of reuse-induced pertur-bations. We encourage validation under diverse deployment stacks. 
+
+Downstream safety and compute considerations. 
+
+Our study highlights a failure mode where accu-racy may mask decision instability; in high-stakes downstream workflows, such non-invariance can complicate accountability and auditing. We do not provide application-specific deployment guidelines, and practitioners should perform domain-specific evaluation and safeguards. Finally, while KV reuse is motivated by reducing redundant computation, we do not quantify end-to-end energy impacts; ef-ficiency gains may be offset by increased scale of deployment. 
+
+Acknowledgments 
+
+We would like to thank the anonymous reviewers for their valuable comments and constructive sug-gestions. This work was supported by the National Natural Science Foundation of China (62176053). 
+
+References  
+
+> Maciej Besta, Nils Blach, Ales Kubicek, Robert Gersten-berger, Michal Podstawski, Lukas Gianinazzi, Joanna Gajda, Tomasz Lehmann, Hubert Niewiadomski, Pi-otr Nyczyk, and 1 others. 2024. Graph of thoughts: Solving elaborate problems with large language mod-els. In Proceedings of the AAAI conference on artifi-cial intelligence , volume 38, pages 17682–17690.
+> 2https://huggingface.co/docs/transformers
+
+7214 Cameron B Browne, Edward Powley, Daniel White-house, Simon M Lucas, Peter I Cowling, Philipp Rohlfshagen, Stephen Tavener, Diego Perez, Spyri-don Samothrakis, and Simon Colton. 2012. A survey of monte carlo tree search methods. IEEE Transac-tions on Computational Intelligence and AI in games ,4(1):1–43. Ziyi Cao, Qingyi Si, Jingbin Zhang, and Bingquan Liu. 2026. Sparse attention across multiple-context kv cache. In Proceedings of the AAAI Conference on Ar-tificial Intelligence , volume 40, pages 30165–30173. Mark Chen. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Weize Chen, Yusheng Su, Jingwei Zuo, Cheng Yang, Chenfei Yuan, Chi-Min Chan, Heyang Yu, Yaxi Lu, Yi-Hsin Hung, Chen Qian, Yujia Qin, Xin Cong, Ruobing Xie, Zhiyuan Liu, Maosong Sun, and Jie Zhou. 2024. Agentverse: Facilitating multi-agent collaboration and exploring emergent behaviors. In 
+
+The Twelfth International Conference on Learning Representations .Anne K Churchland, Roozbeh Kiani, and Michael N Shadlen. 2008. Decision-making with multiple alter-natives. Nature neuroscience , 11(6):693–702. Karl Cobbe, Vineet Kosaraju, Mohammad Bavarian, Mark Chen, Heewoo Jun, Lukasz Kaiser, Matthias Plappert, Jerry Tworek, Jacob Hilton, Reiichiro Nakano, and 1 others. 2021. Training verifiers to solve math word problems. arXiv preprint arXiv:2110.14168 .Adam Fourney, Gagan Bansal, Hussein Mozannar, Cheng Tan, Eduardo Salinas, Friederike Niedtner, Grace Proebsting, Griffin Bassman, Jack Gerrits, Ja-cob Alber, and 1 others. 2024. Magentic-one: A generalist multi-agent system for solving complex tasks. arXiv preprint arXiv:2411.04468 .Tianyu Fu, Zihan Min, Hanling Zhang, Jichao Yan, Guo-hao Dai, Wanli Ouyang, and Yu Wang. 2026. Cache-to-cache: Direct semantic communication between large language models. In The Fourteenth Interna-tional Conference on Learning Representations .Ariel Gera, Odellia Boni, Yotam Perlitz, Roy Bar-Haim, Lilach Eden, and Asaf Yehudai. 2025. JuStRank: Benchmarking LLM judges for system ranking. In 
+
+Proceedings of the 63rd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 682–712, Vienna, Austria. As-sociation for Computational Linguistics. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, and 1 others. 2024. The llama 3 herd of models. arXiv preprint arXiv:2407.21783 .Lin Gui, Cristina Gârbacea, and Victor Veitch. 2024. Bonbon alignment for large language models and the sweetness of best-of-n sampling. Advances in Neural Information Processing Systems , 37:2851–2885. Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. 2021. Measuring massive multitask language under-standing. In International Conference on Learning Representations .Sirui Hong, Mingchen Zhuge, Jonathan Chen, Xiawu Zheng, Yuheng Cheng, Jinlin Wang, Ceyao Zhang, Zili Wang, Steven Ka Shing Yau, Zijuan Lin, Liyang Zhou, Chenyu Ran, Lingfeng Xiao, Chenglin Wu, and Jürgen Schmidhuber. 2024. MetaGPT: Meta pro-gramming for a multi-agent collaborative framework. In The Twelfth International Conference on Learning Representations .Junhao Hu, Wenrui Huang, Weidong Wang, Haoyi Wang, Tiancheng Hu, Zhang Qin, Hao Feng, Xusheng Chen, Yizhou Shan, and Tao Xie. 2025. Epic: Efficient position-independent caching for serv-ing large language models. In International Con-ference on Machine Learning , pages 24391–24402. PMLR. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th symposium on operating systems principles , pages 611–626. Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In International Conference on Machine Learning , pages 19274–19286. PMLR. Borui Li, Yitao Wang, Haoran Ma, Ligeng Chen, Jun Xiao, and Shuai Wang. 2025a. MobiLoRA: Accel-erating LoRA-based LLM inference on mobile de-vices via context-aware KV cache optimization. In 
+
+Proceedings of the 63rd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 23400–23410, Vienna, Austria. Association for Computational Linguistics. Dawei Li, Bohan Jiang, Liangjie Huang, Alimohammad Beigi, Chengshuai Zhao, Zhen Tan, Amrita Bhat-tacharjee, Yuxuan Jiang, Canyu Chen, Tianhao Wu, Kai Shu, Lu Cheng, and Huan Liu. 2025b. From gen-eration to judgment: Opportunities and challenges of LLM-as-a-judge. In Proceedings of the 2025 Con-ference on Empirical Methods in Natural Language Processing , pages 2757–2791, Suzhou, China. Asso-ciation for Computational Linguistics. Guohao Li, Hasan Hammoud, Hani Itani, Dmitrii Khizbullin, and Bernard Ghanem. 2023. Camel: Communicative agents for" mind" exploration of large language model society. Advances in Neural Information Processing Systems , 36:51991–52008. Haitao Li, Qian Dong, Junjie Chen, Huixue Su, Yu-jia Zhou, Qingyao Ai, Ziyi Ye, and Yiqun Liu. 2024a. Llms-as-judges: a comprehensive survey on llm-based evaluation methods. arXiv preprint arXiv:2412.05579 .7215 Yiwei Li, Ji Zhang, Shaoxiong Feng, Peiwen Yuan, Xinglin Wang, Jiayi Shi, Yueqi Zhang, Chuyi Tan, Boyuan Pan, Yao Hu, and Kan Li. 2025c. Revis-iting self-consistency from dynamic distributional alignment perspective on answer aggregation. In 
+
+Findings of the Association for Computational Lin-guistics: ACL 2025 , pages 25208–25223, Vienna, Austria. Association for Computational Linguistics. Zongjie Li, Chaozheng Wang, Pingchuan Ma, Daoyuan Wu, Shuai Wang, Cuiyun Gao, and Yang Liu. 2024b. Split and merge: Aligning position biases in LLM-based evaluators. In Proceedings of the 2024 Confer-ence on Empirical Methods in Natural Language Pro-cessing , pages 11084–11108, Miami, Florida, USA. Association for Computational Linguistics. Jingyu Liu, Beidi Chen, and Ce Zhang. 2025. Specu-lative prefill: Turbocharging TTFT with lightweight and training-free token importance estimation. In 
+
+Forty-second International Conference on Machine Learning .Yuhan Liu, Yuyang Huang, Jiayi Yao, Zhuohan Gu, Kuntai Du, Hanchen Li, Yihua Cheng, Junchen Jiang, Shan Lu, Madan Musuvathi, and Esha Choukse. 2026. Droidspeak: Efficient context sharing for multiple-llm inference. In NSDI .Songshuo Lu, Hua Wang, Yutian Rong, Zhi Chen, and Yaohua Tang. 2025. TurboRAG: Accelerating retrieval-augmented generation with precomputed KV caches for chunked text. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 6599–6612, Suzhou, China. Association for Computational Linguistics. AI Meta. 2024. Llama 3.2: Revolutionizing edge ai and vision with open, customizable models. Meta AI Blog. Retrieved December , 20:2024. Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, and 1 others. 2022. Training language models to follow in-structions with human feedback. Advances in neural information processing systems , 35:27730–27744. Zaifeng Pan, AJJKUMAR PATEL, Yipeng Shen, Zhengding Hu, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Ef-ficient prefix caching for accelerating LLM-based multi-agent workflows. In The Thirty-ninth Annual Conference on Neural Information Processing Sys-tems .Rafael Rafailov, Archit Sharma, Eric Mitchell, Christo-pher D Manning, Stefano Ermon, and Chelsea Finn. 2023. Direct preference optimization: Your language model is secretly a reward model. Advances in neural information processing systems , 36:53728–53741. Ravi Shanker Raju, Swayambhoo Jain, Bo Li, Jonathan Lingjie Li, and Urmish Thakker. 2024. Con-structing domain-specific evaluation sets for LLM-as-a-judge. In Proceedings of the 1st Workshop on Customizable NLP: Progress and Challenges in Cus-tomizing NLP for a Domain, Application, Group, or Individual (CustomNLP4U) , pages 167–181, Miami, Florida, USA. Association for Computational Lin-guistics. Freda Shi, Xinyun Chen, Kanishka Misra, Nathan Scales, David Dohan, Ed H Chi, Nathanael Schärli, and Denny Zhou. 2023. Large language models can be easily distracted by irrelevant context. In Inter-national Conference on Machine Learning , pages 31210–31227. PMLR. David Silver, Aja Huang, Chris J Maddison, Arthur Guez, Laurent Sifre, George Van Den Driessche, Ju-lian Schrittwieser, Ioannis Antonoglou, Veda Pan-neershelvam, Marc Lanctot, and 1 others. 2016. Mas-tering the game of go with deep neural networks and tree search. nature , 529(7587):484–489. Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. Roformer: En-hanced transformer with rotary position embedding. 
+
+Neurocomputing , 568:127063. Hanshi Sun, Momin Haider, Ruiqi Zhang, Huitao Yang, Jiahao Qiu, Ming Yin, Mengdi Wang, Peter Bartlett, and Andrea Zanette. 2024. Fast best-of-n decoding via speculative rejection. Advances in Neural Infor-mation Processing Systems , 37:32630–32652. Hao Sun, Yunyi Shen, and Jean-Francois Ton. 2025. Re-thinking reward modeling in preference-based large language model alignment. In The Thirteenth Inter-national Conference on Learning Representations .Hieu Tran, Zonghai Yao, Zhichao Yang, Junda Wang, Yifan Zhang, Shuo Han, Feiyun Ouyang, and Hong Yu. 2025. RARE: Retrieval-augmented reasoning enhancement for large language models. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Pa-pers) , pages 18305–18330, Vienna, Austria. Associa-tion for Computational Linguistics. Xuezhi Wang, Jason Wei, Dale Schuurmans, Quoc V Le, Ed H. Chi, Sharan Narang, Aakanksha Chowdhery, and Denny Zhou. 2023. Self-consistency improves chain of thought reasoning in language models. In 
+
+The Eleventh International Conference on Learning Representations .Zhexuan Wang, Yutong Wang, Xuebo Liu, Liang Ding, Miao Zhang, Jie Liu, and Min Zhang. 2025. Agent-Dropout: Dynamic agent elimination for token-efficient and high-performance LLM-based multi-agent collaboration. In Proceedings of the 63rd An-nual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 24013– 24035, Vienna, Austria. Association for Computa-tional Linguistics. Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, 7216 Shaokun Zhang, Jiale Liu, and 1 others. 2024. Au-togen: Enabling next-gen llm applications via multi-agent conversations. In First Conference on Lan-guage Modeling .Qianqian Xie, Weiguang Han, Xiao Zhang, Yanzhao Lai, Min Peng, Alejandro Lopez-Lira, and Jimin Huang. 2023. Pixiu: a large language model, in-struction data and evaluation benchmark for finance. In Proceedings of the 37th International Conference on Neural Information Processing Systems , pages 33469–33484. Yiqing Xie, Sheng Zhang, Hao Cheng, Pengfei Liu, Ze-lalem Gero, Cliff Wong, Tristan Naumann, Hoifung Poon, and Carolyn Rose. 2024. DocLens: Multi-aspect fine-grained evaluation for medical text gen-eration. In Proceedings of the 62nd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 649–679, Bangkok, Thailand. Association for Computational Linguistics. Hanqi Yan, Linhai Zhang, Jiazheng Li, Zhenyi Shen, and Yulan He. 2025. Position: LLMs need a bayesian meta-reasoning framework for more robust and gen-eralizable reasoning. In Forty-second International Conference on Machine Learning Position Paper Track .An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Haoran Wei, and 1 others. 2024. Qwen2. 5 technical report. arXiv preprint arXiv:2412.15115 .Bin Yang, Qiuyu Leng, Jun Zeng, and Zhenhua Wu. 2025a. Cacheclip: Accelerating rag with effective kv cache reuse. arXiv preprint arXiv:2510.10129 .Huan Yang, Renji Zhang, Mingzhe Huang, Weijun Wang, Yin Tang, Yuanchun Li, Yunxin Liu, and Deyu Zhang. 2025b. Kvshare: An llm service system with efficient and effective multi-tenant kv cache reuse. 
+
+arXiv preprint arXiv:2503.16525 .Jingbo Yang, Bairu Hou, Wei Wei, Yujia Bao, and Shiyu Chang. 2025c. KVLink: Accelerating large language models via efficient KV cache reuse. In The Thirty-ninth Annual Conference on Neural Information Pro-cessing Systems .Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. Cacheblend: Fast large lan-guage model serving for rag with cached knowledge fusion. In Proceedings of the Twentieth European Conference on Computer Systems , EuroSys ’25, page 94–109, New York, NY, USA. Association for Com-puting Machinery. Shunyu Yao, Dian Yu, Jeffrey Zhao, Izhak Shafran, Tom Griffiths, Yuan Cao, and Karthik Narasimhan. 2023. Tree of thoughts: Deliberate problem solving with large language models. Advances in neural information processing systems , 36:11809–11822. Hancheng Ye, Zhengqi Gao, Mingyuan Ma, Qinsi Wang, Yuzhe Fu, Ming-Yu Chung, Yueqian Lin, and 1 others. 2025a. Kvcomm: Online cross-context kv-cache communication for efficient llm-based multi-agent systems. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .Ziyi Ye, Xiangsheng Li, Qiuchi Li, Qingyao Ai, Yujia Zhou, Wei Shen, Dong Yan, and Yiqun LIU. 2025b. Learning LLM-as-a-judge for preference alignment. In The Thirteenth International Conference on Learn-ing Representations .Guibin Zhang, Yanwei Yue, Zhixun Li, Sukwon Yun, Guancheng Wan, Kun Wang, Dawei Cheng, Jef-frey Xu Yu, and Tianlong Chen. 2025a. Cut the crap: An economical communication pipeline for LLM-based multi-agent systems. In The Thirteenth International Conference on Learning Representa-tions .Wentao Zhang, Ce Cui, Yilei Zhao, Yang Liu, and Bo An. 2025b. Agentorchestra: A hierarchical multi-agent framework for general-purpose task solving. 
+
+arXiv preprint arXiv:2506.12508 .Yaolun Zhang, Xiaogeng Liu, and Chaowei Xiao. 2025c. MetaAgent: Automatically constructing multi-agent systems based on finite state machines. In Pro-ceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 75667–75694. PMLR. Yi Zhao, Yajuan Peng, Nguyen Cam-Tu, Zuchao Li, Wang Xiaoliang, hai zhao, and Xiaoming Fu. 2025. SmallKV: Small model assisted compensation of KV cache compression for efficient LLM inference. In 
+
+The Thirty-ninth Annual Conference on Neural Infor-mation Processing Systems .Chujie Zheng, Hao Zhou, Fandong Meng, Jie Zhou, and Minlie Huang. 2024a. Large language models are not robust multiple choice selectors. In The Twelfth International Conference on Learning Representa-tions .Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Livia Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonza-lez, and 1 others. 2024b. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems , 37:62557– 62583. Mingchen Zhuge, Wenyi Wang, Louis Kirsch, Francesco Faccio, Dmitrii Khizbullin, and Jürgen Schmidhuber. 2024. Gptswarm: language agents as optimizable graphs. In Proceedings of the 41st In-ternational Conference on Machine Learning , pages 62743–62767. Jiaru Zou, Xiyuan Yang, Ruizhong Qiu, Gaotang Li, Katherine Tieu, Pan Lu, Ke Shen, Hanghang Tong, Yejin Choi, Jingrui He, and 1 others. 2025. Latent collaboration in multi-agent systems. arXiv preprint arXiv:2511.20639 .7217 A Additional Analyses and Extended Results 
+
+A.1 Naïve position-only reuse is brittle for judge-centric comparison 
+
+Naïve Reuse reuses all candidate blocks (Reuse%=100% by construction) via position alignment and stitching, without accounting for prefix-dependent deviations. While this can be effective for some standard prefix-sharing workloads, it is highly unstable for judge-centric inference: it often produces very low JCR and can even catastrophically harm accuracy on reasoning benchmarks (e.g., severe drops on GSM8K), indicating that position-only stitching fails to preserve the cross-candidate interaction patterns required for reliable joint comparison. 
+
+A.2 Judge Instability vs. Task Difficulty 
+
+This section provides additional evidence that low judge consistency (low JCR) is not merely a byproduct of task difficulty. Here we operational-ize task difficulty by ACC Counts : for each ex-ample, we count how many reuse-based methods (Naïve Reuse, KVCOMM, and PAL-KV) produce a correct final answer. We measure decision non-invariance by JCR Counts : the number of reuse-based methods whose selected candidate matches dense prefill (i.e., the per-method JCR indicator aggregated over the three reuse methods). 
+
+Embedding view. Figure 7 (left) visualizes ques-tion embeddings projected to 2D with a supervised t-SNE, where points are colored by JCR Counts. If judge non-invariance were primarily driven by question semantics (or by a small subset of intrinsi-cally “hard” questions), we would expect instances with low JCR Counts to form separable regions. Instead, instances with different JCR Counts are heavily intermixed, suggesting that decision non-invariance is not well explained by the question embedding geometry and is difficult to predict from semantics alone. 
+
+Difficulty–consistency relationship. Figure 7 (right) shows the empirical distribution of ACC Counts vs. JCR Counts. While one might ex-pect “easy” instances (high ACC Counts) to also yield stable judge selections (high JCR Counts), the heatmap shows only a weak association: even when multiple reuse methods answer correctly, the judge’s selected candidate can still differ from dense prefill (non-trivial mass at high ACC Counts but low JCR Counts). Conversely, low ACC Counts 10 5 0 5 10                
+
+> t-SNE Dimension 1
+> 10
+> 5
+> 0
+> 5
+> 10
+> t-SNE Dimension 2
+> JCR Counts
+> 0
+> 1
+> 2
+> 3
+> 0123
+> JCR Counts
+> 0
+> 1
+> 2
+> 3
+> ACC Counts
+> 0.37 0.37 0.22 0.04
+> 0.30 0.44 0.16 0.09
+> 0.35 0.30 0.28 0.07
+> 0.43 0.38 0.14 0.05
+> 0.05
+> 0.10
+> 0.15
+> 0.20
+> 0.25
+> 0.30
+> 0.35
+> 0.40
+> Probability
+
+Figure 7: Task difficulty vs. judge decision non-invariance. Left: t-SNE of question embeddings, col-ored by JCR Counts (number of reuse methods whose selection matches dense prefill). Right: joint distribu-tion between ACC Counts (number of reuse methods that answer correctly) and JCR Counts .Table 6: Effect of anchor pool size on performance (additional results).                             
+
+> Method AnchorNum Acc. (%) JCR (%) Reuse (%) KVCOMM 539.87 39.87 32.29 10 37.25 38.56 47.58 15 37.91 38.56 52.55 20 34.64 34.64 57.25 PAL-KV 547.06 31.37 32.29 10 35.29 37.91 47.58 15 43.14 35.29 52.55 20 34.64 37.25 57.25
+
+do not uniquely correspond to low JCR Counts ei-ther. Overall, these results indicate that task cor-rectness and decision invariance are partially decoupled in judge-centric inference, reinforcing the need for JCR-style diagnostics beyond end-task accuracy. 
+
+A.3 Anchor Pool Size and Effective Reuse 
+
+As showed in Table 6, we vary the anchor pool size to test whether insufficient anchor coverage explains low JCR under shuffle . As expected, a larger pool increases the effective Reuse Rate, but it does not reliably restore JCR. 
+
+A.4 Slot-Aligned Stabilization Baseline 
+
+We evaluate a slot-aligned variant that indexes reuse decisions by fixed candidate slots to test whether slot identity alone can stabilize reuse under 
+
+shuffle .One might hope that indexing offsets by fixed 
+
+slots in the judge prompt would stabilize reuse under shuffling. However, Table 7 shows no consis-tent gain from a slot-aligned variant. This suggests that true stability requires more than slot identity: for a candidate block, the entire preceding candi-date configuration (and thus the induced interaction structure) matters. Under shuffle , this configu-7218 Table 7: Slot-aligned stabilization does not reliably im-prove decision invariance (additional results). 
+
+Setting Method Acc. (%) JCR (%) Reuse (%) Progressive Refinement KVCOMM 39.87 39.87 32.29 Slot-Align 43.79 36.84 26.14 Parallel Exploration KVCOMM 43.14 46.41 44.84 Slot-Align 43.14 45.10 44.44 prefix 
+
+> slot1
+> slot2
+> slot3
+> slot4
+> h0
+> h1
+> h2
+> h3
+> h4
+> h5
+> h6
+> h7
+> h8
+> h9
+> h10
+> h11
+> h12
+> h13
+> h14
+> h15
+> h16
+> h17
+> h18
+> h19
+> h20
+> h21
+> h22
+> h23
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Attention Mass
+
+(a) Dense Prefill prefix  
+
+> slot1
+> slot2
+> slot3
+> slot4
+> h0
+> h1
+> h2
+> h3
+> h4
+> h5
+> h6
+> h7
+> h8
+> h9
+> h10
+> h11
+> h12
+> h13
+> h14
+> h15
+> h16
+> h17
+> h18
+> h19
+> h20
+> h21
+> h22
+> h23
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Attention Mass
+
+(b) Naïve Reuse prefix 
+
+> slot1
+> slot2
+> slot3
+> slot4
+> h0
+> h1
+> h2
+> h3
+> h4
+> h5
+> h6
+> h7
+> h8
+> h9
+> h10
+> h11
+> h12
+> h13
+> h14
+> h15
+> h16
+> h17
+> h18
+> h19
+> h20
+> h21
+> h22
+> h23
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Attention Mass
+
+(c) KVCOMM prefix  
+
+> slot1
+> slot2
+> slot3
+> slot4
+> h0
+> h1
+> h2
+> h3
+> h4
+> h5
+> h6
+> h7
+> h8
+> h9
+> h10
+> h11
+> h12
+> h13
+> h14
+> h15
+> h16
+> h17
+> h18
+> h19
+> h20
+> h21
+> h22
+> h23
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Attention Mass
+
+(d) PAL-KV 
+
+Figure 8: Attention mass visualization under different KV reuse strategies. 
+
+ration space scales combinatorially, making naive stabilization impractical. 
+
+A.5 Additional Attention Visualizations 
+
+This section provides additional attention visual-izations for representative examples under dense prefill and reuse-based methods, complementing the aggregate statistics reported in the main text. Figure 8 shows token-level attention mass over the shared prefix and candidate slots during the judge’s first-token generation. While the main text summa-rizes the average attention allocated to each region, here we present qualitative examples that illustrate how the attention patterns differ across methods. In dense prefill, the judge typically allocates non-trivial attention to multiple candidate blocks (e.g., 
+
+slot1 and slot3 in the shown example), which is consistent with the intended behavior of joint multi-candidate comparison. In contrast, Naïve Reuse often exhibits a highly concentrated pattern where attention collapses onto a single early slot (frequently slot1 ), suggesting that position-only stitching can distort cross-candidate interactions and effectively reduce the judge’s ability to incor-porate later evidence. KVCOMM and PAL-KV partially mitigate this collapse by restoring some attention to non-first slots; however, their attention distributions remain noticeably more peaked than dense prefill, indicating that the judge still under-attends to certain candidate blocks relative to the dense reference. Overall, these visualizations sup-port the interpretation that KV reuse can bias the judge toward a more shortcut decision process— selecting a “best” candidate with less thorough cross-candidate comparison—which helps explain the observed drops in JCR. 
+
+A.6 Additional Baselines 
+
+To further test whether local repair strategies can recover judge-side invariance, we implement three representative baselines in our judge-side setting: EPIC (Hu et al., 2025), CacheClip (Yang et al., 2025a), and SamKV (Cao et al., 2026). These methods were originally proposed for retrieval-augmented generation (RAG) or related approx-imate reuse scenarios rather than judge-centric multi-candidate comparison, and we adapt them here as additional related baselines. 
+
+EPIC. We implement a PIC-style repair variant that recomputes the first K=32 tokens of each can-didate chunk under the target judge-side left con-text, while reusing the remaining tokens through position-aligned stitching. Only candidate chunks are modified; the shared judge prefix and output tokens are always computed densely. 
+
+CacheClip. For CacheClip, we keep 20% of to-kens per candidate chunk, using window size 8 and threshold 5. Span salience is scored by an auxiliary 
+
+Llama-3.2-1B-Instruct model running on CPU. As in our main setting, CacheClip is applied only to candidate chunks rather than to the shared judge prefix. 
+
+SamKV. For SamKV, we use block size 64 ,keep ratio 20% , and fixed head/tail blocks, with maximum context length 2048 and max-imum query length 256 . The same auxiliary 
+
+Llama-3.2-1B-Instruct model on CPU is used to score blocks. Since SamKV presents the judge with a sparse view of each candidate, the judge cannot attend to the full candidate text directly. For HumanEval, we therefore compute Pass@1 as fol-lows: the judge first selects the best agent under the sparse view, and we then evaluate the original selected candidate code under the standard unit-test protocol. Tables 8 reports the complete results under the 
+
+shuffle judge setting for Progressive Refinement and Parallel Exploration, respectively. Across 7219 all three benchmarks, these baselines sometimes achieve competitive task accuracy, but their JCR remains far below dense prefill. This supports the same conclusion as in the main text: local repair strategies may preserve problem-solving salience, yet still fail to preserve the fine-grained compar-ative cues that determine which candidate wins under joint cross-candidate judging. 
+
+A.7 Consequentiality of JCR Mismatches 
+
+JCR measures whether reuse preserves the dense-prefill judge’s selection behavior under the same prompt and candidate ordering. To complement this behavioral metric with an outcome-aware view, we further stratify JCR mismatch cases by their consequentiality. Specifically, the following breakdown is com-puted only on mismatch cases (i.e., examples where the reuse-based method and dense prefill select dif-ferent candidates), so the four categories sum to 100% within each method and setting: • Harmful : dense prefill is correct, but the reuse-based method is wrong; • Helpful : dense prefill is wrong, but the reuse-based method is correct; • Benign : both are correct; • Joint-error : both are wrong. Figure 9 reports the results on MMLU under Progressive Refinement and Parallel Exploration. A notable fraction of mismatches fall into the joint-error category across methods and settings. This suggests that disagreement under KV reuse is not purely random, but is often associated with in-trinsically hard or ambiguous instances on which both pipelines tend to fail. At the same time, the presence of non-trivial harmful cases confirms that reuse-induced behavioral inconsistency can have direct performance consequences and is not fully explained by benign ties alone. 
+
+A.8 Reference Robustness of Dense Prefill 
+
+Dense prefill is not an oracle, and LLM-as-a-Judge is known to be sensitive to formatting and candidate ordering. Our use of JCR is therefore not intended to treat dense prefill as ground truth, but to measure a systems property: whether KV reuse preserves the behavior of the non-reuse judge under the same prompt and presentation. To better characterize the stability of dense-prefill judging, we conduct two complementary probes. First, under fixed candidate order, we ex-amine the probability of the selected agent-id token and the runner-up token as a proxy for decision con-fidence. As shown in Figure 10(a), dense-prefill decisions are reasonably separated on MMLU un-der both Progressive Refinement and Parallel Ex-ploration, suggesting that reuse-induced winner changes are not explained solely by near-tied dense-prefill decisions. Second, we evaluate order sensitivity by running dense-prefill judging across 10 random candidate orderings and measuring the majority share, de-fined as the frequency of the modal selection. Fig-ure 10(b) shows that dense-prefill judging is not perfectly order-invariant, but often retains a non-trivial majority preference across orderings. Based on this vote-style reference, we further compute JCR-Vote , i.e., agreement with the major-ity selection across orderings. Figure 10(c) shows that while single-run dense prefill is not perfectly aligned with the vote reference, reuse methods still exhibit a clear gap. These results support our inter-pretation of JCR as a behavioral consistency metric relative to the non-reuse judge, while also clarify-ing that dense prefill itself remains only a robust-ness reference rather than an absolute oracle. 
+
+A.9 Additional Attention Diagnostics 
+
+The main text analyzes attention patterns during the first selection token. Here we extend that anal-ysis in two ways: (i) from the first token to the full selection statement, and (ii) from region-level summaries to broader aggregations across heads and layers. We compute cross-candidate interaction strength averaged over the full selection statement (6 out-put tokens), and report all values after normalizing Dense Prefill to 1.0. As shown in Figure 11(a), the same qualitative pattern persists beyond the first token: under reuse, attention to later candidate slots remains strongly suppressed, and we do not observe a recovery trend in later output tokens. We further aggregate the same diagnostic across heads and across layers. Figures 11(b) and 11(c) show that the same method ordering and qualitative conclusion persist: reuse-based methods tend to over-concentrate attention on the shared prefix and early candidate slots while under-attending to later candidate blocks, especially under Naïve Reuse and PAL-KV. 7220 Settings Methods MMLU GSM8K HumanEval Acc. JCR Acc. JCR Acc. JCR Progressive Refinement Dense Prefill 44.44 100.00 70.51 100.00 31.68 100.00 EPIC 51.63 28.10 41.70 33.71 31.06 27.95 CacheClip 48.37 32.68 44.88 37.14 32.92 25.47 SamKV 45.75 30.06 49.05 34.80 29.19 25.47 Parallel Exploration Dense Prefill 51.63 100.00 70.28 100.00 25.63 100.00 EPIC 49.02 33.33 37.98 33.62 34.16 31.68 CacheClip 47.71 34.21 37.38 33.44 33.54 30.43 SamKV 50.98 28.76 52.92 37.07 31.67 27.32 
+
+Table 8: Additional related baselines under the shuffled judge setting. While EPIC, CacheClip, and SamKV sometimes achieve competitive task accuracy, all three remain far below dense prefill in JCR across benchmarks and candidate-generation regimes. Naive                    
+
+> Reuse
+> KVCOMM PAL-KV
+> 0%
+> 20%
+> 40%
+> 60%
+> 80%
+> 100%
+> Share within mismatch cases
+> (a) PR
+> 24.3 19.6 13.3
+> 18.0
+> 12.0 17.1
+> 21.6
+> 28.3 29.5
+> 36.0 40.2 40.0
+> Naive
+> Reuse
+> KVCOMM PAL-KV
+> (b) PE
+> 30.2 24.4 24.1
+> 12.1
+> 20.7 32.9 32.5
+> 37.1 34.1 34.9
+> Harmful Helpful Benign Joint-error
+
+Figure 9: Consequentiality of JCR mismatches on MMLU under Progressive Refinement (PR) and Parallel Exploration (PE). Each stacked bar is computed only on mismatch cases (i.e., cases where the reuse-based method and dense prefill select different candidates), and therefore sums to 100%. A substantial fraction of mismatches fall into the joint-error category, suggesting that disagreement under KV reuse is often associated with intrinsically hard or ambiguous instances. At the same time, the presence of non-trivial harmful cases confirms that reuse-induced inconsistency can also directly affect outcome quality. 
+
+Overall, these extended diagnostics reinforce the main-text interpretation that judge-side reuse per-turbs the fine-grained cross-candidate interactions required for stable joint comparison, rather than merely affecting the first output token in isolation. 
+
+B Case Study 
+
+Figures 18 and 19 provide a GSM8K case study under Parallel Exploration with shuffle or-dering, illustrating how judge selections can change relative to dense prefill. This case study illustrates decision non-invariance rather than answer degradation. Among the four candidates, Agents 1 and 4 provide es-sentially equivalent and correct solutions (both conclude $12 with near-identical reasoning steps), while Agents 2 and 3 make the same arithmetic mistake ($16). Under dense prefill, the judge se-lects Agent 1, whereas under KVCOMM it selects Agent 4, despite producing the same final answer. 
+
+Why this is still informative. Because mul-tiple candidates are correct and highly similar, the judge’s choice is driven by fine-grained cross-candidate comparison and implicit tie-breaking (e.g., how evidence from each block is integrated, which rationale is attended to, and how the judge maps candidate identities under a shuffled lay-out), rather than by correctness alone. This is pre-cisely the regime where we observe large drops in JCR: KV reuse can change which candidate the judge attributes as best even when task accuracy re-mains unchanged. In other words, the failure mode here is not “worse answers,” but unstable attribu-tion/selection relative to dense prefill, which un-dermines auditability and accountability in judge-centric pipelines. 7221 P(max) P(2nd) Margin                
+
+> 0.0
+> 0.2
+> 0.4
+> 0.6
+> 0.8
+> Probability / margin
+> (a) Fixed-order confidence probe
+> PR
+> PE
+> PR PE PR PE PR PE
+> 0%
+> 20%
+> 40%
+> 60%
+> 80%
+> 100%
+> Majority share
+> (b) Order-perturbation vote reference
+> MMLU GSM8K HumanEval
+> 0% 20% 40% 60% 80% 100%
+> Agreement
+> Dense
+> Prefill
+> Naive
+> Reuse
+> KVCOMM
+> PAL-KV
+> 100.0
+> 27.4
+> 39.9
+> 31.4
+> 48.4
+> 30.1
+> 31.4
+> 32.7
+> (c) MMLU-PR agreement
+> JCR
+> JCR-Vote
+
+Figure 10: Reference robustness of dense prefilling. (a) Fixed-order confidence probe on MMLU under Progressive Refinement (PR) and Parallel Exploration (PE), showing the probability of the selected agent-id token, the runner-up token, and their margin; error bars indicate the reported [p5, p 95] range. (b) Majority share of dense-prefill judging across 10 random candidate orderings on three datasets and two settings; error bars again indicate [p5, p 95] . (c) Agreement with the order-aggregated vote reference on MMLU-PR, reported as JCR-Vote. While dense prefill is not perfectly order-invariant, it remains closer to the vote reference than reuse-based methods, supporting its role as a behavioral reference rather than an absolute oracle. Prefix Slot 1 Slot 2 Slot 3 Slot 4              
+
+> 0.0
+> 0.5
+> 1.0
+> 1.5
+> 2.0
+> Relative interaction strength
+> (Dense Prefill = 1.0)
+> (a) Token-averaged over selection statement
+> Dense Prefill baseline
+> Prefix Slot 1 Slot 2 Slot 3 Slot 4
+> (b) Head-aggregated
+> Prefix Slot 1 Slot 2 Slot 3 Slot 4
+> (c) Layer-aggregated
+> Naive Reuse KVCOMM PAL-KV
+
+Figure 11: Additional attention diagnostics beyond the first-token analysis in the main text. All values are normalized by Dense Prefill (=1.0), shown as the dashed horizontal line. (a) Token-averaged interaction strength over the full selection statement. (b) Head-aggregated interaction strength. (c) Layer-aggregated interaction strength. Across all three views, the same qualitative pattern persists: reuse-based methods tend to over-concentrate attention on the shared prefix and early candidate slots while under-attending to later candidate blocks, reinforcing the interpretation that judge-side reuse disrupts the fine-grained cross-candidate interactions required for stable joint comparison. 
+
+C Reproducibility Details 
+
+C.1 Prompting Templates and Output Formats 
+
+This appendix summarizes the prompting templates used for both execution agents and the judge, as well as the structured output format required for reliable parsing of the final answer and the selected candidate index. 
+
+Execution-agent prompting. To ensure that candi-date responses are directly comparable (i.e., differ-ences arise from stochasticity or contextual varia-tion rather than mismatched roles), we use the same role prompt and instruction template for all execu-tion agents within each benchmark. Specifically, for MMLU we design a dedicated role prompt (MMLU Solver ) tailored to multiple-choice rea-soning in Figure 14; for GSM8K we reuse KV-COMM’s Math Solver role prompt in Figure 12; and for HumanEval we reuse the Programming Expert role prompt in Figure 13. All execution agents follow the same output schema and pro-duce (i) a final answer and (ii) an explicit rationale, which helps the judge compare candidates under a consistent format. 
+
+Judge prompting. For the judge agent, we adapt the base role prompt FinalInfer to a selection-oriented variant FinalSelectBest in Figure 16, 15 and 17. The judge is instructed to jointly (a) select the best candidate by outputting its index and (b) produce the final answer, while keeping the selection decision, final answer, and justification in separate structured fields . This design aligns with our JCR evaluation, which focuses on whether KV reuse changes the judge’s selected candidate relative to dense prefill. 
+
+C.2 Implementation Details of KVCOMM and PAL-KV 
+
+We provide additional implementation details for KVCOMM and PAL-KV beyond the main text, in-cluding anchor construction, matching views, cor-7222 rection retrieval, and fallback criteria. 
+
+Our main-paper description is simplified. In the main paper, we describe KVCOMM-style reuse as retrieving the nearest anchor and applying its cache offset . This is a simplified view used for ex-position. In the original KVCOMM design, reuse is gated by a shareability criterion (a thresholded decision), and the offset is typically predicted by 
+
+interpolating multiple anchors rather than always using a single nearest one. 
+
+Reuse gating (thresholded decision). KV-COMM maintains an anchor pool for each place-holder segment. For an incoming placeholder 
+
+ϕ, KVCOMM first decides whether it is share-able by checking (i) length compatibility and (ii) embedding-based proximity to existing anchors. Concretely, the anchor prediction uses a threshold 
+
+γ to determine whether the matched anchors are sufficiently concentrated in embedding space; if the criterion is not satisfied, KVCOMM falls back to dense prefilling and treats the new sample as a new anchor to expand future coverage. This “reuse-or-fallback” logic is part of KVCOMM’s standard online procedure. 
+
+Offset approximation (weighted aggregation). 
+
+When ϕ is predicted shareable, KVCOMM re-trieves a set of matched anchors and estimates the KV offset by a weighted sum of their stored de-viations. In particular, the weights are computed by a softmax over negative embedding distances, so closer anchors contribute more. The approx-imated placeholder cache is obtained by adding the weighted offset to the base cache; neighboring prefix segments are updated analogously. 
+
+No matched anchors ⇒ no reuse. If no an-chor satisfies the shareability criterion (e.g., no length-compatible / sufficiently close anchors), KV-COMM does not reuse KV for that placeholder. Instead it performs dense prefilling, measures the true deviation to the base cache, and stores it as a new anchor entry for future requests. 
+
+PAL-KV: a probe that keeps KVCOMM’s reuse rate unchanged. Our probe method PAL-KV is designed to analyze the effect of pooling/aggrega-tion while keeping the reuse rate identical to KV-COMM. Therefore, PAL-KV never changes KV-COMM’s reuse gating decision: we only activate PAL-KV’s “anchor-pooling” behavior when KV-COMM already decides the placeholder is share-able (i.e., would reuse) . In those reuse cases, instead of applying only a single nearest-anchor offset, PAL-KV explicitly pools a larger set of matched anchors (the same matched set used by KVCOMM’s interpolation, or an expanded top-K
+
+subset) and aggregates their offsets via the same distance-based weighting. In contrast, when KV-COMM falls back to dense prefilling, PAL-KV also falls back, so the frequency of reuse events is preserved by construction. 
+
+C.3 Shuffle Setting and Motivation 
+
+A potential concern is that the shuffle setting may appear artificial. In practice, however, non-fixed candidate ordering is common in judge-centric multi-agent pipelines. First, many MAS deploy-ments use dynamic and non-canonical communica-tion graphs (e.g., varying groupings, asynchronous message passing, or early-stopping/anytime behav-iors), which induces variability in when each can-didate becomes available. To reduce end-to-end la-tency, systems often stream candidates to the judge as soon as they are produced, rather than waiting to enforce a fixed global order; consequently, the pre-sentation order of candidate blocks can vary across runs. Second, the judge literature has repeatedly high-lighted position-related effects (e.g., position pref-erence / order bias), and it is therefore standard practice to evaluate robustness under alternative candidate permutations. Our shuffle regime serves as a controlled and reproducible proxy for these naturally occurring order variations and ro-bustness checks, enabling us to isolate how KV reuse behaves under layout instability. 
+
+C.4 Datasets Details 
+
+We follow KVCOMM’s dataset processing and evaluation protocol as closely as possible; for full preprocessing and prompting details, please refer to our released code. We evaluate on: (i) a fixed MMLU 3 validation subset of 153 questions sam-pled with seed=888 ; (ii) the full GSM8K 4 test set (1,319 problems); and (iii) the full HumanEval 5
+
+Python set (161 tasks). 
+
+> 3https://huggingface.co/datasets/cais/mmlu
+> 4https://huggingface.co/datasets/openai/gsm8k
+> 5https://huggingface.co/datasets/openai/ openai_humaneval
+
+7223 Figure 12: Math Solver Prompting Template. 
+
+Math Solver 
+
+You are a math expert. You will be given a math problem and hints from other agents. Give your own solving process step by step based on hints. The last line of your output contains only the final result without any units, for example: The answer is 140 You will be given some examples you may refer to. Q: Angelo and Melanie want to plan how many hours over the next week they should study together for their test next week. They have 2 chapters of their textbook to study and 4 worksheets to memorize. They figure out that they should dedicate 3 hours to each chapter of their textbook and 1.5 hours for each worksheet. If they plan to study no more than 4 hours each day, how many days should they plan to study total over the next week if they take a 10-minute break every hour, include 3 10-minute snack breaks each day, and 30 minutes for lunch each day?. A: Let’s think step by step. Angelo and Melanie think they should dedicate 3 hours to each of the 2 chapters, 3 hours x 2 chapters = 6 hours total. For the worksheets they plan to dedicate 1.5 hours for each worksheet, 1.5 hours x 4 worksheets = 6 hours total. Angelo and Melanie need to start with planning 12 hours to study, at 4 hours a day, 12 / 4 = 3 days. However, they need to include time for breaks and lunch. Every hour they want to include a 10-minute break, so 12 total hours x 10 minutes = 120 extra minutes for breaks. They also want to include 3 10-minute snack breaks, 3 x 10 minutes = 30 minutes. And they want to include 30 minutes for lunch each day, so 120 minutes for breaks + 30 minutes for snack breaks + 30 minutes for lunch = 180 minutes, or 180 / 60 minutes per hour = 3 extra hours. So Angelo and Melanie want to plan 12 hours to study + 3 hours of breaks = 15 hours total. They want to study no more than 4 hours each day, 15 hours / 4 hours each day = 3.75 They will need to plan to study 4 days to allow for all the time they need. The answer is 4 
+
+{QA_case_2_content} {QA_case_3_content} 
+
+Q: {user_question} 
+
+At the same time, the output of other agents is as follows: Agent 1, role is Math Solver, output is: 
+
+{agent_1_current} 
+
+Agent 2, role is Math Solver, output is: 
+
+{agent_2_current} 
+
+Agent 3, role is Math Solver, output is: 
+
+{agent_3_current} 7224 Figure 13: Programming Expert Prompting Template. 
+
+Programming Expert 
+
+You are a programming expert. You will be given a function signature and its docstring by the user. You may be able to get the output results of other agents. They may have passed internal tests, but they may not be completely correct. Write your full implementation (restate the function signature). Use a Python code block to write your response. For example: 
+
+``` python print( 'Hello world! ')
+
+``` 
+
+Do not include anything other than Python code blocks in your response. Do not change function names and input variable types in tasks. The task is: {user_question} 
+
+At the same time, the outputs and feedbacks of other agents are as follows: Agent 1 as a Programming Expert: The code written by the agent is: 
+
+{agent_1_current} 
+
+Agent 2 as a Programming Expert: The code written by the agent is: 
+
+{agent_2_current} 
+
+Agent 3 as a Programming Expert: The code written by the agent is: 
+
+{agent_3_current} 
+
+> Figure 14: MMLU Solver Prompting Template.
+
+MMLU Solver 
+
+Solve the MMLU multiple-choice question (A/B/C/D; only one is correct). Output: 1) First line: ONLY one letter (A, B, C, or D). 2) Then a short justification (total < 100 words). You may use other agents’ answers as references if provided, but verify independently. The Question is: 
+
+{user_question} 
+
+At the same time, the output of other agents is as follows: Agent 1 as a MMLU Solver: 
+
+{agent_1_current} 
+
+Agent 2 as a MMLU Solver: 
+
+{agent_2_current} 
+
+Agent 3 as a MMLU Solver: 
+
+{agent_3_current} 7225 Figure 15: FinalSelectBest for Math Prompting Template. 
+
+FinalSelectBest for Math 
+
+You are the top decision-maker and judge. You will be given a math problem and multiple candidate answers from different agents. Your job is to select which single agent produced the best answer. Selection criteria: - Consider BOTH final answer correctness AND reasoning quality. - If an answer happens to be correct but the reasoning is flawed/irrelevant, prefer the one with correct reasoning. - You MUST select exactly one agent id from the candidate list. Output format requirements (MUST follow exactly): 1) First line: Selected agent id: <id> (id must be one of: allowed) 2) Then write a short justification (any format is ok). 3) Last line: The answer is <number> The task is: {user_question} 
+
+Candidate Agent Answers: Agent 1, role is Math Solver, output is: 
+
+{agent_1_current} 
+
+Agent 2, role is Math Solver, output is: 
+
+{agent_2_current} 
+
+Agent 3, role is Math Solver, output is: 
+
+{agent_3_current} 
+
+Agent 4, role is Math Solver, output is: 
+
+{agent_4_current} 7226 Figure 16: FinalSelectBest for MMLU Prompting Template. 
+
+FinalSelectBest for MMLU 
+
+You are a judge that selects which agent produced the best multiple-choice answer. You will be given a question and candidate answers from different agents. Your job is to choose the best agent and output its id and final choice. Selection criteria: - Prefer the agent with the most correct, reliable reasoning. - If multiple agents choose the same option, prefer the one with better justification. Output format requirements (MUST follow exactly): 1) First line: Selected agent id: <id> (id must be one of: allowed) 2) Then write a short justification (any format is ok). 3) Final line: <choice> (must be exactly one of: A, B, C, D) 3) Do NOT output anything else. The task is: {user_question} 
+
+Candidate Agent Answers: Agent 1, role is MMLU Solver, output is: 
+
+{agent_1_current} 
+
+Agent 2, role is MMLU Solver, output is: 
+
+{agent_2_current} 
+
+Agent 3, role is MMLU Solver, output is: 
+
+{agent_3_current} 
+
+Agent 4, role is MMLU Solver, output is: 
+
+{agent_4_current} 7227 Figure 17: FinalSelectBest for Code Prompting Template. 
+
+FinalSelectBest for Code 
+
+You are a judge that selects the best agent answer. Evaluation Instructions: 1. Examine the question closely to understand its requirements. 2. Read each candidate answer thoroughly and assess its relevance and accuracy about the question. 3. Choose the answer that most accurately and completely addresses the question. 4. Ignore the candidate answers if they do not give a direct answer, for example, using ’unable to ...’, ’as an AI ...’. 5. Copy the chosen answer exactly as it is presented, maintaining its original format. 6. Adhere to the constraints: Output format: - First line: Selected agent id: <id> (choose <id> from: joined) - Then output exactly one Python code block copied from the chosen agent. - Do not add any explanation outside the code block. Note: If none of the answers fully meet the question’s criteria, select the one closest to fulfilling them. The task is: {user_question} 
+
+Candidate Answers for Evaluation: Agent 1, role is Programming Expert, output is: 
+
+{agent_1_current} 
+
+Agent 2, role is Programming Expert, output is: 
+
+{agent_2_current} 
+
+Agent 3, role is Programming Expert, output is: 
+
+{agent_3_current} 
+
+Agent 4, role is Programming Expert, output is: 
+
+{agent_4_current} 7228 Figure 18: Case Study: A GSM8K Example under Parallel Exploration, Shuffle Settings, Part 1 Candidate outputs. 
+
+Exemples 
+
+Question: John invited 20 people to a birthday party. Each guest will eat 2 hot dogs. He already has 4 hot dogs left over from a previous party. If a pack of hot dogs contains 6 hot dogs and costs $2, how much does he need to spend on hot dogs? Candidate Agent Answers: Agent 1: Let’s think step by step John invited 20 people to his birthday party, and each guest will eat 2 hot dogs. So, the total number of hot dogs needed is 20 people * 2 hot dogs/person = 40 hot dogs. John already has 4 hot dogs left over from a previous party, so he needs 40 hot dogs - 4 hot dogs = 36 hot dogs. Since a pack of hot dogs contains 6 hot dogs, John needs 36 hot dogs / 6 hot dogs/pack = 6 packs of hot dogs. Since each pack of hot dogs costs $2, John needs to spend 6 packs * $2/pack = $12 on hot dogs. The answer is 12 Agent 3: Let’s think step by step. First, we need to determine how many hot dogs John will need for the party. He invited 20 people, and each guest will eat 2 hot dogs, so 20 x 2 = 40 hot dogs. He already has 4 hot dogs left over, so he needs 40 + 4 = 44 hot dogs. Since a pack of hot dogs contains 6 hot dogs, we need to divide 44 by 6 to find out how many packs John needs to buy. 44 / 6 = 7.33, so John will need to buy 8 packs of hot dogs (since you can’t buy a fraction of a pack). Each pack costs $2, so 8 packs will cost 8 x 2 = $16. The answer is 16 Agent 2: Let’s think step by step. First, we need to determine how many hot dogs John will need for the party. He invited 20 people, and each guest will eat 2 hot dogs, so 20 x 2 = 40 hot dogs. John already has 4 hot dogs left over, so he needs 40 + 4 = 44 hot dogs. Since a pack of hot dogs contains 6 hot dogs, we need to divide 44 by 6 to find out how many packs John needs to buy. 44 / 6 = 7.33, so John will need to buy 8 packs of hot dogs (since you can’t buy a fraction of a pack). Each pack costs $2, so 8 x $2 = $16. The answer is 16 Agent 4: Let’s think step by step. First, we need to determine the total number of hot dogs needed for the party. There are 20 guests, and each guest will eat 2 hot dogs, so 20 x 2 = 40 hot dogs are needed. John already has 4 hot dogs left over, so he needs 40 - 4 = 36 hot dogs. Since a pack of hot dogs contains 6 hot dogs, John will need to buy 36 / 6 = 6 packs of hot dogs. Each pack of hot dogs costs $2, so John will need to spend 6 x 2 = $12 on hot dogs. The answer is 12 7229 Figure 19: Case Study: A GSM8K Example under Parallel Exploration, Shuffle Settings, Part 2 Judge outputs. 
+
+Exemples 
+
+Question: John invited 20 people to a birthday party. Each guest will eat 2 hot dogs. He already has 4 hot dogs left over from a previous party. If a pack of hot dogs contains 6 hot dogs and costs $2, how much does he need to spend on hot dogs? Dense Prefill Output: Selected agent id: 1 The selected agent provided a clear and step-by-step reasoning for the problem. Both the final answer and the reasoning are correct, but the reasoning is more concise and directly addresses the problem. The agent correctly calculates the number of hot dogs needed, subtracts the leftover hot dogs, and then divides the result by the number of hot dogs per pack to find the number of packs needed. The final answer is also correct, and the agent correctly multiplies the number of packs by the cost per pack to find the total cost. The answer is 12 KVCOMM Output: Selected agent id: 4 The selected agent provided a clear and step-by-step reasoning for the problem. The solution correctly computes the total hot dogs needed (20 guests × 2 each), accounts for the 4 hot dogs already available by subtracting them, and then converts the remaining requirement into packs by dividing by 6 hot dogs per pack. Finally, it multiplies the number of packs by the $2 cost per pack to get the total spending. The reasoning is well-structured, easy to follow, and the final answer is correct. The answer is 12 7230
