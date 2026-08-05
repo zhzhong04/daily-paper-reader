@@ -44,14 +44,14 @@
       <span class="dpr-home-dashboard-kicker">2026-07-27 ~ 2026-08-05</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 16 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 20 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>11</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-05 03:59:31 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-05 08:17:49 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日16篇论文，精读6篇，核心聚焦大模型KV缓存优化与管理。</p>
-<p>最值得关注的两篇高分解读：SemPIC用语义位置无关缓存突破传统位置限制，以及面向LLM Agents的在线KV缓存压缩实证研究。</p>
-<p>建议优先了解KV缓存压缩与恢复技术，这对长上下文和推理效率提升至关重要。</p>
+<p>本期精读20篇，聚焦大模型KV Cache优化，其中《SemPIC》与《Mixture-of-Translators》均获9.0高分，分别实现位置无关缓存与跨模型缓存翻译。速读中多租户前缀缓存、无线边缘缓存及代码库数据系统亦值得关注。建议优先精读两篇高分工作，再结合速读拓展缓存场景认知。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">9 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SemPIC: Learning Semantic Position-Independent KV Caches">SemPIC: Learning Semantic Position-Independent KV Caches</span></li><li><span class="dpr-home-dashboard-paper-title" title="Practical Online KV Cache Compaction for LLM Agents: An Empirical Study">Practical Online KV Cache Compaction for LLM Agents: An Empirical Study</span></li><li><span class="dpr-home-dashboard-paper-title" title="Augmented Backpressure for Decentralized Management of Agentic Networks">Augmented Backpressure for Decentralized Management of Agentic Networks</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SemPIC: Learning Semantic Position-Independent KV Caches">SemPIC: Learning Semantic Position-Independent KV Caches</span></li><li><span class="dpr-home-dashboard-paper-title" title="Mixture-of-Translators: Translating KV Caches Across Heterogeneous Large Language Models">Mixture-of-Translators: Translating KV Caches Across Heterogeneous Large Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Practical Online KV Cache Compaction for LLM Agents: An Empirical Study">Practical Online KV Cache Compaction for LLM Agents: An Empirical Study</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>4</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">10 篇</strong>
+    <strong class="dpr-home-dashboard-count">11 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RestoreKV: Recovering Full-Cache Behavior Under Aggressive Query-Agnostic KV Cache Eviction">RestoreKV: Recovering Full-Cache Behavior Under Aggressive Query-Agnostic KV Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="Preserving Admission Responsibility in Multi-Tenant Large Language Model Prefix Caches">Preserving Admission Responsibility in Multi-Tenant Large Language Model Prefix Caches</span></li><li><span class="dpr-home-dashboard-paper-title" title="CodeNib: A Multi-View Data System for Serving Repository Context to Coding Agents">CodeNib: A Multi-View Data System for Serving Repository Context to Coding Agents</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Preserving Admission Responsibility in Multi-Tenant Large Language Model Prefix Caches">Preserving Admission Responsibility in Multi-Tenant Large Language Model Prefix Caches</span></li><li><span class="dpr-home-dashboard-paper-title" title="CodeNib: A Multi-View Data System for Serving Repository Context to Coding Agents">CodeNib: A Multi-View Data System for Serving Repository Context to Coding Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Spatial Prefix Caching for Wireless Edge LLM Inference: A Stochastic-Geometry and Queueing Framework">Spatial Prefix Caching for Wireless Edge LLM Inference: A Stochastic-Geometry and Queueing Framework</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>9</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>9</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
 </section>
 </div>
 
