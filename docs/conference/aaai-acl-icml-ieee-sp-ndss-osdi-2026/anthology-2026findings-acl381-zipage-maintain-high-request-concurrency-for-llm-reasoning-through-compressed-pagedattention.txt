@@ -1,0 +1,2703 @@
+Title: 2026.findings-acl.381.pdf
+
+URL Source: https://aclanthology.org/2026.findings-acl.381.pdf
+
+Published Time: Thu, 11 Jun 2026 02:31:16 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+> Findings of the Association for Computational Linguistics: ACL 2026 , pages 7716–7737 July 2-7, 2026 ©2026 Association for Computational Linguistics
+
+Zipage: Maintain High Request Concurrency for LLM Reasoning through Compressed PagedAttention 
+
+Mengqi Liao 1,2 , Lu Wang 2, Chaoyun Zhang 2, Bo Qiao 2, Si Qin 2, Qingwei Lin 2,Saravan Rajmohan 2, Dongmei Zhang 2 & Huaiyu Wan 1,3,∗
+
+> 1
+
+School of Computer Science and Technology, Beijing Jiaotong University, China 
+
+> 2
+
+Microsoft 
+
+> 3
+
+Beijing Key Laboratory of Traffic Data Mining and Embodied Intelligence, China  
+
+> mqliao@bjtu.edu.cn, wlu@microsoft.com; ∗Correspondence : hywan@bjtu.edu.cn
+
+Abstract 
+
+With reasoning becoming the generative paradigm for large language models (LLMs), the memory bottleneck caused by KV cache during the decoding phase has become a crit-ical factor limiting high-concurrency service. Although existing KV cache eviction methods address the memory issue, most of them are im-practical for industrial-grade applications. This paper introduces Compressed PagedAttention, a method that combines token-wise KV cache eviction with PagedAttention. We propose a comprehensive scheduling strategy and support prefix caching and asynchronous compression for Compressed PagedAttention. Based on this, we have developed a high-concurrency LLM inference engine, Zipage. On large-scale mathematical reasoning tasks, Zipage achieves around 95% of the performance of Full KV inference engines while delivering over 2.1 ×
+
+speedup. 
+
+1 Introduction 
+
+With the advancement of large language models (LLMs), reasoning LLMs have garnered increasing attention from the community (Ke et al., 2025; Li et al., 2025). These models typically perform exten-sive reasoning before generating answers and have shown remarkable progress in complex domains like code and mathematics. However, as sequence length grows, the memory required for storing the KV cache increases significantly. The core bot-tleneck of LLM service systems has shifted from computation to having sufficient memory to sus-tain high-concurrency execution in long sequence scenarios. Existing KV cache eviction methods can reduce memory usage at the algorithmic level but face fun-damental mismatches at the system level. While some methods (Ghadia et al., 2025; Cai et al., 2025; Liao et al., 2025) achieve constant mem-ory usage during decoding, they lack support for advanced techniques like continuous batching and prefix caching, essential features in modern infer-ence engines such as vLLM 1 and SGLang 2. Conse-quently, their actual throughput is often lower than engines using a full KV cache. Other methods inte-grate KV cache eviction into inference engines but rely on coarse-grained page-wise eviction, risk-ing the loss of critical information and degrading performance (Hu et al., 2025; Chitty-Venkata et al., 2025). KV-Compress (Rehg, 2024), though em-ploying token-wise eviction, only supports input compression and disrupts the prefix cache , signif-icantly increasing prefilling costs. In this paper, we propose Compressed PagedAt-tention, a KV cache management approach that combines PagedAttention (Kwon et al., 2023) with 
+
+flexible token-wise KV cache eviction across lay-ers and attention heads . We implemented a high-concurrency inference engine, Zipage 3, based on Compressed PagedAttention, and developed effi-cient GPU kernels to optimize operations during the compression process. Zipage employs a com-prehensive request scheduling strategy designed for Compressed PagedAttention and is compat-ible with prefix caching , achieving significant throughput improvements in scenarios where many requests share the same prefix. It also implements 
+
+asynchronous compression and decoding to fur-ther enhance throughput. We evaluated models of various architectures and sizes on reasoning tasks, such as coding and mathematics. Zipage achieved significant through-put gains while maintaining performance close to a Full KV cache engine. Specifically, in mathemat-ical reasoning tasks, Zipage achieves over a 2.1 ×
+
+speedup while retaining approximately 95% of the performance of a Full KV cache engine. 
+
+> 1https://github.com/vllm-project/vllm
+> 2https://github.com/sgl-project/sglang
+> 3https://github.com/microsoft/Zipage
+
+7716 1 2 3 4 5 6 7 8 9 1                                    
+
+> 0
+> 1
+> 1
+> 1
+> 2
+> 1
+> 3
+> 1
+> 4
+> 1
+> 5
+> 1
+> 6
+> 1246781
+> 0
+> 1
+> 1
+> 1
+> 2
+> 1
+> 4
+> 1
+> 5
+> 1
+> 6
+> 1246781
+> 1
+> 1
+> 2
+> 1
+> 3
+> 1
+> 4
+> 1
+> 5
+> 1
+> 6
+> 1
+> 7
+> block a block b block c block d query
+> abcd
+> efgh
+> Request i
+> abcd
+> efgh
+> block table
+> block a block b block c block d query
+> After
+> Compression
+> iRequest j
+> (Max number of blocks = 4)
+> (Prefilling Sequence May Exceed
+> Maximum Length)
+> 1
+> 5
+> 1
+> 6
+> 1
+> 5
+> 1
+> 6
+> compute importance score
+> move based on score
+> Kept
+> cache
+> Evicted
+> cache
+> Observation
+> window
+> Query
+> cache
+
+Figure 1: Illustration of Compressed PagedAttention. Here, Nmax = 4 , b = 4 , w = 2 . The figure depicts two requests requiring compression. After compression, the kept KV cache entries are moved to the first three blocks, while the fourth block is reserved for subsequent decoding. The remaining blocks are released. 
+
+2 Related Work 
+
+Some methods reduce computational complexity and memory usage by evicting KV cache entries. For example, SnapKV (Li et al., 2024) calculates attention scores to decide which token’ KV cache to retain or evict, while PyramidInfer (Yang et al., 2024), PyramidKV (Cai et al., 2024), and Ada-KV (Feng et al., 2024) adjust budgets across heads or layers to improve performance. However, these methods focus on compressing input KV cache, while output KV cache dominates memory in rea-soning, limiting concurrency. Methods such as MorphKV (Ghadia et al., 2025), R-KV (Cai et al., 2025), and G-KV (Liao et al., 2025) perform KV cache eviction during the decod-ing process, ensuring that the KV cache for each request remains constant. Although these methods significantly improve concurrency, they are not in-tegrated with inference engines and thus cannot be practically applied. 
+
+3 Background 
+
+PagedAttention (Kwon et al., 2023) is an efficient method for managing the KV cache of Transformer (Vaswani et al., 2017) based LLMs. The LLM serving engine, vLLM, is built on PagedAttention. 
+
+Pre-allocated memory. vLLM pre-allocates GPU memory for the KV cache, denoted as 
+
+K, V ∈ RL×Ntotal ×b×hkv ×d. Here, L represents the number of layers of LLMs, Ntotal is the total number of blocks, b corresponds to the block size, 
+
+hkv denotes the number of attention heads, and d
+
+is the attention dimension. 
+
+KV cache management. vLLM partitions the sequence of each request according to the block size. The KV cache of each block is then written into free blocks in K and V. vLLM maintains a block table to record the blocks occupied by each request and their corresponding order. 
+
+Request scheduling. In vLLM, requests are cat-egorized into two states: waiting and running, and these states are managed using two separate queues. At each decoding step, if sufficient blocks are avail-able for prefilling, vLLM transfers requests from the front of the waiting queue to the running queue and performs prefilling. Otherwise, the requests in the running queue decode the next token. When the last block of a request is filled and new blocks cannot be allocated, the running requests preempt the blocks of the most recently added requests in the running queue. The preempted requests are then moved back to the front of the waiting queue. This scheduling process adheres to a first-come, first-served (FCFS) principle. 
+
+4 Method 
+
+In this work, we propose a novel KV cache man-agement method, Compressed PagedAttention, and develop an LLM serving engine, Zipage. 
+
+4.1 Compressed PagedAttention 
+
+To address the concurrency challenges, we intro-duce Compressed PagedAttention, a KV cache management method based on PagedAttention and KV cache eviction strategies. Compressed Page-dAttention builds upon PagedAttention by intro-ducing the following key features: • The number of blocks occupied by each re-quest is capped at Nmax , except during the 7717 prefilling phase, where the prefilling length may temporarily exceed this limit. • After each decoding step, if a request occupies 
+
+N blocks and satisfies N ≥ Nmax with the last block fully occupied, a compression oper-ation is triggered to evict less important KV cache entries and relocate the retained ones to the first Nmax − 1 blocks. The Nmax -th block is reserved for subsequent decoding, while the remaining blocks are released. Compressed PagedAttention ensures that the mem-ory usage of each request remains within a fixed maximum limit throughout the decoding process, thereby maintaining high concurrency. Figure 1 illustrates the KV cache management mechanism in Compressed PagedAttention. 
+
+4.2 The Compression Process Pipeline 
+
+In this section, we will further elaborate on the compression process. First, following SnapKV (Li et al., 2024) and MorphKV (Ghadia et al., 2025), we take the query states of the last w tokens in the final block of each request as observation win-dow . To accommodate these query states, we pre-allocate memory as Q ∈ RL×M ×w×hq ×d, where 
+
+M represents the maximum concurrency, hq is the number of attention heads. The maximum concur-rency M is subject to the following constraints: 
+
+
+
+mkv × Ntotal + M × mq ≤ mavailable ,M ≤ Ntotal 
+
+Nmax 
+
+,M > 0, Ntotal > 0,
+
+(1) where mavailable denotes the total available memory, 
+
+mkv represents the memory required for the KV cache of a block, and mq is the memory required to cache the query states of a request. This is a linear programming problem, and the maximum value of M is achieved when M = ⌊ mavailable  
+
+> mkv ×Nmax +mq
+
+⌋, at which point Ntotal = ⌊ mavailable  
+
+> mkv +mq/N max
+
+⌋.When compression is triggered, a scoring func-tion ϕ(Q, K, I) is employed to assign a score for the KV cache entries of requests that require com-pression. Here, I represents additional information, such as the block tables and query slots indexes for these requests. In its basic form , this scoring function involves computing attention scores be-tween the query states in Q and the key states in K.Furthermore, R-KV (Cai et al., 2025) introduces a redundancy score to evaluate the redundancy of the KV cache, while G-KV (Liao et al., 2025) in-corporates a global score to aggregate historical attention scores, providing a better assessment of long-term importance. We integrate these methods into our framework and implement kernel-level optimizations specifically tailored for the paged KV cache. Detailed algorithm and experimental results can be found in Appendices C.2, C.3 and C.5. After obtaining the final scores, we assign a score of +∞ to the entries within the observation window to ensure they are always retained. Subse-quently, the top-k KV cache entries with the high-est scores are retained, where k = ( Nmax − 1) × b,referred to as the KV cache budget. Compres-sion is then performed by reorganizing the retained KV cache entries such that their placement in K
+
+and V becomes compact and contiguous in a page. The full compression algorithm is described in Ap-pendix C.6. Additionally, although the raw redundancy score from R-KV significantly improves the performance, its computational complexity is O(N 2 × b2), be-coming the primary bottleneck in the compression process. To address this issue, we propose a novel 
+
+lightning redundancy score with a reduced com-putational complexity of O(N × b2), which not only significantly accelerates the compression but also achieves better performance than the raw re-dundancy score. Detailed descriptions and experi-ments are provided in Appendix C.7. 
+
+4.3 Hybrid Scheduling 
+
+To implement a LLM inference engine, a schedul-ing strategy tailored to Compressed PagedAttention is also crucial. For Compressed PagedAttention, each request requires the allocation of query slots for compression. The number of requests that can be allocated query slots is constrained by the max-imum concurrency M . The simplest scheduling strategy is to restrict the concurrency to no more than M . Since some requests may occupy more than Nmax blocks, it is possible for requests with fewer than Nmax blocks to become blocked when attempting to allocate new blocks, even if the con-currency does not exceed M . For requests occupy-ing more than Nmax blocks, no additional blocks need to be allocated, and the extra blocks are re-leased after the first compression. At this point, the blocked requests can resume decoding. This scheduling strategy, therefore, enables scheduling 
+
+without preemption , and we refer to it as con-7718 Waiting  Uncompressed       
+
+> Running Finished
+> Compressed
+> Running
+> Be preempted
+> Have enough blocks for
+> prefilling
+> 𝑁 ≥𝑁 max and be allocated
+> with query slots
+> Scheduling of vLLM
+> Introduced by Zipage
+
+Figure 2: State transition diagram of requests under hybrid scheduling. 
+
+strained scheduling .Although constrained scheduling is simple and avoids preemption, this strategy may lead to un-derutilization of KV cache blocks. When there are a large number of requests with short inputs, the number of blocks occupied by these requests is less than Nmax , resulting in significant block idleness due to the concurrency limit. This underutilization becomes more frequent in scenarios where only brief responses are required. To fully utilize these blocks and enhance concur-rency, we propose a hybrid scheduling strategy. Specifically, the rules of hybrid scheduling can be summarized as follows: • Only the first M requests in the running queue are eligible for query slots allocation. • Requests occupying fewer than Nmax blocks or with fewer than b − w tokens in the last block can decoding without being assigned query slots. Such requests from the waiting queue can be moved to the running queue for prefilling when sufficient blocks are available, even without query slot allocation. However, requests in the running queue without query slots will be blocked once they no longer meet these conditions. • When query slots are released, they are priori-tally allocated to the foremost requests in the running queue that lack assigned query slots. • If a request in the running queue attempts to allocate a new block but no free blocks are available, preemption is triggered. Priority is given to offloading the last request without as-signed query slots. Once all such requests are offloaded, the system reverts to constrained scheduling .Under the hybrid scheduling strategy, the maxi-mum concurrency is no longer constrained by M .a b c d e                                 
+
+> ghide
+> abcde
+> fgcde
+> abcde
+> hijkf
+> fg
+> 𝑁 max −1
+> f
+> 𝑁 𝑝𝑟𝑒𝑓𝑖𝑥 ≥𝑁 max −1
+> 𝑁 𝑝𝑟𝑒𝑓𝑖𝑥 <𝑁 max −1
+> Shared Blocks Newly Allocated
+> Blocks
+> Blocks to
+> Release
+> original
+> target
+> original
+> target
+> original
+> target
+
+Figure 3: Illustration of block allocation and release strategies for prefix cache. 
+
+The states of requests are illustrated in Figure 2. Requests that have already undergone compres-sion can continue to run without preemption until completion, while uncompressed requests may be subject to preemption. Although the preempted requests discussed in this section are limited to those without assigned query slots, this rule will change in §4.4, where all uncompressed requests, including those with assigned query slots, may be offloaded. 
+
+4.4 Shared Prefix Cache for Compressed PagedAttention 
+
+Shared prefix cache is a key technique in inference engines. When multiple requests have the same prefix, the KV cache of the prefix can be shared across these requests. This approach reduces both memory usage and the computational overhead of prefilling. In Compressed PagedAttention, the compression process will disrupt the shared prefix structure and different requests may retain different subsets of KV cache entries, making sharing infeasible. To resolve this, we modify the compression strategy: instead of rearranging KV cache entries within al-located blocks, compression is redirected to a set of target blocks, determined as follows: • Prefix caching is shared across requests at the block level. Each block tracks the number of requests referencing it. Blocks with a ref-erence count greater than 1 are considered shared. • If the number of shared blocks for a request, denoted as Nprefix , is greater than or equal to 
+
+Nmax − 1, we allocate Nmax − 1 new blocks as taget blocks. The KV cache of the request 7719 is then compressed into these newly allocated blocks. • If Nprefix < N max − 1, we allocate Nprefix 
+
+new blocks and reuses Nmax − 1 − Nprefix 
+
+blocks already allocated to the request. These combined blocks are used as the target blocks for compression. With this adjustment, shared prefixes are pre-served after compression. Figure 3 illustrates exam-ples of block tables before and after compression. As the compression is completed, the reference count for each shared block is decremented by 1. If the reference count drops to 1, the block is no longer considered a shared block. Finally, as discussed in §4.3, under constrained scheduling, requests that attempt to allocate new blocks without availability would simply be blocked without releasing any blocks. However, with shared prefixes, new blocks may need to be allocated before compression, meaning requests occupying more than Nmax blocks could also face blocking, potentially leading to deadlocks . To re-solve this, preemption must be applied when prefix sharing is enabled. In such cases, the last uncom-pressed request will be preempted. Although this may occasionally deviate from the first-come, first-served principle, it still prevents prolonged request starvation. 
+
+4.5 Asynchronous Decoding and Compression 
+
+The previous section introduced the core concepts of Zipage. Here, we evaluate Zipage’s performance on reasoning tasks. We measured the average time per step and its proportion of the total time spent on prefilling, decoding, and compression. As illus-trated in Figure 4, decoding dominates the overall time consumption in reasoning tasks, while com-pression accounts for about 10% of the total time. Additionally, the time required for each compres-sion step is approximately 40% − 70% of that for a decoding step. We also observe that requests requiring compres-sion constitute less than 1% of the total running requests during each compression operation. As-suming the prefilling length and entry time of each request into the running queue are random, the theoretical proportion of requests needing compres-sion at each step is approximately 1 
+
+> b
+
+of the total running requests (where the block size b is 256 in our experiments). Prefill    
+
+> Decode
+> Compress
+> 0
+> 20
+> 40
+> 60
+> Average Time (ms)  50.8 46.4
+> 33.0
+> Qwen3 0.6B
+> Prefill
+> Decode
+> Compress
+> 0
+> 20
+> 40
+> 60
+> Average Time (ms)  63.9 58.2
+> 25.1
+> Qwen3 8B
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> Ratio
+> 1.2%
+> 89.8%
+> 9.0%
+> 0.00
+> 0.25
+> 0.50
+> 0.75
+> 1.00
+> Ratio
+> 1.2%
+> 90.7%
+> 8.0%
+> Average Time for Each Step (ms) Ratio
+
+Figure 4: Average time per step and ratio during in-ference with Qwen3 0.6B and Qwen3 8B on AMC 23 under non-asynchronous compression settings. 
+
+This shows that only a small fraction of requests require compression in each step. If compression and decoding are executed sequentially, many re-quests that do not require compression will be un-necessarily delayed, waiting for the compression of a few requests to finish. Additionally, the small batch size of compression fails to fully utilize the GPU’s computational resources, significantly low-ering GPU efficiency. To resolve this, we enable asynchronous execu-tion of compression and decoding. Requests ready for decoding proceed without waiting for compres-sion to finish, while those requiring compression re-join subsequent decoding steps once asynchronous compression is complete. This design significantly improves GPU utilization and overall throughput. 
+
+5 Experiments 
+
+5.1 Experimental Setup 
+
+We conducted experiments using the Qwen3 se-ries models (0.6B, 8B, 14B, and 32B) (Yang et al., 2025) and DeepSeek-R1 Distill Llama 8B (referred to as DS Llama 8B) model (Guo et al., 2025). We adopt an offline inference manner for evaluation. Except for Qwen3 32B, which runs on 2 A100 GPUs using tensor parallelism, all other experi-ments are conducted on a single A100 GPU. The block size b was fixed at 256, and the window size 
+
+w was set to 16. We experimented with larger window sizes, the performance showed almost no difference or even worse, but the memory required to store the queries increased significantly. To evaluate efficiency, we use two metrics: time per output token (TPOT) and tokens per second (TPS). TPOT is calculated as the total time from the generation of the first token to the last token for a request, divided by the total number of tokens generated for that request. TPS is defined as the to-tal number of tokens generated across all requests, divided by the total time from the start of the first 7720 0           
+
+> 200
+> 400
+> 600
+> 800
+> TPOT (ms)
+> 347.45 393.55 349.81
+> 54.40
+> 832.62
+> AMC 23
+> 0
+> 50
+> 100
+> 150
+> 200
+> TPOT (ms)  164.50 178.01 163.55
+> 59.58
+> 184.99
+> Mixture of AMC 23 and GSM8K
+> 0
+> 50
+> 100
+> 150
+> 200
+> TPOT (ms)
+> 171.69 184.48 173.58
+> 144.84 139.27
+> LongBench
+> zipage w/o asynchronous w/o shared prefix w/o hybrid scheduling nano-vllm
+
+Figure 5: Comparison of average TPOT (ms) of all requests across different configurations on three workloads. 0 1 2 3 4             
+
+> 0
+> 1000
+> 2000
+> 3000
+> TPS (tokens/s)  2557.45
+> 2215.28
+> 2532.30 2486.86
+> 930.27
+> AMC 23
+> 01234
+> 0
+> 1000
+> 2000
+> 3000
+> TPS (tokens/s)  2467.98
+> 2085.28
+> 2533.34
+> 1701.87
+> 1429.75
+> Mixture of AMC 23 and GSM8K
+> 01234
+> 0
+> 200
+> 400
+> 600
+> 800
+> TPS (tokens/s)  665.82
+> 545.85
+> 421.06
+> 691.40
+> 596.12
+> LongBench
+> zipage w/o asynchronous w/o shared prefix w/o hybrid scheduling nano-vllm
+
+Figure 6: Comparison of TPS (tokens/s) across different configurations on three workloads. 
+
+request to the completion of the last. Model perfor-mance is assessed using pass@1 as the evaluation metric (Chen et al., 2021). Evaluation settings and benchmark details are provided in Appendix B. 
+
+5.2 Efficiency Analysis 
+
+To evaluate the efficiency of Zipage, we selected three distinct workload types. The first is the math-ematical benchmark AMC 23 4, characterized by short inputs and long outputs. GSM8K 5, by con-trast, is a simpler mathematical benchmark with both short inputs and short outputs. For mixed workloads, we combined AMC 23 and GSM8K. Lastly, we selected the MultiFieldQA task from LongBench (Bai et al., 2024) as a representative workload with long inputs and short outputs. The KV cache budget fixed at 2048. In addition to evaluations using Zipage, ablation studies were conducted on three techniques: asyn-chronous compression, hybrid scheduling, and pre-fix sharing. Furthermore, comparisons were made with Nano-vLLM 6, a lightweight implementation of PagedAttention. Figure 5 shows the TPOT of Qwen3 8B un-der different configurations. TPOT decreases sig-nificantly when hybrid scheduling is disabled, as requests are rarely preempted or blocked, allow-ing uninterrupted decoding until completion. In contrast, for Zipage with hybrid scheduling or Nano-vLLM, the re-queuing time after preemption 
+
+> 4
+
+https://huggingface.co/datasets/math-ai/amc23 
+
+> 5
+
+https://huggingface.co/datasets/openai/gsm8k 
+
+> 6
+
+https://github.com/GeeeekExplorer/nano-vllm 
+
+can dominate the overall request processing time. 
+
+Thus, the TPOT metric becomes less meaningful. Our subsequent analysis will focus primarily on the TPS metric. 
+
+Figure 6 shows the TPS of Qwen3 8B under var-ious configurations. Disabling asynchronous com-pression consistently lowers TPS across all work-loads, underscoring its acceleration benefits in all scenarios. Hybrid scheduling proves advantageous in mixed workloads dominated by short-input and short-output requests, as it improves concurrency. Prefix caching significantly speeds up LongBench due to the presence of long shared prefixes in this workload. Zipage outperforms Nano-vLLM in the TPS metric, with its advantage becoming more evident in scenarios requiring longer outputs. Ad-ditional details, including the number of running and waiting requests during inference and block utilization rates, are provided in Appendices D and E. Figure 7 (a) shows the real-time throughput dur-ing inference, calculated as the number of tokens decoded per step divided by the decoding time per step. Nano-vLLM exhibits periodic through-put fluctuations due to offloading requests as se-quences lengthen. When a long request completes, the offloaded requests rejoin the running queue, temporarily boosting throughput. In contrast, Zi-page maintains consistently high throughput, al-though asynchronous compression, which com-petes with decoding for GPU resources, introduces some fluctuations. Figure 7 (b) illustrates the time per step, while Figure 7 (c) compares the average 7721 0 2000 4000 6000 8000 10000 
+
+> Time (s)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> throughput (tokens/s)
+> Reasoning on AMC 23
+> zipage
+> nano-vllm
+
+(a) 0 2000 4000 6000 8000 10000  
+
+> Time (s)
+> 40
+> 60
+> 80
+> 100
+> 120
+> Time Per Decoding Step (ms)  Reasoning on AMC 23
+> zipage
+> nano-vllm
+
+(b) <50    
+
+> [50, 100)
+> [100, 150)
+> [150, 200)
+> [200,250)
+> >250
+> Concurrency Range
+> 0
+> 20
+> 40
+> 60
+> 80
+> Average Time per Step (ms)
+> 47.5
+> 60.6
+> 47.7
+> 61.7 58.9 62.4 57.6 62.9
+> 56.3
+> 63.6 65.5 67.4
+> zipage
+> nano-vllm
+
+(c) <50       
+
+> [50, 100)
+> [100, 150)
+> [150, 200)
+> [200,250)
+> >250
+> Concurrency Range
+> 0
+> 20
+> 40
+> 60
+> Ratio to Total Steps (%)
+> 11.2
+> 50.3
+> 4.4
+> 37.5 39.2
+> 8.0
+> 41.8
+> 2.6 1.4 0.6 2.0 1.0
+> zipage
+> nano-vllm
+
+(d) 
+
+Figure 7: The figure shows Qwen3 8B’s performance using Zipage or Nano-vLLM on AMC 23, including:(a) real-time throughput, (b) per-step real-time decoding time, (c) average per-step time at different concurrency range, (d) and the ratio of steps to total steps under different concurrency range. 
+
+execution time per step across different concur-rency ranges, showing that Zipage achieves shorter times at the same concurrency levels. Figure 7 (d) reveals the proportion of steps across various concurrency ranges, with Zipage primarily oper-ating within the high-concurrency range of [100, 200), whereas Nano-vLLM operates mostly below 100. Additional experimental details for models of different scales are provided in Appendix F. 
+
+5.3 Comparison with Other Frameworks 
+
+In this section, we compare Zipage with other text generation frameworks. The baselines include Hug-gingFace generation 7 (HF-Gen) , a Full KV gen-eration framework, as well as MorphKV, R-KV, and G-KV, which incorporate KV cache eviction during decoding to maintain a constant memory. However, none of these methods support advanced techniques such as continuous batching. We also evaluate the inference engines vLLM (v 0.13.0) and Nano-vLLM. vLLM is a highly optimized in-ference engine for industrial-grade applications. The evaluation is performed on the AMC 23. For methods that do not support continuous batching, a step size of 5 is used to search for the maximum batch size. For Zipage and other baselines that support KV cache eviction, the KV cache budget is fixed at 2048. 
+
+7https://huggingface.co/docs/transformers/index HF-Gen (25)                
+
+> MorphKV (130)
+> R-KV (130)
+> G-KV (120)
+> Nano-vLLM
+> vLLM
+> Zipage
+> 0
+> 1000
+> 2000
+> 3000
+> TPS (tokens/s)
+> 56.98
+> 256.31 246.05 246.58
+> 930.27 994.51
+> 2557.45
+> Qwen 3 8B
+> HF-Gen (25)
+> MorphKV (130)
+> R-KV (130)
+> G-KV (120)
+> Nano-vLLM
+> vLLM
+> Zipage
+> 0
+> 25
+> 50
+> 75
+> 100
+> pass@1 (%)
+> 90.46
+> 68.43
+> 84.37 84.68 90.07 90.62 87.03
+> Qwen 3 8B
+> HF-Gen (25)
+> MorphKV (140)
+> R-KV (140)
+> G-KV (130)
+> Nano-vLLM
+> vLLM
+> Zipage
+> 0
+> 1000
+> 2000
+> 3000
+> TPS (tokens/s)
+> 44.33 188.94 176.57 188.19
+> 1233.93 1230.83
+> 2718.38
+> DS LLaMA 8B
+> HF-Gen (25)
+> MorphKV (140)
+> R-KV (140)
+> G-KV (130)
+> Nano-vLLM
+> vLLM
+> Zipage
+> 0
+> 25
+> 50
+> 75
+> 100
+> pass@1 (%)
+> 85.46
+> 78.75 84.37 83.43 84.53 84.92 83.20
+> DS LLaMA 8B
+
+Figure 8: Comparison of TPS and pass@1 performance across different methods for Qwen3 8B and DS LLaMA 8B. The numbers in parentheses indicate the maximum batch size. 
+
+As illustrated in Figure 8, in terms of TPS, meth-ods supporting KV cache eviction demonstrate sig-nificant improvements over HF-Gen, primarily due to their capability to handle larger batch sizes. How-ever, these methods, lacking features such as con-tinuous batching, produce a substantial number of padding tokens, causing their TPS to fall below that of inference engines like vLLM and Nano-vLLM. In contrast, Zipage achieves more than double the TPS of both vLLM and Nano-vLLM. Regarding pass@1 performance, methods utilizing KV cache eviction, including Zipage, deliver results compara-7722 512 1024 2048 4096 
+
+Budget 
+
+50 
+
+60 
+
+70 
+
+80 
+
+90 
+
+100 
+
+> Pass@1 (%)
+
+51.71 (57.4%) 
+
+78.51 (87.2%) 
+
+87.03 (96.6%) 
+
+90.07 (100.0%) 90.07 
+
+64.92 (76.8%) 
+
+77.26 (91.4%) 
+
+83.20 (98.4%) 84.29 (99.7%) 84.53 
+
+56.87 (59.0%) 
+
+81.71 (84.8%) 
+
+89.68 (93.0%) 
+
+94.06 (97.6%) 
+
+96.40 
+
+512 1024 2048 4096 
+
+Budget 
+
+6000 
+
+8000 
+
+10000 
+
+12000 
+
+> Average Output Tokens Length
+
+12573.36 (157.7%) 
+
+10997.37 (138.0%) 
+
+9106.65 (114.3%) 
+
+8126.79 (102.0%) 7970.66 
+
+9085.25 (138.6%) 
+
+7931.72 (121.0%) 
+
+6871.38 (104.8%) 
+
+6477.87 (98.8%) 6553.75 
+
+11488.31 (163.4%) 
+
+9458.54 (134.6%) 
+
+7988.51 (113.7%) 
+
+7212.12 (102.6%) 7028.67 
+
+512 1024 2048 4096 
+
+Budget 
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+5000 
+
+6000 
+
+> TPS (tokens/s)
+
+4967.78 (534.0%) 
+
+3650.63 (392.4%) 
+
+2557.45 (274.9%) 
+
+1769.62 (190.2%) 
+
+930.27 
+
+5761.21 (466.9%) 
+
+4094.73 (331.8%) 
+
+2718.38 (220.3%) 
+
+1969.20 (159.6%) 
+
+1233.93 
+
+3240.04 (501.3%) 
+
+2410.69 (373.0%) 
+
+1680.09 (259.9%) 
+
+1115.01 (172.5%) 
+
+646.32 
+
+512 1024 2048 4096 
+
+Budget 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0 
+
+3.5 
+
+> Speedup
+
+3.39 
+
+2.84 
+
+2.41 
+
+1.87 
+
+3.37 
+
+2.74 
+
+2.10 
+
+1.61 
+
+3.07 
+
+2.77 
+
+2.29 
+
+1.68 
+
+Qwen3 8B DS Llama 8B Qwen3 14B (a) AMC 23 512 1024 2048 4096 
+
+Budget 
+
+10 
+
+20 
+
+30 
+
+40 
+
+50 
+
+60 
+
+70 
+
+80 
+
+> Pass@1 (%)
+
+9.58 (12.8%) 
+
+38.12 (51.0%) 
+
+61.45 (82.2%) 
+
+72.91 (97.5%) 74.79 
+
+18.22 (42.7%) 
+
+34.37 (80.5%) 
+
+40.00 (93.7%) 
+
+43.22 (101.2%) 42.70 
+
+11.04 (13.9%) 
+
+41.97 (52.9%) 
+
+66.97 (84.4%) 
+
+76.35 (96.2%) 
+
+79.37 
+
+512 1024 2048 4096 
+
+Budget 
+
+12500 
+
+15000 
+
+17500 
+
+20000 
+
+22500 
+
+25000 
+
+27500 
+
+30000 
+
+> Average Output Tokens Length
+
+28968.59 (192.6%) 
+
+26697.57 (177.5%) 
+
+20887.25 (138.9%) 
+
+17063.47 (113.4%) 
+
+15042.05 
+
+24869.16 (178.7%) 
+
+21967.30 (157.8%) 
+
+18850.04 (135.4%) 
+
+16130.19 (115.9%) 
+
+13918.25 
+
+27552.08 (199.5%) 
+
+24335.65 (176.2%) 
+
+19342.49 (140.0%) 
+
+15860.64 (114.8%) 
+
+13813.23 
+
+512 1024 2048 4096 
+
+Budget 
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+5000 
+
+6000 
+
+> TPS (tokens/s)
+
+5160.69 (859.9%) 
+
+3737.55 (622.7%) 
+
+2580.73 (430.0%) 
+
+1555.82 (259.2%) 
+
+600.18 
+
+5989.43 (824.2%) 
+
+4199.10 (577.8%) 
+
+2822.27 (388.3%) 
+
+1784.13 (245.5%) 
+
+726.74 
+
+3115.13 (828.1%) 
+
+2460.05 (654.0%) 
+
+1603.28 (426.2%) 
+
+985.15 (261.9%) 
+
+376.17 
+
+512 1024 2048 4096 
+
+Budget 
+
+1
+
+2
+
+3
+
+4
+
+5
+
+> Speedup
+
+4.46 
+
+3.51 
+
+3.10 
+
+2.29 
+
+4.61 
+
+3.66 
+
+2.87 
+
+2.12 
+
+4.15 
+
+3.71 
+
+3.04 
+
+2.28 
+
+Qwen3 8B DS Llama 8B Qwen3 14B 
+
+(b) AIME 24 512 1024 2048 4096 
+
+Budget 
+
+30 
+
+40 
+
+50 
+
+60 
+
+70 
+
+80 
+
+90 
+
+> Pass@1 (%)
+
+31.53 (38.9%) 
+
+46.40 (57.2%) 
+
+64.62 (79.6%) 
+
+76.03 (93.7%) 
+
+81.15 
+
+26.71 (45.6%) 
+
+43.81 (74.8%) 
+
+52.62 (89.8%) 
+
+57.21 (97.6%) 58.59 
+
+35.71 (42.1%) 
+
+53.53 (63.1%) 
+
+70.84 (83.5%) 
+
+81.37 (95.9%) 
+
+84.81 
+
+512 1024 2048 4096 
+
+Budget 
+
+7000 
+
+8000 
+
+9000 
+
+10000 
+
+11000 
+
+12000 
+
+13000 
+
+14000 
+
+> Average Output Tokens Length
+
+12748.47 (157.8%) 
+
+11343.73 (140.4%) 
+
+9583.76 (118.7%) 
+
+8440.38 (104.5%) 
+
+8077.23 
+
+12500.08 (139.7%) 
+
+11073.78 (123.8%) 
+
+10036.12 (112.2%) 
+
+9285.82 (103.8%) 
+
+8944.69 
+
+12108.03 (162.0%) 
+
+10580.49 (141.5%) 
+
+8894.06 (119.0%) 
+
+7814.71 (104.5%) 
+
+7476.39 
+
+512 1024 2048 4096 
+
+Budget 
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+5000 
+
+6000 
+
+> TPS (tokens/s)
+
+5371.16 (524.4%) 
+
+3788.04 (369.8%) 
+
+2653.75 (259.1%) 
+
+1775.51 (173.3%) 
+
+1024.33 
+
+6122.74 (573.5%) 
+
+4244.11 (397.5%) 
+
+2904.48 (272.0%) 
+
+1905.59 (178.5%) 
+
+1067.69 
+
+3284.87 (505.4%) 
+
+2490.18 (383.2%) 
+
+1767.64 (272.0%) 
+
+1112.55 (171.2%) 
+
+649.92 
+
+512 1024 2048 4096 
+
+Budget 
+
+1.0 
+
+1.5 
+
+2.0 
+
+2.5 
+
+3.0 
+
+3.5 
+
+4.0 
+
+4.5 
+
+> Speedup
+
+3.32 
+
+2.63 
+
+2.18 
+
+1.66 
+
+4.10 
+
+3.21 
+
+2.42 
+
+1.72 
+
+3.12 
+
+2.71 
+
+2.29 
+
+1.64 
+
+Qwen3 8B DS Llama 8B Qwen3 14B 
+
+(c) LiveCodeBench 
+
+Figure 9: Evaluation results under varying KV cache budgets on (a) AMC 23, (b) AIME 24, and (c) LiveCodeBench. Dashed lines represent the results of full KV, and the percentages following the numerical values indicate the relative performance compared to full KV. 
+
+ble to Full KV cache approaches under a 2k budget, with the exception of MorphKV, which exhibits a slight performance gap. 
+
+5.4 How to Set KV Cache Budgets? 
+
+In this section, we evaluate using different KV cache budgets on two mathematical benchmarks, AMC 23 and AIME 24 8, and one code benchmark, LiveCodeBench (Jain et al., 2024) v1. We report pass@1, average output length, TPS, and speedup, calculated based on the total time required to com-plete all requests. For AMC 23, with a budget of 2048, the per-formance of Zipage reaches around 95% of that of Full KV (Nano-vLLM), while throughput and speedup exceed twice the Full KV baseline. At a budget of 4096, the performance is very close to Full KV. For AIME 24, a 4096 budget achieves about 95% of Full KV performance, with through-put and speedup also exceeding twice the base-line. For code tasks, Zipage achieve around 95% of Full KV performance with a 4096 budget, with 
+
+8https://huggingface.co/datasets/math-ai/aime24 
+
+a speedup ratio of approximately 1.6. Additionally, we observe that as the budget decreases, not only does performance decline, but the average output length also increases, which may negatively affect user experience. 
+
+6 Discussion 
+
+Zipage currently supports RoPE (Su et al., 2024) and its variants, which encoding positional embed-dings directly into the KV cache. Zipage is fully compatible with text-based context management systems for multi-turn conversations, and integrates seamlessly with FlashAttention (Dao et al., 2022) as KV cache eviction does not interfere with the Attention forward process. 
+
+7 Deployment Considerations 
+
+Zipage is designed and evaluated under the assump-tion of a trusted, single-tenant deployment environ-ment (i.e., a dedicated instance operated by one organization). Accordingly, strong security/privacy isolation between mutually untrusted tenants or workloads is intentionally out of scope for this 7723 work. Operators should deploy Zipage within an environment that already provides the required ac-cess controls, network boundaries, and compliance safeguards; scenarios requiring multi-tenant isola-tion or adversarial co-location protections are not addressed here. 
+
+8 Conclusion 
+
+In this paper, we propose Compressed PagedAt-tention, which integrates KV cache compression with paged KV cache management. Based on this, we develop the inference engine Zipage, which achieves over 2x speedup while delivering perfor-mance close to that of Full KV in reasoning tasks. 
+
+Limitations 
+
+Since we have not yet implemented the online en-gine, all evaluations are conducted in the form of offline inference. Therefore, we do not report the Time to First Token (TTFT) metric, as queuing time dominates and renders TTFT less meaningful as a reference. In the future, we plan to imple-ment an online engine in the open-source project and integrate techniques such as chunked prefilling (Agrawal et al., 2023) to optimize TTFT. We did not compare our approach with meth-ods that integrate KV cache compression into in-ference engines, as RaaS (Hu et al., 2025) and PagedEviction (Chitty-Venkata et al., 2025) lack publicly available code for such integration. How-ever, our token-wise eviction method may offer advantages in preserving critical information. As for KV-Compress (Rehg, 2024), it only compresses inputs and performs similarly to vLLM in scenarios with long outputs. Additionally, requests of varying difficulty may require different budgets. Currently, we set the budget to a fixed size. However, Nmax can be treated as a unique attribute for each request and adjusted based on the actual sequence length of the request, which might slightly reduce concurrency but could improve overall performance. We plan to incorporate this feature into Zipage in the future. 
+
+Acknowledgments 
+
+This work was supported by the Beijing Natural Science Foundation (No. L252034). 
+
+References 
+
+Amey Agrawal, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S Gulavani, and Ramachan-dran Ramjee. 2023. Sarathi: Efficient llm infer-ence by piggybacking decodes with chunked prefills. 
+
+arXiv preprint arXiv:2308.16369 .Joshua Ainslie, James Lee-Thorp, Michiel De Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sang-hai. 2023. Gqa: Training generalized multi-query transformer models from multi-head checkpoints. 
+
+arXiv preprint arXiv:2305.13245 .Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, and 1 others. 2024. Long-bench: A bilingual, multitask benchmark for long context understanding. In Proceedings of the 62nd annual meeting of the association for computational linguistics (volume 1: Long papers) , pages 3119– 3137. Zefan Cai, Wen Xiao, Hanshi Sun, Cheng Luo, Yikai Zhang, Ke Wan, Yucheng Li, Yeyang Zhou, Li-Wen Chang, Jiuxiang Gu, and 1 others. 2025. R-kv: Redundancy-aware kv cache compression for reason-ing models. In The Thirty-ninth Annual Conference on Neural Information Processing Systems .Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and 1 others. 2024. Pyra-midkv: Dynamic kv cache compression based on pyramidal information funneling. arXiv preprint arXiv:2406.02069 .Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde De Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, and 1 others. 2021. Evaluating large language models trained on code. arXiv preprint arXiv:2107.03374 .Yaofo Chen, Zeng You, Shuhai Zhang, Haokun Li, Yirui Li, Yaowei Wang, and Mingkui Tan. 2024. Core context aware transformers for long context language modeling. arXiv preprint arXiv:2412.12465 .Krishna Teja Chitty-Venkata, Jie Ye, Xian-He Sun, Anthony Kougkas, Murali Emani, Venkatram Vish-wanath, and Bogdan Nicolae. 2025. Pagedeviction: Structured block-wise kv cache pruning for efficient large language model inference. arXiv preprint arXiv:2509.04377 .Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher Ré. 2022. Flashattention: Fast and memory-efficient exact attention with io-awareness. 
+
+Advances in neural information processing systems ,35:16344–16359. Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S Kevin Zhou. 2024. Ada-kv: Optimizing kv cache eviction by adaptive budget allocation for efficient llm inference. arXiv preprint arXiv:2407.11550 .7724 Ravi Ghadia, Avinash Kumar, Gaurav Jain, Prashant J Nair, and Poulami Das. 2025. Dialogue without lim-its: Constant-sized kv caches for extended response in llms. In Forty-second International Conference on Machine Learning .Daya Guo, Dejian Yang, Haowei Zhang, Junxiao Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shi-rong Ma, Peiyi Wang, Xiao Bi, and 1 others. 2025. Deepseek-r1: Incentivizing reasoning capability in llms via reinforcement learning. arXiv preprint arXiv:2501.12948 .Junhao Hu, Wenrui Huang, Weidong Wang, Zhenwen Li, Tiancheng Hu, Zhixia Liu, Xusheng Chen, Tao Xie, and Yizhou Shan. 2025. RaaS: Reasoning-aware attention sparsity for efficient LLM reasoning. In 
+
+Findings of the Association for Computational Lin-guistics: ACL 2025 , pages 2577–2590, Vienna, Aus-tria. Association for Computational Linguistics. Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. 2024. Live-codebench: Holistic and contamination free eval-uation of large language models for code. arXiv preprint arXiv:2403.07974 .Zixuan Ke, Fangkai Jiao, Yifei Ming, Xuan-Phi Nguyen, Austin Xu, Do Xuan Long, Minzhi Li, Chengwei Qin, Peifeng Wang, Silvio Savarese, and 1 others. 2025. A survey of frontiers in llm reasoning: Inference scal-ing, learning to reason, and agentic systems. arXiv preprint arXiv:2504.09037 .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th symposium on operating systems principles , pages 611–626. Andrew Lee, Melanie Weber, Fernanda Viégas, and Martin Wattenberg. 2025. Shared global and local geometry of language model embeddings. arXiv preprint arXiv:2503.21073 .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. Snapkv: Llm knows what you are looking for before gener-ation. Advances in Neural Information Processing Systems , 37:22947–22970. Zhong-Zhi Li, Duzhen Zhang, Ming-Liang Zhang, Ji-axin Zhang, Zengyan Liu, Yuxuan Yao, Haotian Xu, Junhao Zheng, Pei-Jie Wang, Xiuyi Chen, and 1 oth-ers. 2025. From system 1 to system 2: A survey of reasoning large language models. arXiv preprint arXiv:2502.17419 .Mengqi Liao, Lu Wang, Chaoyun Zhang, Zekai Shen, Xiaowei Mao, Si Qin, Qingwei Lin, Saravan Rajmo-han, Dongmei Zhang, and Huaiyu Wan. 2025. G-kv: Decoding-time kv cache eviction with global atten-tion. arXiv preprint arXiv:2512.00504 .Isaac Rehg. 2024. Kv-compress: Paged kv-cache com-pression with variable compression rates per attention head. arXiv preprint arXiv:2410.00161 .Noam Shazeer. 2019. Fast transformer decoding: One write-head is all you need. arXiv preprint arXiv:1911.02150 .Jianlin Su, Murtadha Ahmed, Yu Lu, Shengfeng Pan, Wen Bo, and Yunfeng Liu. 2024. Roformer: En-hanced transformer with rotary position embedding. 
+
+Neurocomputing , 568:127063. Shawn Tan, Yikang Shen, Songlin Yang, Aaron Courville, and Rameswar Panda. 2024. Stick-breaking attention. arXiv e-prints , pages arXiv– 2410. Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention is all you need. Advances in neural information processing systems , 30. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, and 1 others. 2025. Qwen3 technical report. arXiv preprint arXiv:2505.09388 .Dongjie Yang, Xiaodong Han, Yan Gao, Yao Hu, Shilin Zhang, and Hai Zhao. 2024. Pyramidinfer: Pyra-mid kv cache compression for high-throughput llm inference. In Findings of the Association for Compu-tational Linguistics ACL 2024 , pages 3258–3270. 
+
+A Usage of AI 
+
+We employed AI to refine the content based on our original text, with all revisions thoroughly reviewed and verified by our team. The code development was assisted with AI. All code underwent rigorous testing. 
+
+B Evaluation Settings and Dataset Details 
+
+For all evaluations, the sampling temperature is set to 0.6. The evaluation settings for different benchmarks are detailed in Table 1.                 
+
+> Workloads Number of Questions Sample Times Max Output Length
+> AMC 23 40 32 16384 AIME 24 30 32 32768 LiveCodeBench v1 400 816384 Mixture 40+1319 416384 LongBench 150 44096
+
+Table 1: Evaluation settings for different workloads or benchmarks. 
+
+For GSM8K, we use Qwen3’s non-reasoning mode, which reduces output length in most cases, 7725 though the model occasionally generates lengthy reasoning. Additionally, for the Mixture of GSM8K and AMC23 workload, the question order is randomized. 
+
+C Implementation for Compression Operations and Experiments. 
+
+For most operations during the compression pro-cess, we implemented specialized GPU kernels using Triton 9. This section contains algorithm de-scriptions and experiments for these kernel imple-mentations. 
+
+C.1 Cross-Layer Parallel Compression 
+
+Since the KV cache compression processes of dif-ferent layers are independent of each other, com-pression can be executed in parallel across layers. All kernels can parallelize at least across the dimen-sions of batch size, layer, and attention head. However, the compression process generates in-termediate activations. If all layers are compressed simultaneously, it may lead to memory overflow in extreme cases, especially under asynchronous compression settings where memory is shared with prefilling and decoding operations. To address this, we adapt cross-layer compression based on a layer stride l, i.e., compressing the KV cache of l layers at each time. The peak of the activations scales as O(n × l × hq × N × b × w), where n is the batch size of requests requiring compression, and 
+
+N is the maximum number of blocks among all requests. 1 2 4 8 16               
+
+> Layer Stride
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> Average Time (ms)
+> 55.2 54.5 54.1 53.7 51.9
+> 468.6
+> 153.7
+> 87.8 100.4
+> 23.1
+> Qwen3 0.6B
+> Decode
+> Compress
+> 124816
+> Layer Stride
+> 69.1 63.9 59.0 59.5 57.3
+> 319.3
+> 149.5
+> 90.3
+> 52.9 32.5
+> Qwen3 8B
+> Decode
+> Compress
+
+Figure 10: Average time for compression and decoding step under different layer stride. 
+
+We inference on AMC 23 and report the aver-age compression and decoding times for different layer strides are shown in Figure 10. As the layer stride increases, both the average decoding time per step and the compression time exhibit a decreasing trend. Notably, the compression time for a layer 
+
+> 9
+
+https://github.com/triton-lang/triton 
+
+stride of 16 is approximately 5% − 10% of that for a layer stride of 1. Furthermore, we observe that the average com-pression time for the 0.6B model is longer than that for the 8B model. This is attributed to the higher concurrency in the 0.6B model, resulting in a larger average batch size for each compression step. Ultimately, we adopt a layer stride of 8 in other experiments, which provides a significant accelera-tion while maintaining a moderate size for interme-diate activation values. 
+
+C.2 Paged Attention Score 
+
+The scoring function ϕ(Q, K, I) in its most basic form involves only the computation of attention scores. In this section, we describe how to calculate attention scores using the query states in the query cache Q and the key states in the key cache K.Since the computations for different requests within a batch, different layers, and different attention heads are independent and executed in parallel, we illustrate the algorithm with a single request, a single layer, and a single attention head. Algorithm 1 Block Attention Logits Computation 
+
+Require: Query cache Q, key cache K, block size 
+
+b, block index i, query slots index j, block table, attention dimension d
+
+1: Compute query offset pq in Q based on query slots index j
+
+2: Load query states: Qj ← Q[pq] ∈ Rw×d
+
+3: Get the block id in block table through block index i
+
+4: Compute key offset pk in K using block id 
+
+5: Load key states: Ki ← K[pk] ∈ Rb×d
+
+6: Compute attention logits: A′ ← Qj ·K⊤ 
+
+> i√d
+
+∈
+
+Rw×b
+
+7: if block i is the last block the request then 
+
+8: Construct causal mask M ∈ Rw×b where 
+
+Mu,v =
+
+{
+
+−∞ if u + b − w > v 
+
+0 otherwise 
+
+9: Apply mask: A′ ← A′ + M
+
+10: end if 
+
+11: Save: A[i] ← A′
+
+When computing the attention scores, we first allocate storage space A ∈ RN ×w×b. Then, as de-scribed in Algorithm 1, we perform the matrix mul-tiplication of query states and key states. Since the 7726 attention computation can be further parallelized along the dimension of block numbers, Algorithm 1 outlines the computation for a single block. It is important to note that, although the matrix multiplication in algorithms is conceptually com-pleted in a single step, in practice, it is further di-vided into smaller blocks for computation. What’s more, load in algorithms refers to reading data from the GPU’s global memory (Dynamic Random Ac-cess Memory, DRAM) into the shared memory or registers (Static Random Access Memory, SRAM), while save refers to writing data from the shared memory back to the global memory. The layout of key states in K is paged, but the computed logits A are stored contiguously. So, we can reshape A into Rw×(N b ) and apply Softmax along the last dimension to obtain the attention scores S′ ∈ Rw×(N b ).For multi-query (Shazeer, 2019) or group-query (Ainslie et al., 2023) attention, where a single key head corresponds to multiple query heads, we per-form a max-reduce operation for the scores of each key head. Finally, we take an average along the observation window length dimension to obtain 
+
+S ∈ RN ×b.
+
+C.3 Global Score 
+
+The global score proposed in G-KV (Liao et al., 2025) combines historical attention scores through decayed max-reduce or sum-reduce, enabling bet-ter evaluation of the long-term importance of KV cache entries during eviction. We have integrated the global score into our framework and adapted it for PagedAttention. First, we need to pre-allocate F ∈
+
+RL×Ntotal ×b×hkv to store the global score. The size of F is 12d of the total size of K and V. If global score is enabled, equation (1) needs be updated as: 
+
+
+
+(1 + 12d ) × mkv × Ntotal + M × mq ≤ mavailable ,M ≤ Ntotal 
+
+Nmax 
+
+,M > 0, Ntotal > 0,
+
+(2) Based on the attention scores S, we use Algo-rithm 2 to compute the global scores. The algo-rithm can be summarized as follows: if a request has not been compressed, there are no historical scores, and we simply store S in F. If a request has been compressed, all blocks except the last one have historical scores. For these blocks, we take 
+
+Algorithm 2 Update Global Score Cache with At-tention Scores 
+
+Require: Attention score tensor S, global score cache F, block table, number of blocks N ,decay factor α, block index i 
+
+> 1:
+
+Load attention scores of i-th block si ∈ Rb
+
+from S 
+
+> 2:
+
+Compute offset p of i-th block in F using block id from block table  
+
+> 3:
+
+if request is not compressed then  
+
+> 4:
+
+Save score to cache: F[p] ← si 
+
+> 5:
+
+else  
+
+> 6:
+
+if i-th block is not the last block of the sequence then  
+
+> 7:
+
+Load previous global score fi ←
+
+F[p] ∈ Rb 
+
+> 8:
+
+Update: si ← max( α · fi, si) 
+
+> 9:
+
+end if  
+
+> 10:
+
+Save score to cache: F[p] ← si 
+
+> 11:
+
+Overwrite attention score: S[i] ← si 
+
+> 12:
+
+end if 
+
+the maximum value between the decayed historical scores and S as the new score.                   
+
+> α00.4 0.8 0.85 0.9 1Qwen3 8B 0.6906 0.7375 0.7718 0.7468 0.7484 0.7531 DS Llama 8B 0.7484 0.7656 0.7643 0.7584 0.7578 0.7515
+
+Table 2: Experimental results with different decay rates 
+
+α.
+
+We evaluate using a budget of 2048 and global score with different decay rates α on the AMC 23 benchmark, with the experimental results shown in Table 2. The global score shows a significant improvement on Qwen3 8B but provides minimal benefits on DS Llama 8B. 
+
+C.4 Pooling at the Sequence Dimension 
+
+SnapKV (Li et al., 2024) performs max pooling along the sequence dimension, meaning that to-kens near high-scoring tokens are also assigned high scores. This helps preserve more detailed information in context. We have integrated this method into our framework, implementing it us-ing PyTorch 10 ’s MaxPool1D interfaces instead of a specialized kernel: 
+
+S = MaxPool1D (S) (3) 
+
+> 10 https://pytorch.org/
+
+7727 Pooling is performed after computing the global score during the compression process. 
+
+C.5 Redundancy Score of Key states Sum reduce                 
+
+> 𝑅 0
+> 𝑅 1
+> 𝑅 2
+> 𝑅 3
+> 𝑅 4
+> 𝑅 5
+> 𝑅 6
+> 𝑅 7
+> 𝐾 1·𝐾 1
+> 𝑇
+> |𝐾 1|2·|𝐾 1|2
+> 𝑇
+> 𝐾 1·𝐾 2
+> 𝑇
+> |𝐾 1|2·|𝐾 2|2
+> 𝑇
+> 𝐾 2·𝐾 1
+> 𝑇
+> |𝐾 2|2·|𝐾 1|2
+> 𝑇
+> 𝐾 2·𝐾 2
+> 𝑇
+> |𝐾 2|2·|𝐾 2|2
+> 𝑇
+> Kept Cosine
+> Similarity
+> Zore Out for the
+> Same Key
+> High Similarity
+> above Threshold
+> Zore Out for
+> above Threshold
+
+Figure 11: This figure illustrates the computation of the original redundancy scores when N = 2 and b = 4 .Here, Ki represents the key states of the i-th block. This approach has a computational complexity of O(N 2 ×b2)
+
+and a memory complexity of O(N 2 × b2).
+
+R-KV (Cai et al., 2025) introduces redundancy scores to evaluate the degree of redundancy among KV cache entries. Specifically, it calculates the cosine similarity between the key states within a sequence. Figure 11 illustrates the computation of redun-dancy scores between the key states of two blocks. The diagonal entries represent the similarity of key states with themselves and are therefore zeroed out. Additionally, for each column, the last similarity score exceeding the threshold p is set to 0, as we prioritize retaining newer tokens when an old to-ken is highly similar to a new token. Finally, the similarity matrix is summed row-wise, normalized by the sequence length, and passed through Soft-max on the sequence dimension to compute the redundancy score R.The redundancy score is applied after max pool-ing. The redundancy score is combined with previ-ous scores using the following formula: 
+
+S = S − λ · R (4) The original implementation of the redundancy score first computes the complete cosine similarity 
+
+Algorithm 3 Flash Redundancy Score 
+
+Require: Key cache K, block table, number of blocks N , threshold p, block size b, block in-dex m
+
+Ensure: Accumulated similarity score R′ 
+
+> 1:
+
+Calculate the offset pm in K based on the block id of the m-th block  
+
+> 2:
+
+Load key states Km ← K[pm] ∈ Rb×d of block m 
+
+> 3:
+
+Initialize zero-out tag z ∈ R1×b ← 0 
+
+> 4:
+
+for i = N − 1 to 0 do  
+
+> 5:
+
+Calculate the offset pi in K based on the block id of the i-th block  
+
+> 6:
+
+Load key states Ki ← K[pi] ∈ Rb×d of block i 
+
+> 7:
+
+Compute cosine similarity: C =
+
+> Ki·K⊤
+> m
+> ∥Ki∥2·∥ Km∥T
+> 2
+
+∈ Rb×b 
+
+> 8:
+
+if i = m then  
+
+> 9:
+
+Mask diagonal of C ← 0 
+
+> 10:
+
+end if  
+
+> 11:
+
+Identify the last element > p in the column of C, ensure that the corresponding tag in z
+
+for this column is 0, and set this element to 0 
+
+> 12:
+
+Update the tag corresponding in zm to 1 where such element were zero out  
+
+> 13:
+
+C′ ∈ Rb×1 ← Row-wise accumulate C 
+
+> 14:
+
+save the result to R′[i, m ] ← C′ 
+
+> 15:
+
+end for 
+
+matrix and then applies zeroing out. Its memory complexity is O(N 2 × b2). Assuming a floating-point size of 2 bytes, the actual matrix size is 2 ×
+
+n × l × hkv × N 2 × b2. For a common scenario where n = 16 , l = 8 , hkv = 8 , and b = 256 ,the cosine similarity matrix size is 128 × N 2 MB. When the sequence length is sufficiently large, the memory usage can even reach tens of GB. Such enormous activations are unacceptable and can easily lead to memory overflow. To address this issue, we implemented the flash redundancy score. Figure 12 illustrates the computation pro-cess of the flash redundancy score. We no longer store the complete similarity matrix. Instead, we compute similarities in a block-wise manner, start-ing from the last block. The computed similarity results are not retained but are directly accumu-lated into a pre-allocated accumulation accumu-lator R′ ∈ RN ×N ×b. To correctly zero out the last high-threshold similarity in each column, we maintain a zero-out tag to track whether the last 7728 𝑅 4,1                                         
+
+> 𝑅 5,1
+> 𝑅 6,1
+> 𝑅 7,1
+> 𝑍 0𝑍 1𝑍 2𝑍 3
+> 𝑅 4,2
+> 𝑅 5,2
+> 𝑅 6,2
+> 𝑅 7,2
+> 𝑍 4𝑍 5𝑍 6𝑍 7
+> 𝑅 0,1
+> 𝑅 1,1
+> 𝑅 2,1
+> 𝑅 3,1
+> 𝑅 0,2
+> 𝑅 1,2
+> 𝑅 2,2
+> 𝑅 3,2
+> 𝑅 0
+> 𝑅 1
+> 𝑅 2
+> 𝑅 3
+> 𝑅 4
+> 𝑅 5
+> 𝑅 6
+> 𝑅 7
+> 𝑍 0𝑍 1𝑍 2𝑍 3𝑍 4𝑍 5𝑍 6𝑍 7
+> Zero Out Tag
+> Block Similarity
+> Score Accumulator
+> Stage 𝑖
+> Calculate Similarity
+> Score for Block 𝑁 −𝑖
+> Stage 𝑖 +1
+> Calculate Similarity
+> Score for Block 𝑁 −𝑖 −1
+> 𝐾 1·𝐾 1
+> 𝑇
+> |𝐾 1|2·|𝐾 1|2
+> 𝑇
+> 𝐾 1·𝐾 2
+> 𝑇
+> |𝐾 1|2·|𝐾 2|2
+> 𝑇
+> 𝐾 2·𝐾 2
+> 𝑇
+> |𝐾 2|2·|𝐾 2|2
+> 𝑇
+> 𝐾 2·𝐾 1
+> 𝑇
+> |𝐾 2|2·|𝐾 1|2
+> 𝑇
+
+Figure 12: This figure illustrates the computation of flash redundancy score. The green blocks represent data stored in global memory, i.e., activations. The results of other computations, shown in different colors, are temporarily stored using registers or shared memory. This approach has a computational complexity of O(N 2 × b2) and a memory complexity of O(N 2 × b).
+
+similarity score exceeding the threshold in each col-umn has been zeroed out. If a column has not been zeroed out, the last value in the block that exceeds the threshold is set to 0, and the corresponding zero-out tag will be set. The detailed process is shown in Algorithm 3. Finally, we perform sequential accu-mulation to obtain ∑N −1 
+
+> m=0
+
+R′[: , m ], and then apply length normalization and Softmax to compute R.The flash redundancy score reduces the mem-ory complexity to O(N 2 × b). By partitioning the matrix multiplication into smaller blocks, the intermediate similarity scores and zero-out tags are temporarily stored using registers and shared memory. Only the accumulated results need to be written to R′ in the global memory. In the previous example, the activation size of the flash redundancy score is approximately N 2 
+
+> 2
+
+MB, which is 1256 of the original implementation. An even more aggressive implementation exists, where the accumulated activations for similarity scores only require O(N × b) memory space. This approach involves directly accumulating the results of Ki·(K1;... ;KN )⊤ 
+
+> |Ki|2·| K1;... ;KN|⊤
+> 2
+
+∈ Rb×(bN ). However, due to the limited capacity of registers and shared mem-ory, only small-scale matrix operations, such as 
+
+16 × 64 , can be performed at a time. Large matrix computations require the kernel to execute addi-tional iterations, which reduces the overall level of parallelism. Our current implementation adopts a balanced approach, trading off between memory usage and parallelism. 
+
+C.6 KV Cache Compression 
+
+After obtaining the final scores, we first set the scores corresponding to the observation window to +∞. The kernel implementation for this step is relatively straightforward and will not be discussed in detail. Subsequently, we generate a top-k tag 
+
+T ∈ RN ×b (k = ( Nmax − 1) × b), where the tag of 
+
+k KV cache entries with the highest scores along the sequence dimension are marked as 1, while the remaining entries are marked as 0. The top-k
+
+tagging is implemented using PyTorch’s built-in interfaces. Based on the top-k tag, we reorganize the KV cache placement to ensure that the retained KV cache entries are densely packed in memory. The algorithm for the compression process is shown in Algorithm 4. Simply put, it is based on the movement of data in memory using two pointers. In total, it requires (Nmax − 1) × b reads and writes to the KV cache. It should be noted that when using the global score, the historical scores stored in F also need to be moved correspondingly to correctly match the associated KV cache entries. The process is similar to Algorithm 4, but the amount of data moved each time is reduced from d to 1.
+
+C.7 Lightning Redundancy 
+
+The previous sections have introduced all the op-erations involved in the compression process. We 7729 Algorithm 4 KV Cache Compression 
+
+Require: Key and Value cache tensors K, V,block size b, number of blocks N , top-k tag 
+
+F ∈ { 0, 1}N ×b
+
+Ensure: Compressed K, V
+
+1: Initialize read offset pr and write offset pw to the first slot of the first block 
+
+2: ℓ ← 0, s ← 0, i ← 0
+
+3: while i < N do 
+
+4: if F[i][ ℓ mod b] = 1 then 
+
+5: Load key vector k ← K[pr] ∈ R1×d
+
+6: Load value vector v ← V[pr] ∈ R1×d
+
+7: Store k to K[pw]
+
+8: Store v to V[pw]
+
+9: s ← s + 1 
+
+10: if s mod b = 0 then 
+
+11: Move pw to the first slot of the next block 
+
+12: else 
+
+13: Increase pw to the next slot 
+
+14: end if 
+
+15: end if 
+
+16: ℓ ← ℓ + 1 
+
+17: if ℓ mod b = 0 then 
+
+18: Move pr to the first slot of the next block 
+
+19: i ← i + 1 
+
+20: else 
+
+21: Increase pr to the next slot 
+
+22: end if 
+
+23: end while 
+
+visualized the average execution time of each op-eration during inference with Qwen3 8B on the AMC 23 benchmark, as shown in Figure 13 (non-asynchronous compression) and Figure 14 (asyn-chronous compression), with the red bars repre-senting the execution time. It is evident that the computation of redundancy scores is the bottleneck in the compression process, requiring 1-2 orders of magnitude more time than other operations. This is due to its computational complexity of O(N 2 ×b2),which is nearly equivalent to the complexity of at-tention computation during prefilling. To accelerate the compression process, we pro-pose a novel lightning redundancy score . Specifi-cally, since highly similar representations exhibit locality in the sequence space (Lee et al., 2025), meaning that the hidden representation of a token is more similar to those of nearby tokens, this phe-nomenon may be attributed to the attention mecha-attention score       
+
+> global score
+> pooling
+> redudancy score
+> window mask
+> top-k mask
+> compress kv
+> compress score
+> 0
+> 2
+> 4
+> 6
+> 8
+> Average Time (ms)
+> 0.5 0.0 0.1
+> 7.8
+> 0.0 0.1
+> 1.3
+> 0.5 0.4 0.0 0.1
+> 1.3
+> 0.0 0.1
+> 1.3
+> 0.5
+> Flash Redudancy
+> Lightning Redudancy
+
+Figure 13: The average execution time of different oper-ations when asynchronous compression is disenabled. A value of 0.0 indicates that the average execution time is less than 0.1 milliseconds. attention score       
+
+> global score
+> pooling
+> redudancy score
+> window mask
+> top-k mask
+> compress kv
+> compress score
+> 0
+> 5
+> 10
+> 15
+> Average Time (ms)
+> 1.3
+> 0.1 1.1
+> 12.9
+> 0.1 1.0
+> 2.1 1.2 1.1 0.1 0.9
+> 3.0
+> 0.2 1.0
+> 2.8
+> 1.2
+> Flash Redudancy
+> Lightning Redudancy
+
+Figure 14: The average execution time of different oper-ations when asynchronous compression is enabled. 
+
+nism focusing more on tokens in close proximity (Tan et al., 2024; Chen et al., 2024). Based on this observation, we propose computing similarity only between keys within the same block and zeroing out only the last similarity score in each column that exceeds the threshold within the block. We refer to this approach as the lightning redundancy score, and Figure 15 illustrates its calculation pro-cess. 𝑅 0         
+
+> 𝑅 1
+> 𝑅 2
+> 𝑅 3
+> 𝑅 4
+> 𝑅 5
+> 𝑅 6
+> 𝑅 7
+> Sum Reduce Sum Reduce
+> 𝐾 1·𝐾 1
+> 𝑇
+> |𝐾 1|2·|𝐾 1|2
+> 𝑇
+> 𝐾 2·𝐾 2
+> 𝑇
+> |𝐾 2|2·|𝐾 2|2
+> 𝑇
+
+Figure 15: This figure illustrates the computation of lightning redundancy score. This approach has a com-putational complexity of O(N × b2) and a memory complexity of O(N × b).
+
+The lightning redundancy score reduces the com-putational complexity to O(N × b2) and the mem-ory complexity to O(N × b). As illustrated by the 7730 Decode  
+
+> Compress
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> 120
+> 140
+> Average Time (ms)
+> 59.6
+> 86.5
+> 58.2
+> 25.1
+> 65.6
+> 124.5
+> 55.0 56.3
+> Non-asynchronous Flash
+> Non-asynchronous Lightning
+> Asynchronous Flash
+> Asynchronous Lightning
+
+Figure 16: The average decoding time and compression time under both asynchronous and non-asynchronous compression settings. 
+
+blue bars in Figure 13 and Figure 14, the compu-tation time for the lightning redundancy score is significantly reduced. Figure 16 further presents the average decoding time and compression time under both asynchronous and non-asynchronous compression settings. It is evident that the light-ning redundancy score decreases the compression time to a level comparable to that of single-step decoding, without impacting the asynchronously executed decoding process. In contrast, the flash redundancy score, due to its substantial compu-tational overhead, intensifies resource contention with the decoding threads, leading to an increase in average decoding time. 
+
+λ 0.05 0.1 0.2 0.5 0.9 Flash 80.78 82.96 84.37 84.53 77.81 
+
+Lightning 83.59 84.84 84.84 84.21 75.00 
+
+Table 3: Qwen3 8B on AMC 23 
+
+λ 0.05 0.1 0.2 0.5 0.9 Flash 82.96 82.03 83.59 78.59 74.21 
+
+Lightning 80.62 85.15 85.00 80.78 73.90 
+
+Table 4: DS-Llama 8B on AMC 23 
+
+Finally, we compare the performance of the two different redundancy scores under various hyper-parameters λ. As shown in Table 3 and Table 4, in most cases, the lightning redundancy score achieves even better performance. 
+
+C.8 Combining All These Techniques 
+
+In this section, we aim to combine the previously discussed methods. G-KV (Liao et al., 2025) has attempted to integrate the global score and the re-dundancy score. However, due to the use of max normalization for the scores, it required re-tuning the hyperparameter λ, making it more sensitive to parameter selection. In our approach, we eliminate the max normalization. Additionally, the redun-dancy score is ultimately calculated as a distribu-tion via softmax. We observed that this distribution is relatively uniform, especially in the shallow lay-ers, where the differences between scores are mini-mal. To address this, we introduce a temperature parameter τ for the softmax computation of the re-dundancy score, which amplifies highly redundant scores. 0.2 0.4 0.6 0.8 1.0              
+
+> 80
+> 82
+> 84
+> 86
+> 88
+> 90
+> pass@1
+> 84.06
+> 85.31 85.78 85.62
+> 87.96
+> 86.25
+> 87.03 86.87 86.71
+> 85.78
+> 87.50 87.18
+> 86.09
+> 82.65
+> 80.93
+> Qwen3 8B
+> = 0.1
+> = 0.2
+> = 0.3
+> 0.2 0.4 0.6 0.8 1.0
+> 81.09
+> 81.87
+> 81.09
+> 82.18 82.18 82.50
+> 84.21
+> 82.81 82.34
+> 80.62
+> 81.25
+> 83.43 82.81 82.65
+> 80.93
+> DS Llama 8B
+> = 0.1
+> = 0.2
+> = 0.3
+
+Figure 17: pass@1 performance for Qwen3 8B and DS Llama 8B under diffirent λ and τ .
+
+For the joint search of λ and τ (α = 0 .8 for global score), the experimental results are shown in Figure 17. The temperature has a significant impact on Qwen3 8B; as λ increases, representing a higher proportion of the global score, lowering the temperature often yields better results. However, for DS Llama 8B, the final performance is less sensitive to the relationship between λ and τ .500 1000 1500 2000    
+
+> KV Budget
+> 20
+> 40
+> 60
+> 80
+> Score
+> 29.53
+> 61.71
+> 78.90
+> 87.03
+> 20.00
+> 55.00
+> 73.43
+> 85.15
+> Qwen3 8B
+> Global and Redundancy
+> Redundancy only
+> 500 1000 1500 2000
+> KV Budget
+> 50.46
+> 67.71
+> 77.65
+> 84.21
+> 47.03
+> 65.15
+> 74.84
+> 85.31
+> DS Llama 8B
+> Global and Redundancy
+> Redundancy only
+
+Figure 18: Comparison under different KV budgets for Qwen3 8B and DS Llama 8B, using global and redundancy scores versus redundancy-only scores. 
+
+Figure 18 presents the ablation study on the use of the global score. For the Qwen3 8B model, the global score provides significant benefits. However, for DS Llama 8B, when the budget is sufficient (2048), not using the global score can even yield better results. Finally, we evaluate the impact of max pooling. We use three settings: no pooling at all, pooling 7731 Model w/o pooling pooling once w/ pooling Qwen3 8B 87.10 87.03 80.85 DS Llama 8B 84.21 83.20 84.53 
+
+Table 5: Comparison of pooling strategies for LLaMA-8B and Qwen-8B. 
+
+only during the first compression, and pooling dur-ing every compression step. As shown in Figure 5, for DS Llama 8B, the performance across all settings is relatively similar. However, for Qwen3 8B, performing pooling at every compression step leads to a significant drop in performance. Although pooling does not show significant im-provements in this scenario, it has proven to be ef-fective in settings based solely on attention scores. The effectiveness of pooling may stem from its ability to retain some important tokens that are temporarily not attended to by the observation win-dow. The global score serves a similar purpose, but demonstrates better performance. Introducing pooling alongside the global score may, in fact, hinder the eviction of less important KV cache en-tries. However, since the first compression step lacks global scores, pooling can still play a useful role. Therefore, we recommend using pooling at first compression. Based on the aforementioned results, we recom-mend the configuration of λ = 0 .2, τ = 0 .4, and 
+
+α = 0 .8, with pooling applied only during the first compression step. Although these suggestions are derived from evaluations on a single dataset and therefore have limited generalizability, they have already achieved relatively optimal performance. 
+
+D Additional Information of Ablation Experiments 
+
+In this section, we provide additional information during the inference process, such as the number of running requests, the number of waiting requests, and block utilization rates. Figure 19 illustrates the number of running re-quests during inference. As shown in Figure 19 (b), without hybrid scheduling, the number of run-ning requests remains at or below the maximum concurrency. In contrast, with hybrid scheduling enabled, the concurrency starts very high due to a large number of requests requiring only short responses. Figure 19 (c) compares the impact of enabling prefix caching. With prefix caching, the concurrency quickly reaches a high level, whereas 0 1000 2000 3000 4000 5000 
+
+> Time (s)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> number of running requests  Reasoning on AMC 23
+> zipage
+> w/o asynchronous compression
+
+(a) 0 250 500 750 1000 1250 1500 1750 
+
+> Time (s)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> number of running requests  Reasoning on the Mixture of GSM8K and AMC 23
+> zipage
+> w/o hybrid scheduling
+
+(b) 0 100 200 300 400 500 600 
+
+> Time (s)
+> 0
+> 50
+> 100
+> 150
+> number of running requests  Reasoning on LongBench
+> zipage
+> w/o prefix cache
+
+(c) 
+
+Figure 19: Number of running requests during infer-ence. 
+
+without prefix caching, the concurrency increases more gradually. Figure 20 illustrates the number of waiting re-quests during inference. When the waiting queue is non-empty, the inference engine operates at full scheduling capacity. In this case, the slope of the waiting request curve indicates the request pro-cessing speed. Asynchronous compression, hybrid scheduling, and prefix caching all provide signifi-cant acceleration. Figure 21 illustrates the real-time throughput during inference. Under request saturation, asyn-chronous compression, hybrid scheduling, and pre-fix caching deliver significant throughput improve-ments across various scenarios. As previously mentioned, constrained schedul-ing limits concurrency, resulting in some blocks being underutilized. Figure 22 further illustrates the block utilization rate. On the mixed workload, which includes many requests with both short in-puts and outputs, this underutilization becomes more pronounced, with less than half of the blocks 7732 0 1000 2000 3000 4000 5000 
+
+> Time (s)
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> number of waiting requests
+> Reasoning on AMC 23
+> zipage
+> w/o asynchronous compression
+
+(a) 0 250 500 750 1000 1250 1500 1750 
+
+> Time (s)
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> number of waiting requests
+> Reasoning on the Mixture of GSM8K and AMC 23
+> zipage
+> w/o hybrid scheduling
+
+(b) 0 100 200 300 400 500 600 
+
+> Time (s)
+> 0
+> 100
+> 200
+> 300
+> 400
+> 500
+> 600
+> number of waiting requests
+> Reasoning on LongBench
+> zipage
+> w/o prefix cache
+
+(c) 
+
+Figure 20: Number of waiting requests during inference. 
+
+being utilized most of the time. 
+
+E Additional Information of Comparison with PagedAttention 
+
+In this section, we provide additional comparative information between Zipage and Nano-vLLM. First, Figure 23 illustrates the number of running and waiting requests during inference on AMC23 using the Qwen3 model with different inference en-gines. The figure shows that the number of running requests in Nano-vLLM exhibits periodic fluctua-tions, consistent with the throughput variations in Figure 7 (a), while the step decoding time Figure in 7 (b) remains nearly constant. This indicates that the primary factor limiting throughput is con-currency, or more specifically, constrained concur-rency caused by limited memory. In contrast to Nano-vLLM, Zipage maintains consistently high throughput throughout because, under the Zipage framework, the maximum memory usage per re-quest is capped at a predefined limit, rather than continuously growing as the sequence length in-creases. 0 1000 2000 3000 4000 5000 
+
+> Time (s)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> throughput (tokens/s)
+> Reasoning on AMC 23
+> zipage
+> w/o asynchronous compression
+
+(a) 0 250 500 750 1000 1250 1500 1750 
+
+> Time (s)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> throughput (tokens/s)
+> Reasoning on the Mixture of GSM8K and AMC 23
+> zipage
+> w/o hybrid scheduling
+
+(b) 0 100 200 300 400 500 600 
+
+> Time (s)
+> 0
+> 500
+> 1000
+> 1500
+> 2000
+> 2500
+> throughput (tokens/s)
+> Reasoning on LongBench
+> zipage
+> w/o prefix cache
+
+(c) 
+
+Figure 21: Throughput during inference. 
+
+Figure 24 illustrates the number of running and waiting requests during inference on the mixture of GSM8K and AMC 23 using the Qwen3 model with different inference engines. In this mixed workload, the initial performance of Zipage and Nano-vLLM is very similar, as short-response re-quests dominate at the beginning. However, as long-response requests occupy a large number of KV cache blocks, requests in Nano-vLLM’s wait-ing queue experience longer delays, significantly increasing total execution time and reducing TPS. Figure 25 illustrates the number of running and waiting requests during inference on LongBench using the Qwen3 model with different inference engines. We observe that both throughput and the number of running requests are higher with Zipage. However, the total time taken by Zipage to com-plete inference is slightly longer, likely due to some excessively long outputs. While the average output length on LongBench is only 400 tokens, occa-sional requests may produce significantly longer outputs, which can substantially impact the total time. 7733 0 1000 2000 3000 4000 
+
+> Time (s)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> block occupancy (%)
+
+Reasoning on AMC 23 
+
+> zipage
+> w/o hybrid scheduling
+
+(a) 0 250 500 750 1000 1250 1500 1750 
+
+> Time (s)
+> 0
+> 20
+> 40
+> 60
+> 80
+> 100
+> block occupancy (%)
+
+Reasoning on the Mixture of GSM8K and AMC 23 
+
+> zipage
+> w/o hybrid scheduling
+
+(b) 
+
+Figure 22: Block occupancy during inference. 
+
+F Experiments on Models of Different Scales. 
+
+In this section, we report experimental results for Qwen3 models of different sizes. For all exper-iments, Zipage uses a budget of 2048. Figure 26 presents the TPS and pass@1 metrics for in-ference on AMC23 under the Zipage and Nano-vLLM frameworks. Across all model sizes, Zipage achieves significant throughput improvements. Ad-ditionally, the performance exceeds 95% of Full KV for all sizes except 14B, which is slightly below 95%. Real-time throughput, average decoding time per step, and the proportion across different con-currency ranges for the 0.6B, 14B, and 32B models are shown in Figures 27, 28, and 29, respectively. Figure 30 provides details for the DS Llama 8B model. 0 2000 4000 6000 8000 10000 
+
+> Time (s)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> number of running requests
+
+Reasoning on AMC 23 
+
+> zipage
+> nano-vllm
+
+(a) 0 2000 4000 6000 8000 10000 
+
+> Time (s)
+> 0
+> 200
+> 400
+> 600
+> 800
+> 1000
+> number of waiting requests
+
+Reasoning on AMC 23 
+
+> zipage
+> nano-vllm
+
+(b) 
+
+Figure 23: The number of running and waiting requests during inference during inference on AMC23. 0 250 500 750 1000 1250 1500 1750 2000 
+
+> Time (s)
+> 0
+> 2000
+> 4000
+> 6000
+> 8000
+> throughput (tokens/s)
+
+Reasoning on the Mixture of GSM8K and AMC 23 
+
+> zipage
+> nano-vllm
+
+(a) 0 250 500 750 1000 1250 1500 1750 2000 
+
+> Time (s)
+> 0
+> 250
+> 500
+> 750
+> 1000
+> 1250
+> number of running requests
+
+Reasoning on the Mixture of GSM8K and AMC 23 
+
+> zipage
+> nano-vllm
+
+(b) 0 250 500 750 1000 1250 1500 1750 2000 
+
+> Time (s)
+> 0
+> 1000
+> 2000
+> 3000
+> 4000
+> 5000
+> number of waiting requests
+
+Reasoning on the Mixture of GSM8K and AMC 23 
+
+> zipage
+> nano-vllm
+
+(c) 
+
+Figure 24: The real-time throughput, number of running and waiting requests during inference during inference on the mixture of GSM8K and AMC 23. 7734 0 50 100 150 200 250 300 350 400 
+
+Time (s) 
+
+0
+
+500 
+
+1000 
+
+1500 
+
+2000 
+
+2500 
+
+> throughput (tokens/s)
+
+Reasoning on LongBench 
+
+zipage 
+
+nano-vllm (a) 0 50 100 150 200 250 300 350 400 
+
+Time (s) 
+
+0
+
+50 
+
+100 
+
+150 
+
+> number of running requests
+
+Reasoning on LongBench 
+
+zipage 
+
+nano-vllm 
+
+(b) 0 50 100 150 200 250 300 350 400 
+
+Time (s) 
+
+0
+
+100 
+
+200 
+
+300 
+
+400 
+
+500 
+
+600 
+
+> number of waiting requests
+
+Reasoning on LongBench 
+
+zipage 
+
+nano-vllm 
+
+(c) 
+
+Figure 25: The real-time throughput, number of running and waiting requests during inference during inference on LongBench. 0.6B 8B 14B 32B (TP=2) 
+
+Model Size 
+
+0
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+5000 
+
+> TPS (tokens/s)
+
+1746.04 
+
+930.27 646.32 407.51 
+
+4827.77 
+
+(276.5%) 
+
+2557.45 
+
+(274.9%) 
+
+1612.91 
+
+(249.6%) 1059.76 
+
+(260.1%) 
+
+nano-vllm 
+
+zipage 
+
+0.6B 8B 14B 32B (TP=2) 
+
+Model Size 
+
+0
+
+20 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> pass@1 (%)
+
+49.84 
+
+90.07 96.40 94.84 
+
+47.73 
+
+(95.8%) 
+
+87.03 
+
+(96.6%) 
+
+89.68 
+
+(93.0%) 
+
+90.54 
+
+(95.5%) 
+
+nano-vllm 
+
+zipage 
+
+Figure 26: TPS and pass@1 performance across differ-ent model sizes. TP=2 indicates that the model is run on two GPUs using tensor parallelism, while all other experiments are conducted on a single GPU by default. 0 1000 2000 3000 4000 5000 6000 
+
+Time (s) 
+
+0
+
+2500 
+
+5000 
+
+7500 
+
+10000 
+
+12500 
+
+> throughput (tokens/s)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(a) 0 1000 2000 3000 4000 5000 6000 
+
+Time (s) 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> Time Per Output Token (ms)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(b) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+20 
+
+40 
+
+60 
+
+80  
+
+> Average Time per Step (ms)
+> 40.8
+> 48.4
+> 39.3
+> 51.7
+> 40.5
+> 52.9
+> 41.9
+> 53.8
+> 65.1
+> 53.7 54.9 52.4
+
+zipage 
+
+nano-vllm 
+
+(c) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+20 
+
+40 
+
+60 
+
+80    
+
+> Ratio to Total Steps (%)
+> 4.5
+> 16.0
+> 6.5
+> 54.1
+> 4.5
+> 19.0
+> 2.2 5.1 7.6 2.4
+> 74.8
+> 3.5
+
+zipage 
+
+nano-vllm 
+
+(d) 
+
+Figure 27: The figure shows Qwen3 0.6B’s performance using Zipage or Nano-vLLM on AMC 23, including:(a) real-time throughput, (b) per-step real-time decoding time, (c) average per-step time at different concurrency range, (d) and the ratio of steps to total steps under different concurrency range. 7735 0 2000 4000 6000 8000 10000 12000 14000 
+
+Time (s) 
+
+0
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+5000 
+
+6000 
+
+> throughput (tokens/s)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm (a) 0 2000 4000 6000 8000 10000 12000 14000 
+
+Time (s) 
+
+60 
+
+80 
+
+100 
+
+> Time Per Output Token (ms)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(b) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+25 
+
+50 
+
+75 
+
+100 
+
+125     
+
+> Average Time per Step (ms)
+> 69.2 62.3 58.9 62.1 57.8 63.9 66.1 69.0 62.4 69.5
+> 86.2 89.6
+
+zipage 
+
+nano-vllm 
+
+(c) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency range 
+
+0
+
+20 
+
+40 
+
+60 
+
+80       
+
+> Ratio to Total Steps (%)
+> 13.2
+> 69.1
+> 35.8
+> 26.8
+> 48.1
+> 3.0 1.6 0.4 0.2 0.2 1.0 0.4
+
+zipage 
+
+nano-vllm 
+
+(d) 
+
+Figure 28: The figure shows Qwen3 0.6B’s performance using Zipage or Nano-vLLM on AMC 23, including:(a) real-time throughput, (b) per-step real-time decoding time, (c) average per-step time at different concurrency range, (d) and the ratio of steps to total steps under different concurrency range. 0 5000 10000 15000 20000 
+
+Time (s) 
+
+0
+
+1000 
+
+2000 
+
+3000 
+
+4000 
+
+> throughput (tokens/s)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(a) 0 5000 10000 15000 20000 
+
+Time (s) 
+
+80 
+
+100 
+
+120 
+
+140 
+
+160 
+
+180 
+
+200 
+
+> Time Per Decoding Step (ms)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(b) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+50 
+
+100 
+
+150  
+
+> Average Time per Step (ms)
+> 94.3
+> 116.3
+> 96.1
+> 115.7
+> 100.9
+> 116.1
+> 98.5
+> 117.0
+> 92.6
+> 115.2 108.6
+> 117.8
+
+zipage 
+
+nano-vllm 
+
+(c) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency range 
+
+0
+
+20 
+
+40 
+
+60 
+
+80       
+
+> Ratio to Total Steps (%)
+> 14.6
+> 55.8
+> 4.8
+> 38.6
+> 74.9
+> 4.2 4.3 0.6 0.6 0.2 0.8 0.5
+
+zipage 
+
+nano-vllm 
+
+(d) 
+
+Figure 29: The figure shows Qwen3 32B’s performance using Zipage or Nano-vLLM on AMC 23, including:(a) real-time throughput, (b) per-step real-time decoding time, (c) average per-step time at different concurrency range, (d) and the ratio of steps to total steps under different concurrency range. (Tensor parallelism = 2) 7736 0 1000 2000 3000 4000 5000 6000 7000 
+
+Time (s) 
+
+0
+
+2000 
+
+4000 
+
+6000 
+
+8000 
+
+10000 
+
+> throughput (tokens/s)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm (a) 0 1000 2000 3000 4000 5000 6000 7000 
+
+Time (s) 
+
+40 
+
+60 
+
+80 
+
+100 
+
+> Time Per Decoding Step (ms)
+
+Reasoning on AMC 23 
+
+zipage 
+
+nano-vllm 
+
+(b) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+20 
+
+40 
+
+60 
+
+80    
+
+> Average Time per Step (ms)
+> 41.2
+> 47.8
+> 38.2
+> 53.0
+> 59.3 56.1 59.6 59.2 59.4 60.5 65.3 68.1
+
+zipage 
+
+nano-vllm 
+
+(c) <50 
+
+[50, 100) 
+
+[100, 150) 
+
+[150, 200) 
+
+[200,250) 
+
+>250 
+
+Concurrency Range 
+
+0
+
+20 
+
+40 
+
+60  
+
+> Ratio to Total Steps (%)
+> 14.8
+> 34.1
+> 2.6
+> 49.9
+> 3.9
+> 9.5
+> 61.6
+> 3.7
+> 11.6
+> 0.7
+> 5.5 2.2
+
+zipage 
+
+nano-vllm 
+
+(d) 
+
+Figure 30: The figure shows DS Llama 8B’s perfor-mance using Zipage or Nano-vLLM on AMC 23, in-cluding:(a) real-time throughput, (b) per-step real-time decoding time, (c) average per-step time at different concurrency range, (d) and the ratio of steps to total steps under different concurrency range. 7737

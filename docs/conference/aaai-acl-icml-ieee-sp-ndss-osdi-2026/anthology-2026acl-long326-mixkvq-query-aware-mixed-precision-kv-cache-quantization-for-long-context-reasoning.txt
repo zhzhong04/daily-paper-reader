@@ -1,0 +1,656 @@
+Title: 2026.acl-long.326.pdf
+
+URL Source: https://aclanthology.org/2026.acl-long.326.pdf
+
+Published Time: Thu, 11 Jun 2026 01:09:35 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+> Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 7189–7204 July 2-7, 2026 ©2026 Association for Computational Linguistics
+
+# MixKVQ: Query-Aware Mixed-Precision KV Cache Quantization for Long-Context Reasoning 
+
+Tao Zhang 1, Ziqian Zeng 1*, Hao Peng 2, Huiping Zhuang 1, Cen Chen 1,3 
+
+> 1
+
+South China University of Technology, China, 
+
+> 2
+
+Beihang University, China, 
+
+> 3
+
+Pazhou Laboratory, China,  
+
+> Correspondence: zqzeng@scut.edu.cn
+
+Abstract 
+
+Long Chain-of-Thought (CoT) reasoning has significantly advanced the capabilities of Large Language Models (LLMs), but this progress is accompanied by substantial memory and la-tency overhead from the extensive Key-Value (KV) cache. Although KV cache quantization is a promising compression technique, exist-ing low-bit quantization methods often exhibit severe performance degradation on complex reasoning tasks. Fixed-precision quantization struggles to handle outlier channels in the key cache, while current mixed-precision strate-gies fail to accurately identify components re-quiring high-precision representation. We find that an effective low-bit KV cache quantiza-tion strategy must consider two factors: a key channel’s intrinsic quantization difficulty and its relevance to the query. Based on this in-sight, we propose MixKVQ , a novel quanti-zation method that introduces a lightweight, query-aware algorithm to identify and preserve critical key channels that need higher precision, while applying per-token quantization for value cache. Experiments on complex reasoning datasets demonstrate that our approach signif-icantly outperforms existing low-bit methods, achieving performance comparable to a full-precision baseline at a substantially reduced memory footprint. The source code is available at https://github.com/ZeroNLP/MixKVQ. 
+
+1 Introduction 
+
+Recent pioneering Large Language Models (LLMs), such as OpenAI-o1 (OpenAI, 2024), DeepSeek-R1 (DeepSeek-AI et al., 2025), and Gemini 2.5 Pro (Reid et al., 2024), have demon-strated remarkable reasoning abilities by generating long Chain-of-Thoughts (CoT). To achieve superior performance, these models are trained to generate up to 128K tokens with multiple complex ratio-nales from different perspectives. However, the        
+
+> *Corresponding author Llama-8B Qwen-14B Qwen-32B
+> 0
+> 20
+> 40
+> 60
+> 80
+> Reasoning Score
+> -82% -82%
+> -65%
+> -20%
+> -14%
+> -13%
+> -9%
+> -14%
+> -10%
+> -4%
+> -3%
+> -3%
+> KVQuant KIVI KVTuner MixKVQ BF16
+
+Figure 1: Complex reasoning performance of differ-ent 2-bit KV cache quantization. Reasoning score is the average accuracy of AIME 2024-2025, MATH 500, GPQA, and LiveCodeBench. 
+
+auto-regressive nature of LLM inference introduces substantial memory overhead, stemming from the storage demands of the progressively growing Key-Value (KV) cache (Pope et al., 2023). As gener-ating tokens sequentially, LLMs must retain all previous key and value activations in memory to compute attention scores. Consequently, the mem-ory footprint of KV cache grows linearly with the sequence length. For instance, a 32B Qwen2.5 model (Yang et al., 2024), with a batch size of 64 and a sequence length of 32,768 tokens (both pre-filled and decoded), requires approximately 512 GB of GPU memory. This requirement is 8.59× greater than the memory used to store the model’s weights. Furthermore, the attention mechanism must repeatedly access this expanding KV cache at each decoding step, creating significant memory bandwidth pressure. This recurrent data movement leads to bandwidth saturation, establishing a crit-ical memory-bound bottleneck (Yu et al., 2022; Yuan et al., 2024) that severely constrains inference throughput. More recently, KV cache quantization has emerged as a promising solution. It converts the cache from high-precision floating-point formats 
+
+7189 to low bit-width integer representations. Channel-wise Key and token-wise Value asymmetric quan-tization has garnered much attention for its high accuracy and tuning-free nature (Liu et al., 2024; Hooper et al., 2024; Liu et al., 2025a). However, as demonstrated in Figure 1, exist-ing quantization methods lead to dramatic degra-dation on complex reasoning tasks when pushed to extreme bit-widths such as 2-bit. Their failures stem from following primary limitations. First, fixed-precision methods (Hooper et al., 2024; Liu et al., 2024; Duanmu et al., 2024; Su et al., 2025a) apply a uniform bit-width across the entire KV cache. This approach fails to accommodate chan-nels with extreme outliers, consequently leading to significant accuracy degradation. Second, exist-ing mixed-precision methods (Li et al., 2025; Chen et al., 2024; Liu et al., 2025b) typically allocate bit-widths based on quantization errors in the key or value caches. Under strict memory constraints, such heuristics allocate higher bit-widths to KV cache segments with larger quantization errors but over-compress those with smaller ones. Yet, these low-error segments may still demand higher preci-sion, resulting in significant degradation on com-plex reasoning tasks. The goal of KV cache quantization is a dual ob-jective: it must drastically reduce memory usage without compromising the fidelity of attention com-putations. However, existing methods often treat minimizing quantization error of key and value cache as a direct proxy for preserving fidelity. This strategy is flawed, as it may allocate higher bit-width to key channels that exhibit large numerical errors but have a negligible impact on the attention computation. Such misallocation yields negligible gains in attention fidelity while inefficiently con-suming the limited bit-budget. Our analysis shows that a key channel with large-magnitude activations may not be influential if its corresponding query activations are small. Preserving such channels of-fers diminishing returns and is an inefficient use of the limited bit budget. Therefore, an effective quantization strategy must consider two factors: a channel’s intrinsic quantization difficulty and its relevance to the query. Based on this insight, we propose MixKVQ ,a novel quantization method that introduces a lightweight, hybrid query-aware heuristic to iden-tify and preserve critical channels in higher pre-cision. This heuristic dynamically estimates the potential fidelity impact of quantizing each key channel by combining its intrinsic quantization difficulty with its relevance to the query. Chan-nels with a high estimated impact are preserved in higher precision. MixKVQ quantizes key cache per-channel with mixed precision and quantizes value cache per-token. To evaluate the effective-ness of our method, we conduct experiments on various models including Llama-3.1 (Dubey et al., 2024), and Qwen2.5 (Yang et al., 2024) family. Compared with the previous quantization method, our approach can achieve superior performance under different average bit widths in mathemati-cal reasoning tasks (MAA, 2024, 2025; Lightman et al., 2024; Rein et al., 2024), as shown in Figure 1. Our contributions are summarized as follows: • We find that for effective low-bit KV cache quantization, the precision allocated to a key channel must be determined by two factors: its intrinsic quantization difficulty and its dy-namic relevance to the query. • Building on this insight, we propose 
+
+MixKVQ , a novel quantization method for extreme low-bit KV cache quantization. MixKVQ quantizes key cache per-channel with mixed precision and quantizes value cache per-token. • Experiments on mathematical reasoning benchmarks demonstrate that MixKVQ con-sistently outperforms existing methods across various compression rates, achieving perfor-mance on par with the full-precision baseline. 
+
+2 Related Work 
+
+KV cache quantization. Recent advances in KV cache quantization focus on low-bit compression and asymmetry-aware optimization. Representa-tive techniques include rotation-based transforma-tions to handle outliers (Ashkboos et al., 2024; Su et al., 2025b; Duanmu et al., 2024), tuning-free asymmetric bit allocation (Liu et al., 2024; Su et al., 2025a; Qian et al., 2025), and mixed-precision adaptation (Li et al., 2025; Hooper et al., 2024). However, most existing quantization methods are proposed for non-reasoning task. Intuitively, KV cache quantization may pose greater risks in this context, as reasoning models typically involve long Chain-of-Thought (CoT) outputs (Wei et al., 2022), which are more prone to quantization error accu-mulation over the sequence. 7190 KV cache eviction. Researchers have proposed other several KV cache compression techniques. One direction is KV cache eviction methods (Xiao et al., 2024; Zhang et al., 2023; Han et al., 2024; Cai et al., 2024; Wan et al., 2025; Feng et al., 2025; Tian et al., 2025; Qin et al., 2025)improve computa-tional efficiency during model inference by retain-ing critical KV entries and discarding non-essential ones. However, eviction operations can lead to irreversible information loss, and some methods rely on predefined strategies, struggling to fully capture the dynamic characteristics of attention mechanisms. 
+
+KV cache management. Another strategy is KV cache management, which is an optimization tech-nique to accelerate LLM inference by improving memory utilization. KV cache management meth-ods mainly include prefilling-decoding disaggre-gation (Qin et al., 2024), low-rank decomposi-tion (Chang et al., 2024; Zhang et al., 2024; Sax-ena et al., 2024; Chang et al., 2025), offloading (Lee et al., 2024b; Ren et al., 2025), prefetching (Yüzügüler et al., 2025; Dong et al., 2025), and re-trieval (Tang et al., 2024; Di et al., 2025). It is worth noting that our fine-grained numerical compression is orthogonal to these methods. For instance, it can be combined with structural compression from low-rank methods, or applied within active pages managed by retrieval systems to optimize data rep-resentation. 
+
+3 Preliminaries 
+
+3.1 Transformer and the KV Cache 
+
+The core of a Transformer layer is the self-attention mechanism. The output oli for a query vector Qli at layer l is computed by attending to a sequence of key and value vectors: 
+
+ali = softmax 
+
+( Qli(Kl)⊤
+
+√D
+
+)
+
+, oli = aliV l, (1) where D is the model hidden size, ali denotes the attention weight vector for the i-th token at layer l.During autoregressive generation, the matrices Kl
+
+and V l contain the key and value vectors from all previous timesteps. To avoid costly recomputation, these matrices are stored in a KV cache , which grows linearly with the sequence length. 
+
+3.2 KV Cache Quantization 
+
+The memory footprint of the KV cache can become an inference bottleneck. Quantization addresses 
+
+> Figure 2: Absolute quantization error of key and value cache for Qwen-2.5-14B-Instruct model.
+
+this by storing the cache in a low-bit format. We employ a B-bit asymmetric quantization scheme, which approximates a tensor X with its dequan-tized representation ˜X:
+
+Q(X) = round 
+
+( X − zs
+
+)
+
+, (2) 
+
+˜X = Q(X) · s + z. (3) The parameters are a zero-point z = min( X) and a scaling factor s = (max( X) − min( X)) /(2 B −
+
+1) . The scaling factor s, which is determined by the dynamic range of the tensor, serves as a direct proxy for its quantization sensitivity. A larger s im-plies that a wider value distribution is compressed into the 2B discrete levels, leading to coarser granu-larity. Specifically, the rounding operation in Eq. 2 introduces a quantization error |xi − ˜xi| for each 
+
+xi ∈ X. This error is mathematically bounded by |xi − ˜xi| ≤ s/ 2 (see proof in Appendix A). A single outlier can inflate s, significantly increasing this error bound and degrading the approximation quality for all other elements. 
+
+4 Method 
+
+In long-context or batched inferences, the primary bottlenecks in memory and speed arise from stor-7191 Table 1: The error accumulation caused by low-bit KV cache quantization potentially leads to wrong responses in mathematical reasoning tasks.                
+
+> Question: Let △ABC have circumcenter Oand incenter Iwith IA ⊥OI , circumradius 13 , and inradius 6. Find AB ·AC .
+
+BF16 Given triangle △ABC with circumcenter O and incenter I, where IA ⊥ OI , circumradius R = 13 , and inradius r = 6 . We need to find AB · AC . · · · Thus, the product AB · AC is 468 .
+
+MixKVQ Given triangle △ABC with circumcenter O and incenter I, where IA ⊥ OI , circumradius R = 13 , and inradius r = 6 . We need to find AB · AC . · · · Thus, the product AB · AC is 468 .
+
+KIVI-4bit Given triangle △ABC with circumcenter O and incenter I, where IA ⊥ OI , circumradius 13 , and inradius                            
+
+> 6. We need to find AB ·AC .· · · So, 480 = x2−2y−(14 /13) y=x2−(2 + 14 /13) y=x2−(40 /13) y.
+> · · · Thus, the product AB ·AC is 468 .
+
+KIVI-2bit Given triangle △ABC with circumcenter O and incenter I, where IA ⊥ OI , circumradius R = 13 ,and inradius r = 6 . We need to find the product AB · AC . · · · So, 480 = x2 − 2y − (14 /13) y =               
+
+> x2−(2 + 14 /13) y=x2−(30 /13) y.· · · Thus, the product AB ·AC is 429 .
+
+KVTuner Given triangle △ABC with circumcenter O and incenter I, where IA ⊥ OI , circumradius R = 13 , and inradius r = 6 . We need to find the product AB · AC . · · · So, x2 − (2 + 14 /13) y = 480 . Which is            
+
+> x2−(30 /13) y= 480 .· · · Thus, the product AB ·AC is 429 .
+
+Table 2: The results of simulated KV cache quantization with various configurations. All quantization methods are applied at 2-bit precision.               
+
+> Perplexity ↓
+> Model Method WikiText2 C4 Qwen2.5-7B-Instruct BF16 6.46 2.51 KIVI-KV4 6.75 2.74 KIVI-K4V2 6.81 2.77 KIVI-K2V4 8.13 3.15 KIVI-KV2 8.87 3.24
+
+ing and loading the KV cache (Yuan et al., 2024). An effective way to alleviate this problem is to reduce the total number of bytes occupied by the KV cache, specifically through quantization. How-ever, existing quantization methods leads to dra-matic degradation on complex reasoning tasks when pushed to extreme bit-width, detailed in Sec-tion 4.1. To address this, we introduce MixKVQ, a novel method that introduces a lightweight, hybrid query-aware heuristic to preserve critical channels with higher precision, detailed in Section 4.2. 
+
+4.1 Quantization Error Analysis 
+
+In autoregressive LLMs, KV cache quantization error accumulates across two dimensions: model depth (layer-to-layer) and sequence length (token-to-token). While the quantization error for a single token or layer may be negligible, its cumulative effect across thousands of tokens can be substan-tial (Li et al., 2025). This leads to phenomena like token flipping and cascading generation errors, analogous to issues in model weight quantization (Lee et al., 2024a). As shown in Table 1, this error accumulation is particularly detrimental in math-ematical reasoning task, where the corruption of a single critical value can invalidate an entire log-ical chain, squandering significant computational resources. 
+
+Key Cache is Generally More Important . Fig-ure 2 visualizes the absolute quantization error in 2 bit of the key and value cache for the Qwen-2.5-14B-Instruct model (layer 0, head 2). Notably, certain channels in the key cache exhibit signifi-cantly larger quantization errors. In contrast, the error distribution for the value cache is more uni-form and lacks distinct outliers. As shown in Table 2, our experimental results confirm that preserving higher precision for the key cache is more critical for maintaining model performance. This finding aligns with prior work (Liu et al., 2024; Adnan et al., 2024; Li et al., 2025). Therefore, the core challenge is to develop a precision allocation strat-egy for the key cache that minimizes attention score loss under a constrained memory budget. 
+
+Fixed-Precision Methods Struggle with Outliers. 
+
+Existing fixed-precision methods (Liu et al., 2024; Hooper et al., 2024; Duanmu et al., 2024), perform poorly at low bit-widths like 2-bit. As illustrated in Figure 2, while these methods can adequately compress the value cache, they struggle to handle key cache channels with significant outliers. This results in large quantization errors and critical fail-ures on reasoning tasks. 7192 Figure 3: Analysis of Key channel properties on Qwen-2.5-14B-Instruct. (Left) Scatter plot of Query magnitude ( I)versus Key scale ( S) in Layer 0. Here, I denotes the average activation intensity of the Query vectors and reflects each channel’s contribution to the attention scores. Traditional methods assign high bit-widths to channels with high S but low I (shown as blue dots) due to their large S values; however, these channels are in fact non-crucial for preserving the fidelity of attention score computation. (Right) Channel statistics for Head 4. In contrast to the Key scales ( S), which are densely clustered and offer limited discriminative capability, the combined salience score (A = I · S ) effectively isolates critical channels that require high-precision retention. Bar colors denote the adaptive precision levels: green (BF16), orange (INT4), and grey (INT2). 
+
+Suboptimal bit-widths Allocation in Existing Mixed-Precision Methods. Current layer-wise and channel-wise approaches (Li et al., 2025; Chen et al., 2024; Liu et al., 2025b) exhibits shortcom-ings in bit-widths allocation. Layer-wise meth-ods, due to their static nature, are prone to over-aggressive quantization of sensitive layers (see Ap-pendix B). Channel-wise heuristics assign higher bit-widths to Key channels with larger scales. How-ever, Figure 3 (Left) shows that the magnitude of Query activations exhibits little correlation with Key scales, with a Pearson correlation coefficient of merely 0.16. Since high Query activation indi-cates greater importance for preserving attention fidelity, methods that rely solely on scaling fac-tors may preserve Key channels in higher precision (shown as red dots) that are in fact non-critical to accurate attention score computation. Moreover, Figure 3 (Right) highlights the limited discrimina-tive capability of scales alone: the distribution of 
+
+S is highly concentrated, with 80% of values in Head 0 clustered within the narrow range [2.80, 4.46], making it difficult to differentiate truly criti-cal channels. Together, these observations demon-strate that S alone is insufficient for identifying salient channels. The goal of KV cache quantization is to re-duce the KV cache memory footprint while pre-serving the fidelity of the attention computation. Our analysis posits that a key channel with large-magnitude activations may NOT be critical if its corresponding query activations are small . Pre-serving such channels offers diminishing returns and is an inefficient use of the limited bit budget. This motivates the need for a more informative metric that incorporates Query information to en-able effective precision allocation, particularly in low-bit regimes. 
+
+4.2 MixKVQ 
+
+Based on this insight, we propose MixKVQ , a novel method that introduces a lightweight query-aware heuristic to identify and preserve critical channels in higher precision. Given that the value cache can be adequately compressed, the main ob-jective is to mitigate the quantization error intro-duced in the attention scores .Let Q ∈ RLq ×D and K ∈ RLk ×D denote the query and key matrices, respectively, where D is the hidden dimension. When K is quantized to 
+
+˜K, the error in the pre-softmax attention scores, denoted as Eattn , is defined as: 
+
+Eattn = Q(K − ˜K)T . (4) Consider the error term for the i-th query token and j-th key token, denoted as Ei,j . Let ϵj,d =7193 Figure 4: Workflow of MixKVQ. Keys and Values undergo per-channel and per-token quantization, respectively, managed by a full-precision buffer of size R. For Key cache, salience Score Ad are updated every R tokens within the window, while Value cache utilize uniform 2-bit quantization. 
+
+Kj,d − ˜Kj,d represent the quantization noise for the key at token j and channel d. The logit error 
+
+Ei,j aggregates the error contributions across the channel dimension: 
+
+Ei,j =
+
+> D
+
+∑
+
+> d=1
+
+Qi,d · ϵj,d . (5) To minimize the impact on the attention mecha-nism, we aim to identify and preserve channels with the highest expected magnitude of error con-tribution, E[|Qi,d · ϵj,d |]. We approximate this ex-pectation as the product of their individual expected magnitudes: E[|Qi,d |] · E[|ϵj,d |]. We operationalize this via a heuristic metric, the Salience Score (Ad), derived from two low-cost statistics: 
+
+Importance Score ( Id): We estimate E[|Qi,d |]
+
+using the average absolute magnitude of the query channel d over the sequence length Lq:
+
+Id = 1
+
+LqLq
+
+∑
+
+> i=1
+
+|Qi,d |. (6) 
+
+Sensitivity Score ( Sd): For a uniform quantizer with bit-width B, the quantization error ϵj,d is bounded by half the scaling factor (i.e., |ϵj,d | ≤ Sd 
+
+> 2
+
+). Thus, We estimate E[|ϵj,d |] using the scaling factor 
+
+Sd for channel d:
+
+Sd = max( kd) − min( kd)2B − 1 , (7) where kd represents the vector of key values in channel d across the current tokens. Finally, the Salience Score Ad is defined as the product of these components: 
+
+Ad = Id · S d. (8) Channels with high Ad are deemed critical chan-nels , as they exhibit both high query relevance and high quantization sensitivity, thereby warranting higher-precision retention. We designed a three-tiered mixed-precision strat-egy. While prior studies indicate that 4-bit quantiza-tion offers a favorable trade-off between model per-formance and memory footprint (Liu et al., 2024; Lin et al., 2025; Liu et al., 2025a), we further opti-mize this balance by allocating bit-widths based on channel salience. To preserve generation quality, the most critical channels are retained in full pre-cision (BF16). Simultaneously, to maximize com-pression, we quantize moderately critical channels to UINT4 and aggressively compress non-critical channels to UINT2. Formally, we introduce two thresholds, τBF16 and τUINT4 , applied to the salience score Ad:• High-Precision (BF16): Channels with Ad >τBF16 are identified as highly critical and re-tained in BF16. • Medium-Precision (UINT4): Channels sat-isfying τUINT4 < Ad ≤ τBF16 are considered moderately critical and quantized to UINT4. • Low-Precision (UINT2): Channels with 
+
+Ad ≤ τUINT4 are deemed non-critical and compressed to UINT2. 7194 Table 3: Performance comparison of BF16, KVquant, KIVI, KVTuner, RotateKV and MixKVQ on AIME 2024-2025, MATH 500, GPQA-Diamond, and LiveCodeBench datasets. The best results are marked in bold.                                                                                                                                            
+
+> Accuracy (pass@1) Model Method Bit-width AIME 2024-2025 MATH 500 GPQA-Diamond LiveCodeBench Avg.
+> -BF16 41.67 89.80 48.99 34.62 53.77 KIVI KV4 35.00 86.60 46.46 28.57 49.16 KV2 31.67 85.80 37.37 17.58 43.11 KVQuant KV4 36.67 87.40 44.95 27.47 49.12 KV2 04.20 21.72 12.64 9.64 RotateKV KV4 36.67 88.00 42.93 30.22 49.45 DeepSeek-R1-Distill-Llama-8B KVTuner-C3.25 30.00 87.80 46.96 31.32 49.02 MixKVQ-C2.7 40.00 88.20 47.47 31.87 51.89
+> -BF16 61.67 93.60 58.59 45.05 64.73 KIVI KV4 55.00 92.20 56.06 42.31 61.39 KV2 50.00 87.80 52.53 31.32 55.41 KVQuant KV4 53.33 90.40 54.58 41.76 60.02 KV2 011.00 22.22 14.29 11.88 RotateKV KV4 56.67 92.40 55.56 42.31 61.73 DeepSeek-R1-Distill-Qwen-14B KVTuner-C2.90 41.67 89.80 50.00 40.11 55.40 MixKVQ-C2.3 60.00 92.40 56.57 43.41 63.10
+> -BF16 66.67 94.80 62.63 47.25 67.84 KIVI KV4 58.33 93.40 59.09 44.51 63.83 KV2 51.67 89.80 54.54 39.56 58.89 KVQuant KV4 60.00 92.60 58.08 43.96 63.66 KV2 042.80 30.81 20.33 23.48 RotateKV KV4 61.67 93.40 60.10 42.86 64.51 DeepSeek-R1-Distill-Qwen-32B KVTuner-C2.91 51.67 91.40 59.60 41.76 61.11 MixKVQ-C2.3 65.00 94.00 60.10 45.05 66.04
+
+The threshold determination process is detailed in Appendix D. The overall workflow of MixKVQ is illustrated in Figure 4. We apply per-channel quantization to the Key cache and per-token quantization to the Value cache. A buffer of size R stores tokens in full precision until the buffer size is reached, af-ter which they are group quantized. For the Key cache, the parameters Id and Sd are updated peri-odically (every R tokens). During this update, Id
+
+is derived by averaging the absolute magnitudes of Query activations within the current window. Con-versely, the Value cache undergoes uniform 2-bit per-token quantization. Specifically, we provide the pseudocode for MixKVQ when calculating the attention output in the prefill and decoding phases in Algorithm 1 , which is shown in Appendix E. 
+
+5 Experiments 
+
+5.1 Experimental Setup Models. We evaluate MixKVQ on four models including on the Deepseek-R1-Distill (DeepSeek-AI et al., 2025) series. We choose Deepseek-R1-Distill-Qwen-14B/32B (Yang et al., 2024) and Deepseek-R1-Distill-LLaMA-8B (Dubey et al., 2024). All experiments are conducted on a single NVIDIA A800 GPU (80GB). 
+
+Tasks. We evaluate MixKVQ on four reason-ing benchmarks: (1) AIME 2024-2025 (MAA, 2024, 2025) and MATH-500 (Lightman et al., 2024) for mathematical reasoning; (2) GPQA-Diamond (Rein et al., 2024) for graduate-level sci-entific reasoning; and (3) LiveCodeBench (Jain et al., 2025) for code generation, specifically using the subset from January 1, 2025 to April 6, 2025. 
+
+Baseline. We compare our method with KVquant (Hooper et al., 2024), KIVI (Liu et al., 2024), KV-Tuner (Li et al., 2025), RotateKV (Su et al., 2025b) and BF16 baseline. For all reasoning evaluations, we employ a sampling temperature of 0.6 and a top-p of 0.95. To ensure a fair comparison, we stan-dardize the group size at G = 32 and the residual length at R = 128 across all quantization methods, including our own (Algorithm 1). 
+
+5.2 Main Results 
+
+Table 3 presents the performance of MixKVQ on the AIME 2024-2025, MATH 500, GPQA-Diamond, and LiveCodeBench datasets. The results demonstrate that MixKVQ consistently outperforms existing methods across all evalu-ated models. For instance, on Qwen-32B model, MixKVQ attains an average accuracy of 66.04%, closely trailing the BF16 baseline of 67.84%. In contrast, the 4-bit baseline RotateKV achieves an 7195 Table 4: Performance comparison of BF16, KVQuant, KIVI, SKVQ, RotateKV and our MixKVQ on LongBench datasets. The best results within each model group are marked in bold.                                                                                                                                                                                                                                  
+
+> Single-document QA Summarization Few-shot Learning Code Method Bit-width Qasper MultiFieldQA QMSum MultiNews TREC TriviaQA SAMSum LCC RepoBench-P Avg. ↑
+> Mistral-7B-Instruct-v0.3
+> -BF16 41.58 55.23 25.75 27.82 76.00 88.59 47.35 60.53 61.68 53.84 KVQuant KV4 40.56 53.41 24.72 26.79 75.00 88.21 46.97 58.08 58.13 52.43 KV2 37.88 49.27 22.16 25.89 70.00 86.53 45.38 56.42 55.94 49.94 KIVI KV4 40.87 53.68 23.90 26.94 74.00 88.34 47.54 58.64 60.81 52.75 KV2 38.56 50.47 22.48 26.65 72.00 87.13 47.18 57.15 58.29 51.10 SKVQ KV4 40.95 53.36 22.04 26.57 76.00 89.32 47.65 58.85 56.58 52.37 KV2 32.64 46.57 22.20 26.46 76.00 87.52 46.09 57.90 54.16 49.95 RotateKV KV4 40.64 53.59 22.90 25.09 76.00 88.16 44.08 49.22 47.92 49.73 KV2 16.69 27.71 18.27 24.88 42.00 48.08 22.20 28.40 31.46 28.85 MixKVQ C2.7 41.19 54.52 26.23 27.66 76.00 88.59 46.89 60.44 61.60 53.68 Llama-3.1-8B-Instruct
+> -BF16 45.53 56.37 25.36 27.19 72.50 91.65 43.62 65.10 58.65 54.00 KVQuant KV4 44.03 51.67 25.25 26.87 71.00 91.03 43.61 62.15 55.13 52.30 KV2 36.51 41.85 22.94 25.82 65.00 86.27 41.94 59.88 50.87 47.90 KIVI KV4 44.42 52.10 25.28 26.86 72.50 91.42 44.07 62.45 55.04 52.68 KV2 41.02 45.86 24.57 26.79 71.50 91.14 43.41 60.55 51.64 50.72 SKVQ KV4 44.21 53.96 25.34 26.79 72.50 91.14 42.38 62.44 54.13 52.54 KV2 35.28 46.27 23.61 26.47 72.50 91.21 42.96 60.63 50.63 49.95 RotateKV KV4 44.32 53.92 25.00 27.03 71.50 90.84 43.12 63.88 56.39 52.89 KV2 10.95 22.64 17.50 20.37 21.00 9.84 8.18 30.29 29.20 18.89 MixKVQ C2.7 45.32 55.40 25.29 27.20 72.50 91.78 43.68 64.96 57.26 53.71
+
+average accuracy of 64.51% (a decrease of 3.33%), while the 2-bit baseline KIVI drops to 58.89% (a significant decline of 8.95%). This indicates that MixKVQ can effectively mitigates the quantization error that typically impairs reasoning capabilities. 30 40 50 60 70 
+
+Memory Usage (GB) 
+
+600 
+
+800 
+
+1000 
+
+1200 
+
+1400 
+
+1600  
+
+> Throughput (tokens/s)
+> BS=32 BS=96
+> BS=128 BS=32
+> BS=160
+> BS=256
+> BS=32
+> BS=160
+> BS=288
+> Baseline
+> MixKVQ ( R=128)
+> MixKVQ ( R=32)
+
+Figure 5: Memory usage and throughput comparison between MixKVQ and 16 bit baseline. 
+
+5.3 Long Context Generation Accuracy 
+
+Table 4 presents the evaluation on LongBench (Bai et al., 2024) for Mistral-7B and Llama-3.1. Com-pared to BF16 and competitive baselines, MixKVQ pushes the effective bit-width down to 2.70 bits with negligible performance degradation. This re-sult highlights the efficacy of our mixed-precision strategy, which surpasses quantization baselines in delivering both high fidelity of model performance and memory efficiency. 
+
+5.4 Efficiency Comparison 
+
+We assess the runtime efficiency of MixKVQ using workloads synthesized from ShareGPT 1, strictly following the vLLM evaluation setting (Kwon et al., 2023). We push the batch size to memory sat-uration and compare the throughput and peak mem-ory usage of MixKVQ (residual lengths 32/128) with the FP16 baseline on Llama2-13B-chat. As illustrated in Figure 5, with similar maximum memory usage, MixKVQ enables up to 2.25 ×
+
+larger batch size and gives 2.63 × ∼ 2.81 × larger throughput. These performance gains are expected to amplify with extended sequence lengths. Fur-thermore, we plan to integrate MixKVQ into high-performance serving frameworks like vLLM in fu-ture work, which we anticipate will unlock substan-tial additional throughput gains. Ablation studies investigating the sensitivity to hyperparameters (group size G, residual length R)and the contribution of the query-aware component (Id) are provided in Appendix F. 
+
+6 Conclusion 
+
+In this paper, we propose MixKVQ, a novel KV cache quantization algorithm without the need for any tuning. MixKVQ allocates the precision for a key channel depending on two factors: its intrinsic quantization difficulty and its dynamic relevance to the query. Based on this strategic, MixKVQ quan-
+
+> 1
+
+https://sharegpt.com/ 7196 tizes key cache per-channel mixed precision and quantizes value cache per-token. The evaluation shows that MixKVQ achieves optimal performance under extreme low-bit widths in complex reasoning tasks. 
+
+Limitations 
+
+While MixKVQ achieves substantial KV cache compression via ultra-low-bit quantization, its com-putational overhead during tensor transformation remains non-negligible despite our GPU-optimized mitigation strategies. The management of non-contiguous mixed-precision memory blocks dur-ing decoding could introduce latency. This limi-tation suggests opportunities to enhance runtime efficiency through deeper integration with LLM inference accelerators like vLLM. Additionally, our study does not encompass all attention mecha-nisms; specifically, we exclude Multi-Head Latent Attention (MLA), which differs significantly from the widely adopted Group-Query Attention (GQA). Furthermore, our latency analysis focuses primarily on memory-bound generation stages, leaving the computational bottlenecks in prompt processing phases insufficiently explored, particularly during batch compression operations across multiple key-value sequences. 
+
+Acknowledgements 
+
+This work was supported by National Natural Science Foundation of China (62406114,62472181,62306117), the Fun-damental Research Funds for the Central Universities (2024ZYGXZR074), Guangdong Basic and Applied Basic Research Founda-tion (2025A1515011413, 2026A1515011478, 2024A1515010220), Beijing Natural Science Foundation (L253021), GJYC program of Guangzhou (2024D03J0005), National Key R & D Project from Minister of Science and Technology (2024YFA1211500), and CCF-Baidu Open Fund. 
+
+References 
+
+Muhammad Adnan, Akhil Arunkumar, Gaurav Jain, Prashant Nair, Ilya Soloveychik, and Purushotham Kamath. 2024. Keyformer: Kv cache reduction through key tokens selection for efficient generative inference. Proceedings of Machine Learning and Systems , 7. Saleh Ashkboos, Amirkeivan Mohtashami, Maximil-ian L. Croci, Bo Li, Pashmina Cameron, Martin Jaggi, Dan Alistarh, Torsten Hoefler, and James Hensman. 2024. Quarot: Outlier-free 4-bit inference in rotated llms. Advances in Neural Information Processing Systems , 37:100213–100240. Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A bilingual, multi-task benchmark for long context understanding. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 3119–3137, Bangkok, Thailand. Association for Computational Linguistics. Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Baobao Chang, Junjie Hu, and Wen Xiao. 2024. Pyramidkv: Dynamic kv cache compression based on pyramidal information funneling. Preprint , arXiv:2406.02069. Chi-Chih Chang, Chien-Yu Lin, Yash Akhauri, Wei-Cheng Lin, Kai-Chiang Wu, Luis Ceze, and Mohamed S. Abdelfattah. 2025. xkv: Cross-layer svd for kv-cache compression. Preprint ,arXiv:2503.18893. Chi-Chih Chang, Wei-Cheng Lin, Chien-Yu Lin, Chong-Yan Chen, Yu-Fang Hu, Pei-Shuo Wang, Ning-Chi Huang, Luis Ceze, Mohamed S. Abdelfattah, and Kai-Chiang Wu. 2024. Palu: Compressing kv-cache with low-rank projection. Preprint , arXiv:2407.21118. Yidong Chen, Chen Zhang, Rongchao Dong, Haoyuan Zhang, Yonghua Zhang, Zhonghua Lu, and Jidong Zhai. 2024. Mixq: Taming dynamic outliers in mixed-precision quantization by online prediction. In SC24: International Conference for High Perfor-mance Computing, Networking, Storage and Analy-sis , pages 1–15. DeepSeek-AI, Daya Guo, Dejian Yang, Haowei Zhang, Jun-Mei Song, Ruoyu Zhang, Runxin Xu, Qihao Zhu, Shirong Ma, Peiyi Wang, Xiaoling Bi, Xiaokang Zhang, Xingkai Yu, Yu Wu, Z. F. Wu, Zhibin Gou, Zhihong Shao, Zhuoshu Li, Ziyi Gao, and 179 oth-ers. 2025. Deepseek-r1: Incentivizing reasoning ca-pability in llms via reinforcement learning. ArXiv ,abs/2501.12948. Shangzhe Di, Zhelun Yu, Guanghao Zhang, Haoyuan Li, Tao Zhong, Hao Cheng, Bolin Li, Wanggui He, Fangxun Shu, and Hao Jiang. 2025. Streaming video question-answering with in-context video kv-cache retrieval. arXiv preprint arXiv:2503.00540 .Yanhao Dong, Yubo Miao, Weinan Li, Xiao Zheng, Chao Wang, and Feng Lyu. 2025. Accelerating llm inference throughput via asynchronous kv cache prefetching. arXiv preprint arXiv:2504.06319 .Haojie Duanmu, Zhihang Yuan, Xiuhong Li, Jiangfei Duan, Xingcheng ZHANG, and Dahua Lin. 2024. SKVQ: Sliding-window key and value cache quanti-zation for large language models. In First Conference on Language Modeling .7197 Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Amy Yang, Angela Fan, Anirudh Goyal, Anthony S. Hartshorn, Aobo Yang, Archi Mitra, Archie Sravankumar, Artem Ko-renev, Arthur Hinsvark, Arun Rao, Aston Zhang, and 510 others. 2024. The llama 3 herd of models. ArXiv ,abs/2407.21783. Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S Kevin Zhou. 2025. Identify critical kv cache in llm inference from an output perturbation perspec-tive. Preprint , arXiv:2502.03805. Chi Han, Qifan Wang, Hao Peng, Wenhan Xiong, Yu Chen, Heng Ji, and Sinong Wang. 2024. Lm-infinite: Zero-shot extreme length generalization for large language models. Preprint , arXiv:2308.16137. Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. 2024. Kvquant: To-wards 10 million context length llm inference with kv cache quantization. In Advances in Neural Infor-mation Processing Systems , volume 37, pages 1270– 1303. Curran Associates, Inc. Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tianjun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. 2025. Live-codebench: Holistic and contamination free evalu-ation of large language models for code. The Thir-teenth International Conference on Learning Repre-sentations .Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gon-zalez, Hao Zhang, and Ion Stoica. 2023. Efficient memory management for large language model serv-ing with pagedattention. In Proceedings of the 29th Symposium on Operating Systems Principles , SOSP ’23, page 611–626, New York, NY, USA. Association for Computing Machinery. Janghwan Lee, Seongmin Park, Sukjin Hong, Minsoo Kim, Du-Seong Chang, and Jungwook Choi. 2024a. Improving conversational abilities of quantized large language models via direct preference alignment. In 
+
+Proceedings of the 62nd Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 11346–11364, Bangkok, Thai-land. Association for Computational Linguistics. Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024b. InfiniGen: Efficient generative inference of large language models with dynamic KV cache management. In 18th USENIX Symposium on Op-erating Systems Design and Implementation (OSDI 24) , pages 155–172, Santa Clara, CA. USENIX As-sociation. Xing Li, Zeyu XING, Yiming Li, Linping Qu, Hui-Ling Zhen, Yiwu Yao, Wulong Liu, Sinno Jialin Pan, and Mingxuan Yuan. 2025. Kvtuner: Sensitivity-aware layer-wise mixed-precision kv cache quantization for efficient and nearly lossless llm inference. In 
+
+Forty-second International Conference on Machine Learning .Hunter Lightman, Vineet Kosaraju, Yuri Burda, Harri-son Edwards, Bowen Baker, Teddy Lee, Jan Leike, John Schulman, Ilya Sutskever, and Karl Cobbe. 2024. Let’s verify step by step. In The Twelfth Inter-national Conference on Learning Representations .Yujun Lin, Haotian Tang, Shang Yang, Zhekai Zhang, Guangxuan Xiao, Chuang Gan, and Song Han. 2025. QServe:w4a8KV4 quantization and system co-design for efficient LLM serving. In Eighth Conference on Machine Learning and Systems .Ruikang Liu, Yuxuan Sun, Manyi Zhang, Haoli Bai, Xianzhi Yu, Tiezheng Yu, Chun Yuan, and Lu Hou. 2025a. Quantization hurts reasoning? an empirical study on quantized reasoning models. arXiv preprint arXiv:2504.04823 .Tengxuan Liu, Shiyao Li, Jiayi Yang, Tianchen Zhao, Feng Zhou, Xiaohui Song, Guohao Dai, Shengen Yan, Huazhong Yang, and Yu Wang. 2025b. Pm-kvq: Progressive mixed-precision kv cache quantization for long-cot llms. ArXiv , abs/2505.18610. Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. 2024. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of the 41st International Conference on Machine Learning ,volume 235 of Proceedings of Machine Learning Research , pages 32332–32344. PMLR. MAA. 2024. American invitational mathematics exami-nation - aime. In American Invitational Mathematics Examination - AIME 2024 .MAA. 2025. American invitational mathematics exami-nation - aime. In American Invitational Mathematics Examination - AIME 2025 .OpenAI. 2024. Introducing openai o1. Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. 2023. Effi-ciently scaling transformer inference. In Proceedings of Machine Learning and Systems , volume 5, pages 606–624. Curan. Tao Qian, Yu Wenyuan, and Zhou Jingren. 2025. Asymkv: Enabling 1-bit quantization of KV cache with layer-wise asymmetric quantization configura-tions. In Proceedings of the 31st International Con-ference on Computational Linguistics , pages 2316– 2328, Abu Dhabi, UAE. Association for Computa-tional Linguistics. Ruoyu Qin, Zheming Li, Weiran He, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2024. Mooncake: A kvcache-centric disaggregated archi-tecture for llm serving. Preprint , arXiv:2407.00079. 7198 Ziran Qin, Yuchen Cao, Mingbao Lin, Wen Hu, Shixuan Fan, Ke Cheng, Weiyao Lin, and Jianguo Li. 2025. CAKE: Cascading and adaptive KV cache eviction with layer preferences. In The Thirteenth Interna-tional Conference on Learning Representations .Machel Reid, Nikolay Savinov, Denis Teplyashin, Dmitry Lepikhin, Timothy P. Lillicrap, Jean-Baptiste Alayrac, Radu Soricut, Angeliki Lazaridou, Orhan Firat, Julian Schrittwieser, Ioannis Antonoglou, Ro-han Anil, Sebastian Borgeaud, Andrew M. Dai, Katie Millican, Ethan Dyer, Mia Glaese, Thibault Sottiaux, Benjamin Lee, and 654 others. 2024. Gemini 1.5: Unlocking multimodal understanding across millions of tokens of context. ArXiv , abs/2403.05530. David Rein, Betty Li Hou, Asa Cooper Stickland, Jack-son Petty, Richard Yuanzhe Pang, Julien Dirani, Ju-lian Michael, and Samuel R Bowman. 2024. Gpqa: A graduate-level google-proof q&a benchmark. In 
+
+First Conference on Language Modeling .Zebin Ren, Krijn Doekemeijer, Tiziano De Matteis, Christian Pinto, Radu Stoica, and Animesh Trivedi. 2025. An i/o characterizing study of offloading llm models and kv caches to nvme ssd. In Proceedings of the 5th Workshop on Challenges and Opportunities of Efficient and Performant Storage Systems , pages 23–33. Utkarsh Saxena, Gobinda Saha, Sakshi Choudhary, and Kaushik Roy. 2024. Eigen attention: Attention in low-rank space for kv cache compression. Preprint ,arXiv:2408.05646. Yi Su, Yuechi Zhou, Quantong Qiu, Juntao Li, Qin-grong Xia, Ping Li, Xinyu Duan, Zhefeng Wang, and Min Zhang. 2025a. Accurate KV cache quan-tization with outlier tokens tracing. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 12895–12915, Vienna, Austria. Association for Computational Linguistics. Zunhai Su, Zhe Chen, Wang Shen, Hanyu Wei, Linge Li, Huangqi Yu, and Kehong Yuan. 2025b. Rotatekv: Accurate and robust 2-bit kv cache quantization for llms via outlier-aware adaptive rotations. Preprint ,arXiv:2501.16383. Hanlin Tang, Yang Lin, Jing Lin, Qingsen Han, Shikuan Hong, Yiwu Yao, and Gongyi Wang. 2024. Razo-rattention: Efficient kv cache compression through retrieval heads. arXiv preprint arXiv:2407.15891 .Yuxuan Tian, Zihan Wang, Yebo Peng, Aomufei Yuan, Zhiming Wang, Bairen Yi, Xin Liu, Yong Cui, and Tong Yang. 2025. Keepkv: Eliminating output per-turbation in kv cache compression for efficient llms inference. Preprint , arXiv:2504.09936. Zhongwei Wan, Xinjian Wu, Yu Zhang, Yi Xin, Chao-fan Tao, Zhihong Zhu, Xin Wang, Siqi Luo, Jing Xiong, Longyue Wang, and Mi Zhang. 2025. D2o: Dynamic discriminative operations for efficient long-context inference of large language models. Preprint ,arXiv:2406.13035. Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, brian ichter, Fei Xia, Ed Chi, Quoc V Le, and Denny Zhou. 2022. Chain-of-thought prompt-ing elicits reasoning in large language models. In 
+
+Advances in Neural Information Processing Systems ,volume 35, pages 24824–24837. Curran Associates, Inc. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient streaming lan-guage models with attention sinks. In The Twelfth International Conference on Learning Representa-tions .Qwen An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayiheng Liu, Fei Huang, Guanting Dong, Hao-ran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxin Yang, Jingren Zhou, Jun-yang Lin, and 25 others. 2024. Qwen2.5 technical report. ArXiv , abs/2412.15115. Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soo-jeong Kim, and Byung-Gon Chun. 2022. Orca: A distributed serving system for Transformer-Based generative models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) , pages 521–538, Carlsbad, CA. USENIX Association. Zhihang Yuan, Yuzhang Shang, Yang Zhou, Zhen Dong, Chenhao Xue, Bingzhe Wu, Zhikai Li, Qingyi Gu, Yong Jae Lee, Yan Yan, Beidi Chen, Guangyu Sun, and Kurt Keutzer. 2024. Llm inference un-veiled: Survey and roofline model insights. ArXiv ,abs/2402.16363. Ahmet Caner Yüzügüler, Jiawei Zhuang, and Lukas Cavigelli. 2025. Preserve: Prefetching model weights and kv-cache in distributed llm serving. 
+
+arXiv preprint arXiv:2501.08192 .Rongzhi Zhang, Kuang Wang, Liyuan Liu, Shuohang Wang, Hao Cheng, Chao Zhang, and Yelong Shen. 2024. Lorc: Low-rank compression for llms kv cache with a progressive compression strategy. Preprint ,arXiv:2410.03111. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang "Atlas" Wang, and Beidi Chen. 2023. H2o: Heavy-hitter oracle for efficient generative in-ference of large language models. In Advances in Neural Information Processing Systems , volume 36, pages 34661–34710. Curran Associates, Inc. 7199 A Derivation of Quantization Error Bound 
+
+In this section, we provide a formal derivation for the quantization error bound mentioned in Sec-tion 3.2 (assuming your main text is in a section labeled like this). Recall the asymmetric quantization and dequan-tization operations defined as: 
+
+qi = round 
+
+( xi − zs
+
+)
+
+, (9) 
+
+˜xi = qi · s + z, (10) where xi ∈ X is the original value, qi is the quantized integer, ˜xi is the dequantized approxi-mation, z is the zero-point, and s is the scaling factor ( s > 0). We aim to find the upper bound of the absolute quantization error, denoted as |xi − ˜xi|. By substi-tuting the definition of ˜xi into the error term, we have: 
+
+|xi − ˜xi| = |xi − (qi · s + z)|. (11) Rearranging the terms inside the absolute value operator: 
+
+|xi − ˜xi| = |(xi − z) − qi · s|. (12) We can factor out the scaling factor s:
+
+|xi − ˜xi| =
+
+∣∣∣∣s ·
+
+( xi − zs − qi
+
+)∣ ∣∣∣ . (13) Since s is a positive scalar derived from the dy-namic range, we can move it outside the absolute value: 
+
+|xi − ˜xi| = s ·
+
+∣∣∣∣
+
+xi − zs − qi
+
+∣∣∣∣ . (14) Let yi = xi−zs . By definition, qi = round (yi). The rounding operation round (·) maps a real number to the nearest integer. A fundamental property of this operation is that the absolute difference between a real number and its nearest integer is at most 0.5:
+
+|yi − round (yi)| ≤ 12 . (15) Substituting this inequality back into our error equa-tion: 
+
+|xi − ˜xi| = s · | yi − qi|≤ s · 12= s
+
+2 . (16) Thus, the quantization error for any element xi is bounded by half the scaling factor s.        
+
+> Table 5: The Pearson correlation coefficient between query and key scale for Qwen-2.5-14B and Llama-3-8B across all layers.
+> Model Layer 0 Layer 16 Layer 31 Avg. Qwen-2.5-14B 0.16 0.15 0.25 0.21
+
+B Failure Case Analysis of KVTuner 
+
+KVTuner operates by leveraging calibration data to statically identify entire layers deemed “less crit-ical.” To meet a target memory budget, these desig-nated layers are then subjected to aggressive K2V2 quantization. However, this layer-level approach has a fundamental limitation. As illustrated in Fig-ure 6, even within these so-called non-critical lay-ers, there exist specific dimensions that are difficult to quantize due to outlier values. Uniformly apply-ing an aggressive quantization policy to the entire layer results in significant information loss in these critical dimensions, introducing substantial errors that degrade the model’s performance on complex, multi-step reasoning tasks. 
+
+C More channel-level analysis 
+
+We extended the analysis of query vs. key scale correlation to additional layers. As shown in Table 5, we computed the Pearson correlation coefficient between query and key scale for Qwen-2.5-14B across all layers. The results confirm that the low correlation holds across deeper layers. 
+
+D Threshold Search Strategy 
+
+This section details the procedure for determining the importance thresholds, τBF16 and τINT4 , which govern the mixed-precision allocation in the KV cache. We formulate the threshold selection as a dual-objective optimization problem. This frame-work facilitates the joint optimization of both hy-perparameters to effectively navigate the trade-off between memory compression and performance fidelity. 
+
+D.1 Optimization Setup 
+
+We employ the O PTUNA framework to conduct a joint search for τBF16 and τINT4 within the search space [0 .1, 2.0] . The optimization aims to satisfy two conflicting objectives simultaneously: 1. Maximize Accuracy: We evaluate the quan-tized model on the GSM8K benchmark. This 7200 Figure 6: Failure case analysis of the KVTuner method. KVTuner statically identifies many layers as non-critical and applies a uniform, aggressive K2V2 (2-bit key, 2-bit value) quantization policy to them. However, as visualized in the heatmaps, even these targeted layers contain specific dimensions with outlier features that resist effective quantization. 
+
+metric ensures that the quantization pro-cess preserves the model’s complex chain-of-thought reasoning abilities. 2. Minimize Effective Bit-width ( Beff ): We aim to minimize the average bit-width per pa-rameter, defined as: 
+
+Beff = 1
+
+N
+
+> N
+
+∑
+
+> i=1
+
+bi(τBF16 , τ INT4 ) (17) where N is the total number of channels, and bi ∈ { 16 , 4, 2} denotes the bit-width as-signed to the i-th channel based on the se-lected thresholds. 
+
+D.2 Selection Process 
+
+We utilize the Tree-structured Parzen Estimator (TPE) sampler to efficiently explore the hyperpa-rameter space. By executing 30 trials, we con-struct a Pareto frontier that visualizes the optimal trade-offs between accuracy and memory efficiency. From this frontier, we select the configuration that yields the highest accuracy while maintaining the effective bit-width below a strict constraint. As illustrated in Figure 7, the optimal thresholds vary across architectures, reflecting their differing sensitivities to quantization. For the R1-Llama-8B ,we select thresholds (τBF16 , τ INT4 ) = (1 .44 , 0.79) ,resulting in an effective bit-width of 2.7 bits. In contrast, the R1-Qwen-7B model exhibits higher sensitivity, requiring more conservative thresholds of (0 .63 , 0.41) which yield 3.4 bits. Larger mod-els demonstrate greater robustness to compression. specifically, R1-Qwen-14B and R1-Qwen-32B 
+
+both achieve an effective bit-width of 2.3 bits with thresholds of (1 .52 , 1.60) and (1 .85 , 1.58) , respec-tively. 
+
+E Detailed Implementations 
+
+This section details the implementation of the MixKVQ algorithm proposed in Section 4. We provide the pseudocode in Algorithm 1, covering the attention computation logic during the decoding phases. To ensure compatibility with modern Large Lan-guage Model architectures, our quantization granu-larity is strictly aligned with the attention mecha-nism. For models employing Grouped Query At-tention (GQA), importance scores are computed at the KV head group level. Specifically, we ag-gregate query magnitudes from all query heads corresponding to a shared KV head to determine the appropriate quantization precision. 
+
+Storage Layout The KV cache is organized into three distinct components to balance memory effi-ciency and retrieval precision: • Quantized Storage ( Q(XK/V )): This com-7201 2.5 3.0 3.5 4.0 4.5 5.0 
+
+> Equivalent Bits
+> 0.78
+> 0.80
+> 0.82
+> 0.84
+> 0.86
+> 0.88
+> 0.90
+> 0.92
+> 0.94
+> 0.96
+> Accuracy
+> (1.58, 1.93)
+> (1.51, 1.85)
+> (1.44, 0.79)
+> (0.23, 1.43)
+
+(a) R1-Llama-8B       
+
+> Trials
+> Pareto Frontier
+> 2.5 3.0 3.5 4.0 4.5 5.0 5.5
+> Equivalent Bits
+> 0.78
+> 0.80
+> 0.82
+> 0.84
+> 0.86
+> 0.88
+> 0.90
+> 0.92
+> 0.94
+> 0.96
+> (1.77, 1.64)
+> (1.38, 1.84)
+> (1.36, 1.41)
+
+(b) R1-Qwen-7B       
+
+> Trials
+> Pareto Frontier
+> 2.5 3.0 3.5 4.0 4.5 5.0 5.5
+> Equivalent Bits
+> 0.78
+> 0.80
+> 0.82
+> 0.84
+> 0.86
+> 0.88
+> 0.90
+> 0.92
+> 0.94
+> 0.96
+> Accuracy
+> (1.88, 1.65)
+> (1.52, 1.60)
+
+(c) R1-Qwen-14B         
+
+> Trials
+> Pareto Frontier
+> 2.25 2.50 2.75 3.00 3.25 3.50 3.75 4.00 4.25
+> Equivalent Bits
+> 0.78
+> 0.80
+> 0.82
+> 0.84
+> 0.86
+> 0.88
+> 0.90
+> 0.92
+> 0.94
+> 0.96
+> (1.86, 1.98)
+> (1.85, 1.58)
+
+(d) R1-Qwen-32B 
+
+> Trials
+> Pareto Frontier
+
+Figure 7: Pareto frontier of different models with the MixKVQ quantization mode on the 25 data slices of the GSM8K dataset. 
+
+ponent stores the majority of historical states. Data is packed into low-bit contiguous tensors (e.g., UINT4 or UINT2) to maximize memory throughput. • Sparse Outlier Storage ( XKBF 16 ): Salient channels identified by the importance thresh-olds are retained in full BF16 precision. These outliers are managed using sparse formats to minimize storage overhead. • High-Precision Residual Buffer ( XR): Acompact buffer maintained in full precision to temporarily store the most recent tokens before quantization. 
+
+E.1 Amortized Scheduling via Lazy Updates 
+
+To mitigate the computational overhead associated with frequent re-quantization, we employ the lazy update strategy controlled by a residual length hy-perparameter R.During the decoding phase, newly generated Key and Value states are initially appended to the full-precision residual buffer XR. Consequently, quan-tization operations are not executed at every gener-ation step. Computationally intensive tasks, includ-ing channel selection, outlier extraction, and bit-packing, are triggered exclusively when the buffer length reaches R. Upon triggering, the accumu-lated block is processed via the KeyQuant proce-dure, partitioned into quantized and outlier com-ponents, and subsequently merged into the main cache. The buffer is then reset. This lazy update mechanism serves a critical dual purpose: it not only amortizes the computational overhead across 
+
+R decoding steps but also functions as a tempo-ral stabilization window. Since channel salience (Id) often exhibits transient volatility due to lo-cal attention patterns on recent tokens, immediate quantization risks assigning precision based on un-stable statistics. By isolating these volatile states 7202 Table 6: Ablation study of MixKVQ by changing group size G and residual length R.                    
+
+> Model Group Size PPL ↓
+> Llama2-13B-chat 32 7.05 64 7.10 128 7.12
+> Model Residual Length PPL ↓
+> Llama2-13B-chat 32 7.09 64 7.04 96 7.03 128 7.05 256 7.03
+> Table 7: Ablation study of MixKVQ by isolating query-aware component.
+> Model Method AIME 2024-2025
+> R1-Qwen-14B error-only 53.33 MixKVQ 60.00 R1-Llama-8B error-only 33.33 MixKVQ 40.00
+
+within XR, we defer the quantization decision until tokens transition out of the local window. 
+
+E.2 Efficient Online Saliency Estimation 
+
+Calculating the cumulative importance of KV chan-nels typically necessitates scanning the entire query history, which is computationally prohibitive. To address this, we maintain a running accumulator of query magnitudes within the cache. At each decod-ing step, the magnitude of the current query token is added to this accumulator. Furthermore, for architectures incorporating Ro-tary Positional Embeddings (RoPE), saliency eval-uation is performed post-transformation. Specifi-cally, importance scores are calculated after apply-ing rotary embeddings to the query and key states. This ensures that the metric accurately reflects the attention distribution in the rotated space. 
+
+F Ablation Study 
+
+Specifically, we investigate the sensitivity of model performance to the quantization group size G and residual length R, and further isolate the contribu-tion of the query-aware saliency term ( Id) against error-only baselines. 
+
+The effect of group size. We fix the residual length at 128 and the sink length at 32. We vary the group sizes to 32, 64, and 128. From Table 6, we observe that PPL decreases with group sizes. Note the zero-point and the scaling factor are calculated according to this group size. The choice of group size will greatly impact the KV cache compression effect under a long input. 
+
+The effect of residual length. We fix the group size at 32 and the sink length at 32. We vary the residual length across 32, 64, 96, 128, and 256. As shown in Table 6, there is no consistent pattern between residual lengths and model accuracy. Al-though no significant differences were observed among the tested residual lengths 32, 64, 96, 128, 256, a sufficiently large residual length remains crucial, offering considerable performance boosts for difficult tasks. 
+
+Necessity of the query-aware component. To validate the efficacy of our composite metric Ad =
+
+Id × S d, we conducted a comparative analysis against a Error-only baseline, which determines precision solely based on channel magnitude ( 
+
+Ad = Sd). We evaluated the variant on the AIME 2024-2025 reasoning benchmark. As presented in Table 7, the full MixKVQ method outperforms the error-only baseline. This result confirms that relying exclusively on quantization error minimiza-tion is insufficient, explicitly incorporating query-dependent importance ( Id) is indispensable for pre-serving model fidelity during complex reasoning tasks.         
+
+> Table 8: Per-layer time breakdown (%) and call rates across decode steps.
+> Operation Time Breakdown (%) # of Calls (%)
+> Channel Selection 2.17 3.13 Attention 64.62 100 MLP 33.21 100
+
+G Computation Overhead 
+
+In Table 8, we report operation-level breakdowns for R1-Qwen-7B. While Channel Selection com-prise 2.17% of per-layer execution, which enables a KV cache memory savings of over 79% (com-pressing from 16-bit to 3.4-bit). 
+
+H Additional Experiments 
+
+In this section, we benchmark MixKVQ on DeepSeek-R1-Distill-Qwen-7B (Yang et al., 2024). 7203 Table 9: Performance comparison of BF16, KVquant, KIVI, KVTuner, RotateKV and MixKVQ on AIME 2024-2025, MATH 500 and GPQA-Diamond datasets. The maximum number of generation tokens is limited to 32,768. The best results are marked in bold. 
+
+Accuracy (pass@1) Model Method Bit-width AIME 2024-2025 MATH 500 GPQA-Diamond LiveCodeBench Avg. 
+
+- BF16 46.67 89.00 49.49 23.08 52.06 KIVI KV4 36.67 87.00 44.94 20.88 47.37 KV2 30.00 84.60 35.35 16.48 41.61 KVQuant KV4 33.33 87.40 41.41 19.44 45.40 KV2 1.67 37.80 25.76 5.49 17.68 RotateKV KV4 33.33 86.40 42.93 18.33 45.25 DeepSeek-R1-Distill-Qwen-7B KVTuner-C3.92 31.67 86.00 39.90 19.23 44.20 MixKVQ-C3.4 40.00 88.20 45.45 20.33 48.49 
+
+Algorithm 1: The MixKVQ Prefill & Decoding Algorithm 
+
+parameter: group size G, residual length R, τBF16 , τUINT4  
+
+> 1
+
+procedure Prefill :Input: X ∈ Rlprompt ×d 
+
+> 2
+
+XK = XW K , XV = XW V 
+
+> 3
+
+r = ( lprompt − F )% R 
+
+> 4
+
+XKg = XK [: lprompt − r], XKr = XK [lprompt − r :]  
+
+> 5
+
+XVg = XV [: lprompt − r], XVr = XV [lprompt − r :]  
+
+> 6
+
+Q(XVg ) ← GroupQuant (XVg , dim=token , numGroup = d//G ) 
+
+> 7
+
+Q(XKU IN T 4 ), Q (XKU IN T 2 ), XKBF 16 ← KeyQuant (XKg , τ BF16 , τ UINT4 ) 
+
+> 8
+
+KV cache ← Q(XKU IN T 4 ), Q (XKU IN T 2 ), XKBF 16 , XKr , Q (XVg ), XVr 
+
+> 9
+
+return XK , XV 
+
+> 10
+
+procedure Decoding :Input: KV cache , t ∈ R1×d 
+
+> 11
+
+tQ = tW Q, tK = tW K , tV = tW V 
+
+> 12
+
+Q(XKU IN T 4 ), Q (XKU IN T 2 ), XKBF 16 , XKr , Q (XVg ), XVr ← KV cache  
+
+> 13
+
+XKr ← Concat ([ XKr , tK ], dim=token ) 
+
+> 14
+
+XVr ← Concat ([ XVr , tV ], dim=token ) 
+
+> 15
+
+if len (XKr ) = R then  
+
+> 16
+
+Q(XKU IN T 4−new ), Q (XKU IN T 2−new ), XKnew ←KeyQuant (XKr ) 
+
+> 17
+
+Q(XKU IN T 4 ) ← Concat ([ Q(XKU IN T 4 ), Q (XKU IN T 4−new )] , dim=token ) 
+
+> 18
+
+Q(XKU IN T 2 ) ← Concat ([ Q(XKU IN T 2 ), Q (XKU IN T 2−new )] , dim=token ) 
+
+> 19
+
+XKBF 16 ← Append ([ XKBF 16 , XKnew ])  
+
+> 20
+
+XKr ← empty tensor  
+
+> 21
+
+Q(XVr ) ← GroupQuant (XVr , dim=token , numGroup = d//G ) 
+
+> 22
+
+Q(XVg ) ← Concat ([ Q(XVg ), Q (XVr )] , dim=token ) 
+
+> 23
+
+XVr ← empty tensor.  
+
+> 24
+
+A ← Concat ([ tQQ(XKU IN T 4 ) + tQQ(XKU IN T 2 ) + tQXKBF 16 , tQXKr ], dim=token ) 
+
+> 25
+
+Ag = Softmax (A)[: −R], Ar = Softmax (A)[ −R :]  
+
+> 26
+
+tO ← AgQ(XVg ) + ArXVr 
+
+> 27
+
+KV cache ← Q(XKU IN T 4 ), Q (XKU IN T 2 ), XKBF 16 , XKr , Q (XVg ), XVr 
+
+> 28
+
+return tO 
+
+> 29
+
+function KeyQuant (XK ∈ Rl×d, τ BF16 , τ UINT4 ): 
+
+> 30
+
+XKU IN T 4 , XKU IN T 2 , XKBF 16 ← OutlierReserve (XK , τ BF16 , τ UINT4 ) 
+
+> 31
+
+Q(XKU IN T 4 ) ← GroupQuant (XKU IN T 4 , dim=channel , numGroup = l//G ) 
+
+> 32
+
+Q(XKU IN T 2 ) ← GroupQuant (XKU IN T 2 , dim=channel , numGroup = l//G ) 
+
+> 33
+
+return Q(XKU IN T 4 ), Q (XKU IN T 2 ), XKBF 16 7204
