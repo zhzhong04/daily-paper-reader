@@ -1,0 +1,445 @@
+Title: Fetch-then-Explore: Decoupling Selection from Extraction over a Persistent Workspace for Search Agents
+
+URL Source: https://arxiv.org/pdf/2608.02097v1
+
+Published Time: Tue, 04 Aug 2026 02:17:49 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# Fetch-then-Explore: Decoupling Selection from Extraction over a Persistent Workspace for Search Agents 
+
+Qi Liu 1, Yiqun Chen 1, Zidan Chen 1, Yan Gao 2, Yi Wu 2, Yao Hu 2, Jiaxin Mao 1, Fengbin Zhu 3, Tat-Seng Chua 3
+
+> 1
+
+Renmin University of China , 2Xiaohongshu Inc. , 3National University of Singapore 
+
+Search agents now answer questions that take dozens of searches to settle, yet how such an agent reads a page has drawn far less attention than how it finds one. Nearly all of them use one of two document interfaces, and both tie a page to the moment it is opened. Visit-and-read injects a reading of the page into the message history at fetch time, fixing that reading before the agent knows which fact it will need. Stateful browsing instead extracts on demand from the page in hand, but holds one page at a time and releases it as soon as the agent opens another. Either way, a page that turns out to matter many turns later has to be fetched and rendered into context all over again. We propose Fetch-then-Explore , which separates page selection from evidence extraction and keeps what it selects: pages are recorded in a per-question workspace on the filesystem rather than the context window or a transient session, and evidence is pulled from them on demand later. Selection becomes almost free, extraction can wait until the agent knows what to look for and be repeated as its hypothesis sharpens, and pages are not released when the agent moves on, so evidence accumulates across the trajectory. In a unified ReAct harness with fixed search, we compare Fetch-then-Explore against snippet-only, visit-and-read, and browsing baselines on two open-web benchmarks, BrowseComp and WideSearch, across three agent backbones. It leads BrowseComp accuracy at every backbone and generally matches or exceeds the baselines on WideSearch, and a behavioral analysis traces the gains to the workspace’s defining move: returning to a page after leaving it, which it does far more than any transient interface, so evidence missed on a first pass can still be recovered later. 
+
+ Github: https://github.com/liuqi6777/search_agent 
+
+Q Correspondence: qiliu6777@gmail.com , maojiaxin@gmail.com BrowseComp                  
+
+> (Acc)
+> WideSearch
+> (Row-F1)
+> 0
+> 10
+> 20
+> 30
+> 40
+> 50
+> 60
+> 70
+> 80
+> Score (%)  44.5 42.0
+> 37.5
+> 30.5 27.5
+> 34.3 33.3 35.5
+> 25.6 23.1
+> Qwen3.5-35B-A3B
+> BrowseComp
+> (Acc)
+> WideSearch
+> (Row-F1)
+> 52.5 50.5 48.0
+> 43.5
+> 37.5 39.1 36.0 38.8
+> 30.2
+> 26.7
+> Qwen3.5-122B-A10B
+> BrowseComp
+> (Acc)
+> WideSearch
+> (Row-F1)
+> 70.5
+> 66.0 64.0 63.5 62.0
+> 51.4
+> 47.1
+> 51.5
+> 45.9
+> 42.5
+> DeepSeek-V4-Pro
+> fetch-explore open-find visit-summary visit-snippet snippet-only
+
+Figure 1 Main results across three agents and two open-web benchmarks. fetch_explore (ours) is highlighted with a bold outline. Holding search and harness fixed, externalizing document access leads on BrowseComp accuracy at every backbone and stays on par with the strongest visit-and-read baseline on WideSearch Row-F1. 
+
+# 1 Introduction 
+
+Long-horizon search agents have become a dominant way to reach the open web for tasks that require gathering evidence across many sources, ranging from open deep-research systems (Li et al., 2025a; Team et al., 2025b; Qiao et al., 2025; Team et al., 2025a; Wu et al., 2025a; Li et al., 2025c; Zheng et al., 2025; Li et al., 1arXiv:2608.02097v1 [cs.AI] 3 Aug 2026 Visit-and-Read  Fetch-then-Explore                                                               
+
+> Agent Agent
+> snippets
+> Question
+> “Who co-founded Acme Corp (founded 1998)?”
+> web search visit (url)
+> Chunk / Summary
+> “…Acme, founded 1998…”
+> ✗weld two operations in one
+> Chunk: may pick wrong
+> LLM summary: lose original
+> content and i rreversible
+> web search
+> Snippets
+> [D1] “…MIT…”
+> [D2] “…1998…” ✓
+> [D3] “…”
+> fetch (url)
+> fetch D2
+> →URL: https://www...
+> path: xxx
+> size: 12kb
+> grep / read
+> grep “co-founder” →D2:412
+> read D2 @line 405
+> →405: …Jane Q. Doe
+> co-founded Acme…
+> Snippets
+> [D1] “…MIT…”
+> [D2] “…1998…” ✓
+> [D3] “…”
+> processed content snippets header matched lines
+> cache full document
+> ✓decoupled
+> Externalized Workspace
+> off-context · file system · repeatable · cross document
+> find evidence
+> document selection evidence extraction
+> Browsing
+> (Open+Find)
+> Agent
+> open / find
+> open D2 →lines 1–200
+> find “co-founder” →412
+> open D2 @405 →405–604
+> →412: …Jane co-founded…
+> open D3 →D2 released
+> Browse Session
+> in-context · single page · transient
+> snippets window / matches
+> ✓decoupled ✗transient
+> web search
+> Snippets
+> [D1] “…MIT…”
+> [D2] “…1998…” ✓
+> [D3] “…”
+
+Figure 2 The document side of a search agent . Left, visit-and-read: visit fuses selection and extraction into one fixed fetch-time rendering; everything outside it is gone. Middle, browsing: open /find decouple the two but hold one transient page at a time. Right, Fetch-then-Explore (ours): fetch records each page in a persistent per-question workspace Cq,deferring extraction to on-demand grep /read with nothing evicted. 
+
+2025b; Su et al., 2025; Xi et al., 2025) to commercial offerings such as OpenAI Deep Research and Perplexity. Almost all share a ReAct-style architecture (Yao et al., 2023), in which the agent reasons over the message history, issues a tool call, appends the observation, and repeats. Search is the tool such an agent reaches for first and most often, and much of the work on these systems has gone into making that call better. But search is only the beginning. A result exposes only a title, URL, and snippet, enough to suggest that a page is relevant but rarely enough to answer a multi-hop question or fill a broad table (Wei et al., 2025; Wong et al., 2025). The agent therefore needs a document-access tool that opens a selected result and reveals more of its body. Most open deep-research agents implement a variant of the same interface (Team et al., 2025b; Li et al., 2025a; Du et al., 2026), which we call visit-and-read : a visit -style call fetches a URL and immediately injects a reading of the page into the message history. Because pages are long and noisy, that reading is not the raw document but a goal-chunked window, an LLM summary, or a truncated body, all chosen at fetch time , before the agent knows which fact it will ultimately need. Selecting a page and extracting evidence from it are therefore one action, and its result is fixed on the first pass: whatever falls outside the rendering is out of reach short of fetching the page again. A second family, stateful browsing (Agarwal et al., 2025; Li et al., 2026a), instead open s a page into a session first and then find s within it, decoupling the two: extraction can wait until the agent knows what to look for and be repeated as the question sharpens. But the session holds one page at a time and releases it on the next open , and a find reaches only the page in hand, so selected evidence never accumulates. Over a long-horizon search, an agent may need to look again at a page it has already seen, to verify a claim against it or to read it from a new angle as the question sharpens. Under either interface, the return is expensive: the body is gone once the agent moves on, so coming back means a fresh visit or open , paying the fetch again and rendering the page into context a second time. To address this challenge, we explore retaining selected pages rather than releasing them, enabling continued use through a persistent storage mechanism. Such mechanisms already exist in coding agents (Yang et al., 2024), in search systems over closed corpora (Li et al., 2026b), and in recent search agents that externalize state (Jiang et al., 2026; Zhu et al., 2026), but they arrive bundled with other design choices, are applied to a corpus that is already present before the question arrives, or are shipped without measurement. Whether such a mechanism helps in open-web search, where the agent must find, select, and hold evidence page by page, remains untested against the interfaces deployed agents actually use. In light of this, we propose Fetch-then-Explore (Figure 2), which does both: it keeps browsing’s decoupling and adds the persistence it lacks, so selected evidence gets a durable home in an external workspace that outlives any single page visit. A fetch action selects and records a page in a per-question workspace on the filesystem, returning only a lightweight record rather than a one-shot rendering; separate grep /read actions extract evidence from the stored pages later. Nothing is evicted: the workspace is an explicit, structured artifact that grows over the trajectory and is auditable per question. This yields three properties. First, 2selection becomes almost free : fetch puts no page text into context, so a page that merely looks promising can be kept for the cost of a header. Second, extraction becomes deferred and repeatable : the agent can query with one hypothesis, read the matching lines, and query again when the hypothesis changes. Third, and unique to the workspace, is retention : a page is not released when the agent moves on, so held pages accumulate into a set that stays queryable across documents for the rest of the trajectory. To test whether these properties translate into end-task gains, we study Fetch-then-Explore in a controlled comparison that varies only the document interface. Because the harness, the search backend, and the backbone are held fixed, any difference traces to how the agent accesses a page rather than how it finds one. We compare it against four baselines spanning the design space of §3.3: a snippet-only floor with no document access, two visit-and-read variants at different fetch-time compression levels, and session-bounded browsing. This lays out two clean contrasts: the visit family tests whether decoupling selection from extraction helps at all, and the already-decoupled browsing baseline isolates the added value of a per-sistent, cross-document workspace. We run the comparison on two open-web benchmarks, BrowseComp and WideSearch, across three backbones spanning capability tiers. Fetch-then-Explore leads BrowseComp accuracy at every backbone and generally matches or exceeds the baselines on WideSearch, and a behav-ioral analysis traces its gains to the workspace’s defining move: returning to a page after leaving it, which it does far more than any transient interface. 
+
+Contributions. (i) We identify persistence as an axis the document interfaces of deployed search agents do not exercise, and instantiate it as Fetch-then-Explore : selection decoupled from extraction over an external workspace rather than the context window or a transient session. (ii) We isolate that axis in a controlled comparison against the interfaces deployed agents actually use, holding the harness, the search backend, and the backbone fixed and varying only the document toolset; Fetch-then-Explore leads BrowseComp accuracy at all three backbones and generally matches or exceeds the baselines on WideSearch. (iii) We analyze why at the behavioral level, tracing the gains to returning to pages after leaving them and to deferred, repeatable extraction rather than heavier fetching. 
+
+# 2 Related Work 
+
+Long-horizon search agents. Open deep-research agents gather evidence across many sources over long horizons, almost all built on the ReAct loop (Yao et al., 2023) and extending a longer lineage of retrieval-augmented generation (Lewis et al., 2020), tool-augmented language models (Schick et al., 2023), classic retrieve-and-reason (Press et al., 2023; Trivedi et al., 2023), browser-assisted question answering (Nakano et al., 2021), and open-web search (Shi et al., 2025). A fast-growing line trains such agents specifically for web search (Wu et al., 2025a; Li et al., 2025c,a; Team et al., 2025b; Du et al., 2026; Li et al., 2025b; Team et al., 2025a), pushed by demanding benchmarks: multi-hop BrowseComp (Wei et al., 2025) and its variants (Zhou et al., 2025; Chen et al., 2025b), broad-collection WideSearch (Wong et al., 2025), and a wave probing contamination and knowledge shortcuts (Fan et al., 2026; Wang et al., 2026; Deng et al., 2025). Across this diversity, the document side of the toolset is near-universal in this literature: a visit-style call that at fetch time 
+
+compresses page text into the message history as a goal-ranked window, summary, or truncated body (Team et al., 2025b). This shared interface, reimplemented by our visit-family baselines (§3.3), has drawn far less scrutiny than the search and training sides, or than the parallel line that folds and rewrites the transcript to keep it inside the context window (Wu et al., 2025b; Ye et al., 2025; Chen et al., 2025a). That line changes what the history keeps, whereas we change whether a page body enters the history at all; we apply no context-management strategy and vary only the document toolset. 
+
+Externalized substrates and corpus interaction. Filesystem-as-working-memory is common in coding agents (Yang et al., 2024; Wang et al., 2025) and in deployed CLI assistants, which expose generic file tools beside their web access and sometimes route tool output through disk (Sen et al., 2026). The ingredients are therefore already shipped, but the file tools there act on a local project rather than on pages the agent selects from the open web, and no controlled comparison isolates what the substrate contributes. The same principle drives work on agent memory: General Agentic Memory (Yan et al., 2025) keeps history verbatim in a page-store and compiles context on demand instead of pre-compressing it, while organizing such a 3store is found to lower retrieval cost without reliably improving answers ( ?). Both are measured on conver-sational and embodied memory rather than open-web documents. Search agents have begun to externalize state directly: Harness-1 (Jiang et al., 2026) hands routine bookkeeping to an environment that maintains a candidate pool and a curated evidence set, and trains the policy inside it with reinforcement learning, while FS-Researcher (Zhu et al., 2026) archives browsed sources into a file-system knowledge base that a librarian agent builds for a separate report writer. Both find that an external substrate helps, but in both it arrives bun-dled with training, with an environment-side curation policy, or with a second agent. Fetch-then-Explore instead keeps the decisions in the policy and externalizes only the storage. Stateful browsing (Agarwal et al., 2025; Li et al., 2026a) decouples selection from extraction but holds one transient page at a time; we adopt it as a principal baseline to test whether a persistent, cross-document substrate helps beyond decoupling (§3.3). Direct Corpus Interaction (Li et al., 2026b) and follow-ups (Salemi et al., 2026) replace the retriever 
+
+with a filesystem, whereas we replace the context window : their filesystem is the corpus, static and given in full, so the agent never selects a document and the open web is out of reach. Concurrent shell-over-corpus systems, Dr-DCI (Lu et al., 2026) and RISE (Zhuang et al., 2026), likewise stay closed-corpus, are evalu-ated against retrieval baselines rather than the visit-and-read interface deployed agents use, and give no per-stage account of where evidence is lost. The same study finds that the harness and the presentation of tool outputs matter as much as retrieval, reinforcing our choice to hold both fixed and vary only document access. 
+
+Select-then-extract in pre-neural QA. The decomposition we advocate has deep roots: TREC-era retriever– reader pipelines separated passage retrieval from answer extraction (Voorhees, 1999; Moldovan et al., 2000; Tellex et al., 2003; Ahn et al., 2004; Chen et al., 2017), and predictive annotation even pushed extraction to index time (Prager et al., 2000). But those stages were fixed feed-forward operators run once: type-driven rather than hypothesis-driven, with no retry. The modern visit-and-read interface quietly re-fused them, and browsing re-separates them one transient page at a time; Fetch-then-Explore restores the decompo-sition over a durable substrate, inside an agentic loop where the policy decides when to extract and can return to held documents as its hypothesis sharpens. 
+
+# 3 Method 
+
+We first fix a single agent model in which every document interface, or paradigm , reduces to a choice of document-access toolset (§3.1). We then present the Fetch-then-Explore (F TE) paradigm, which decouples document selection from evidence extraction and retains fetched content in a persistent per-question cache queried by a small set of on-demand tools (§3.2), and finally situate it and the baselines within a shared space of design dimensions (§3.3). 
+
+## 3.1 Agent Model 
+
+We instantiate every paradigm inside one ReAct agent (Yao et al., 2023) so paradigm-level differences cannot be confounded with prompting or harness variation. Given a question q, at each step t the policy πθ emits a reasoning trace τt and an action at ∈ A conditioned on the running history ht,
+
+(τt, at) ∼ πθ (· | ht),
+
+ht =  q, τ1, a1, o1, . . . , τt−1, at−1, ot−1
+
+.An action is either a tool call or the terminal answer a⊥; a tool call returns an observation ot = T (at) that is appended to the history, and the rollout ends once the policy emits a⊥ or a step budget is exhausted. The action set splits into three disjoint parts, 
+
+A = Asearch ⊔ A doc ⊔ { a⊥},a fixed set of search tools Asearch , a document-access toolset Adoc , and the terminal answer. A tool profile is a choice of Adoc : with πθ , Asearch , and the rest of the harness held fixed, every paradigm we study is one such choice (§3.3). Fixing Asearch is deliberate: it bounds what any document-access mechanism could recover, so varying it would conflate where evidence is held with how it is found .43.2 The Fetch-then-Explore Paradigm 
+
+FTE is one such tool profile, built on the two principles motivated in §1: decouple selection from extraction, and retain what is selected. Where visit fuses the two acts and a browsing session separates them one transient page at a time, F TE keeps the separation and adds retention. Fetch acquires a document and stores its full body off-context; explore queries the stored bodies later, once the hypothesis is sharper. 
+
+Tools. Both principles are realized through one new component: the persistent workspace of §1, which we implement as a per-question cache Cq, a temporary directory holding one plain-text file per fetched resource. Three tools act on it, and their division of labor is the paradigm. The tools themselves are ordinary, the same 
+
+> fetch
+
+/grep /read a coding agent has over a repository (Yang et al., 2024); what differs is that a repository is given in full before the task begins, whereas Cq holds only what this agent chose to keep. 
+
+> fetch
+
+(url ) is the only writer. It retrieves the page, normalizes it to plain text, stores the entire body in Cq under a filename derived from the URL, and returns only a short record: path, character count, and whether the page is newly fetched or already held. The body never enters the context, so selection costs a fixed handful of tokens however long the page is, and because the filename is deterministic in the URL, fetching a page twice returns the record rather than re-downloading. 
+
+> grep
+
+(pattern , path , context ) locates evidence with a case-insensitive regular expression. With path omitted it searches every file in Cq at once, the cache-wide scope no session-bound interface can offer: the agent can ask which of its accumulated pages mentions an entity without knowing in advance which one carries it. Up to 20 matches come back grouped by file as line-numbered hits, each carrying the ±context lines around it, three by default and zero for the matching line alone, so a short fact can be read in place. 
+
+> read
+
+(path , offset , limit ) returns at most 200 lines of one file starting from a 1-indexed offset , each prefixed with its line number and followed by the offset to continue from. Offsets are lines rather than character positions, so a hit reported by grep plugs straight into a follow-up read and locate-then-expand becomes a two-call idiom. A housekeeping tool, list_fetched , enumerates the cache. In the notation of §3.1, F TE therefore fixes 
+
+Adoc = {fetch , grep , read , list_fetched }; full schemas are given in Appendix A.2.3. Every observation is thus bounded independently of document length, and retention keeps those bounds cheap rather than lossy: a mis-aimed window is corrected by another query, not another download. The cache is also an auditable artifact : its contents are exactly the resources the agent materialized, so every doc-ument it selected can be read off after the run. Cq is per-question; cross-trajectory persistence is orthogonal and not studied here. 
+
+## 3.3 Design Space and Baselines 
+
+With the harness, search, and backbone held fixed, the profiles differ only in how a document is accessed once it has been selected. We organize them along three dimensions. Substrate is where a selected body lives, whether the context window, a transient browse session, or the external cache Cq. Extraction is whether content is rendered by a fixed operator at fetch time or pulled by bounded on-demand queries. Query scope 
+
+is whether a query reaches only the current page or the whole cache. Table 1 places each profile in this space. The dimensions are not independent: cache-wide scope presupposes an external substrate, and on-demand extraction presupposes a retained body, so the profiles form a lattice rather than a full grid. Two contrasts carry the argument. The visit-and-read family, which fuses extraction into selection, tests whether decoupling helps at all, while browsing (O PEN +F IND ), which already decouples, isolates what a persistent, cache-wide substrate adds beyond it. Where two profiles differ in a single dimension we read the contrast off directly. O PEN +F IND and F TE differ in both substrate and scope at once, so we separate them in two ways: behaviorally, from tool-use statistics, and by ablation, confining F TE’s grep to a single held page to fill the missing rung (§4.3). 
+
+Baselines. Reading down Table 1, each baseline fixes a different cell of this space: • S NIPPET -O NLY fixes Adoc = ∅: it adds no document-access tool and serves as the snippet-sufficiency floor, upper-bounding the questions answerable from search snippets alone. 5Table 1 Baselines and the proposed method (highlighted) as coordinates in the three design dimensions defined above:                   
+
+> substrate ,extraction , and query scope . Tools per profile are listed in the text. Profile Substrate Extraction Scope SNIPPET -O NLY ———VISIT -S NIPPET context fetch-time —VISIT -S UMMARY context fetch-time —OPEN +F IND session on-demand page FTEexternal (
+
+Cq) on-demand cache 
+
+• V ISIT -S NIPPET and V ISIT -S UMMARY , the visit-and-read family used by most deployed deep-research agents (Team et al., 2025b; Du et al., 2026; Li et al., 2025a), share Adoc = {visit }, where a call on a selected document d renders it at fetch time and returns R(d) into context . The two variants change only the operator R, a goal-conditioned chunk versus an evidence summary from a dedicated summary 
+
+model, and so together isolate the extraction operator R at a fixed in-context substrate. • O PEN +F IND , in the style of browser tools (Agarwal et al., 2025; Li et al., 2026a), takes Adoc = {open , find }
+
+and decouples selection from extraction, but keeps the substrate internal and transient: open loads a page into a session and renders a bounded line-numbered window rather than dumping the body, and find greps that page and returns matches with surrounding context, all released on the next open .Its extraction is thus bounded and on-demand exactly as in F TE, so the two differ only in substrate and scope : a transient single page versus a persistent cache queried across pages. 
+
+# 4 Experiments 
+
+We organize the study around two questions. • (1) Does a persistent workspace improve end-task accuracy over visit-and-read and over browsing, across backbones and benchmarks (§4.2)? • (2) How does it change the agent’s document behavior, in particular its ability to return to a page after leaving it and its use of the on-demand extraction tools (§4.3)? 
+
+## 4.1 Setup 
+
+Benchmarks. We evaluate primarily on two open-web deep-research benchmarks, BrowseComp (Wei et al., 2025) and WideSearch (Wong et al., 2025), chosen to stress complementary axes of a search agent. BrowseComp probes depth : each of its 1,266 multi-hop questions turns on a single hard-to-find fact that typically takes dozens of searches and page reads to pin down; due to resource constraints, we randomly sample 200 of them, held fixed across every profile and backbone. WideSearch probes breadth : each of its 200 table-filling tasks requires collecting many fields at high recall from a wide set of pages. A third benchmark, 
+
+BrowseComp-Plus (Chen et al., 2025b), adds document-level relevance judgments over a fixed corpus (Ap-pendix ?? ). 
+
+Models. To guard against single-model artifacts, we run every profile on three backbones spanning capa-bility tiers: the mixture-of-experts Qwen3.5-35B-A3B and Qwen3.5-122B-A10B (Qwen Team, 2026), and the stronger DeepSeek-V4-Pro (DeepSeek-AI, 2026). 
+
+Tools. Every profile runs in the shared ReAct harness of §3.1 and differs only in its document-access tool profile (§3.3); the search side is identical throughout. Concretely, search is backed by the Serper API 1,which returns ranked result snippets, and visit /fetch obtain page content through crawl4ai 2, which ren-ders HTML and PDF pages to clean text. The V ISIT -S UMMARY profile’s fetch-time summarizer is Qwen3.5-35B-A3B (Qwen Team, 2026), held fixed regardless of the agent backbone so that summary quality is not 
+
+> 1https://serper.dev/
+> 2https://github.com/unclecode/crawl4ai
+
+6Table 2 Main results on the two open-web benchmarks across three backbones; the same data is plotted in Figure 1. Per profile: end-task metrics, mean search calls ( #Search ), and document access split into selection ( #Select ) and on-demand extraction ( #Extract ). “—”: act not performed. Bold /underline: best/second within a backbone for the Acc and F1 
+
+columns. 
+
+BrowseComp WideSearch 
+
+Backbone Profile Acc #Search #Select #Extract Row-F1 Item-F1 #Search #Select #Extract 
+
+Qwen3.5-35B-A3B SNIPPET -O NLY 27.5 70.2 — — 23.1 52.3 38.9 — —VISIT -S NIPPET 30.5 60.3 7.4 — 25.6 55.6 29.0 15.1 —VISIT -S UMMARY 37.5 58.7 9.2 — 35.5 63.2 29.3 17.1 —OPEN +F IND 42.0 58.1 5.0 1.0 33.3 63.0 24.2 8.5 1.1 FTE (ours) 44.5 58.3 5.4 6.7 34.3 63.9 21.6 11.2 12.0 Qwen3.5-122B-A10B SNIPPET -O NLY 37.5 76.4 — — 26.7 57.0 44.3 — —VISIT -S NIPPET 43.5 68.4 8.1 — 30.2 59.9 29.3 13.7 —VISIT -S UMMARY 48.0 74.5 8.8 — 38.8 65.1 31.7 15.3 —OPEN +F IND 50.5 60.3 6.2 0.8 36.0 63.9 22.8 8.3 1.3 FTE (ours) 52.5 62.8 7.3 7.8 39.1 65.2 20.3 11.3 12.4 DeepSeek-V4-Pro SNIPPET -O NLY 62.0 101.1 — — 42.5 67.3 88.3 — —VISIT -S NIPPET 63.5 69.9 11.1 — 45.9 71.5 62.2 20.0 —VISIT -S UMMARY 64.0 80.8 13.1 — 51.5 71.9 50.4 20.1 —OPEN +F IND 66.0 61.2 9.5 1.9 47.1 69.0 35.2 12.1 2.2 FTE (ours) 70.5 66.9 10.7 11.5 51.4 72.2 36.0 15.3 21.0 
+
+confounded with backbone strength. All runs share the same per-question budget of up to 300 turns, and we apply no context-management strategy, so the full interaction history is retained throughout. 
+
+Evaluation. We follow each benchmark’s official evaluation protocol and prompts, scoring answers with an LLM judge. On BrowseComp we report end-task accuracy; on WideSearch, row- and item-level F1 of the completed table against the gold table. Each cell is run three times, and we report the best of the three runs; the behavioral statistics of §4.3 are computed on that same reported run. We use DeepSeek-V4-Pro as the judge model, applied identically to every profile and backbone (Appendix A.3). 
+
+## 4.2 Main Results 
+
+Table 2 reports all five profiles on the two open-web benchmarks across the three backbones, and Figure 1 visualizes the same data. The meaningful comparison is intra-backbone , setting F TE against the four baselines at a fixed backbone, since each row’s absolute level is bounded by that backbone’s own capability. The pattern is consistent: under the same harness, search backend, and backbone, F TE is the best profile in four of the six cells and within a fraction of a point of the best in a fifth, and it leads BrowseComp accuracy at all three backbones. One feature of the table aids reading: document access is split into its two acts. #Select 
+
+counts the materialization call, whether visit , fetch , or open , and #Extract the on-demand calls, grep and read 
+
+for F TE and find for O PEN +F IND . The visit family folds the second act into the first. 
+
+The snippet floor sets the headroom. SNIPPET -O NLY answers from the shared search stream with no document access, upper-bounding the share of questions on which document access is in principle unnec-essary. This floor varies sharply. On BrowseComp it climbs with capability from 27.5 to 37.5 to 62.0; even at DeepSeek-V4-Pro, where the snippet stream alone answers 62.0%, document access still adds a clear 8.5 pp on top, reaching 70.5 with F TE. On WideSearch it stays low throughout, at 23–43 Row-F1, because broad-collection tables are essentially unsolvable from snippets. 
+
+FTE matches or exceeds visit-and-read. The clearest result is on BrowseComp, where F TE is the most accurate profile at every backbone, at 44.5, 52.5, and 70.5, ahead of the raw V ISIT -S NIPPET by 7 to 14 pp and of the second-best profile by 2 to 4.5, with the largest margin on the strongest backbone. The ordering there is fixed across all three: F TE > OPEN +F IND > VISIT -S UMMARY > VISIT -S NIPPET > SNIPPET -O NLY .7Table 3 FTE tool-call distribution (BC = BrowseComp, WS = WideSearch): mean per-question calls, end-of-trajectory cache size ( Cq), the grep : read ratio (g : r), and the share of questions that issue at least one whole-cache grep (x-c. %). Q-35B, Q-122B, and DS-V4 are the three backbones of Table 2. Calls / question Derived Model search fetch grep read Cq g : r x-c. % Q-35B BC 58.3 5.4 3.0 3.7 5.2 0.79 7.5 WS 21.6 11.2 4.6 7.4 10.9 0.62 4.0 Q-122B BC 62.8 7.3 3.7 4.1 7.0 0.89 2.5 WS 20.3 11.3 6.1 6.3 11.1 0.97 10.5 DS-V4 BC 66.9 10.7 5.7 5.8 10.6 0.98 1.0 WS 36.0 15.3 12.8 8.2 15.1 1.56 4.5 
+
+On WideSearch the primary Row-F1 is closer: F TE leads at Qwen3.5-122B-A10B and comes within 0.1 at DeepSeek-V4-Pro, and the one cell where a baseline leads by more than a rounding margin is the weakest backbone, where the strengthened V ISIT -S UMMARY edges it by 1.2 Row-F1. Against the raw V ISIT -S NIPPET ,FTE leads WideSearch Row-F1 at all three. The two benchmarks reward different things, which is why the separation is sharper on BrowseComp. WideSearch fills broad tables and so rewards pulling many fields at high recall, which a faithful high-coverage extractor supplies regardless of paradigm. A fetch-time summary is exactly that: V ISIT -S UMMARY 
+
+improves on V ISIT -S NIPPET ’s raw window at every backbone and is F TE’s closest competitor there. What it cannot do is revisit its own rendering, since each page is summarized once and a fact the paraphrase drops is unrecoverable. BrowseComp turns on a single hard-won fact, where what matters is whether a first ex-traction that misses can be retried rather than the amount of text pulled, and that is the axis along which the paradigms actually differ (§4.3). 
+
+FTE improves over browsing. It also beats O PEN +F IND in every cell, by +2.0 to +4.5 pp on BrowseComp and ahead on WideSearch Row-F1 throughout. The two are otherwise closely matched: both keep extraction on-demand and read only a window of a page at a time, so extraction is held constant and their gap is the value of the workspace itself. That workspace differs from a session in two ways at once. O PEN +F IND ’s page is released on the next open , whereas every body F TE fetches stays queryable off-context for the rest of the trajectory; and a find reaches only the page in hand, whereas grep reaches everything held. §4.3 takes the second away while keeping the first, and finds that retention does not stand on its own: it pays only when the retained pages can be addressed together. 
+
+Where the tool budget goes. The #Search column moves against the quality of the document interface, at both ends of the table. SNIPPET -O NLY , which has no way to work a page at all, issues the most queries of any profile at every backbone, 70–101 on BrowseComp and 39–88 on WideSearch, against 58–81 and 20– 62 for the profiles that can open one; and in all six cells the two on-demand profiles search less than the fetch-time visit family. An agent that cannot get what it needs out of a page it already holds asks the search engine again instead. The ablations confirm the trade from the other direction: every capability we remove from F TE raises search by 6 to 8.3 calls per question on BrowseComp (§4.3). Document access and search are therefore substitutes rather than additive costs, which is also why F TE’s margins cannot be read as the effect of a heavier search system: it is among the two lightest searchers in every cell. Nor does it spend the budget on selection, since the #Select /#Extract split shows it materializes no more documents than the visit family and often fewer. What it adds is extraction, the grep and read calls the visit family folds into selection and cannot repeat: cheap selection paired with deferred, repeatable extraction rather than heavier fetching. 
+
+## 4.3 Analysis 
+
+How F TE uses its tools. Table 3 reports F TE’s per-question tool-call counts across all three backbones and both open-web benchmarks; parameter- and sequence-level distributions are in Appendix B. Four readings 8Table 4 Revisit rate (%) on the two open-web benchmarks across three backbones: the share of materialized documents the agent returns to after leaving. BC = BrowseComp, WS = WideSearch. Bold : highest per backbone/benchmark. Backbone Profile BC WS Qwen3.5-35B-A3B VISIT -S NIPPET 6.7 8.0 VISIT -S UMMARY 10.3 7.2 OPEN +F IND 3.8 8.6 FTE 12.6 71.2                 
+
+> Qwen3.5-122B-A10B VISIT -S NIPPET 8.6 5.4 VISIT -S UMMARY 6.2 3.9 OPEN +F IND 3.3 4.4 FTE12.4 67.4
+> DeepSeek-V4-Pro VISIT -S NIPPET 3.0 4.5 VISIT -S UMMARY 6.3 6.0 OPEN +F IND 3.2 7.2 FTE19.7 75.6
+
+carry the analysis. First, the benchmarks elicit two regimes: on BrowseComp search dominates the budget at a search : fetch ratio of 6–11:1, whereas on WideSearch it falls to about half of all calls as fetch , grep , and  
+
+> read
+
+rise to meet the per-field extraction the task demands. Second, the grep : read mix tracks backbone strength: the strongest backbone locates by pattern and reads a small window around the hit, at a ratio near or above 1:1 (up to 1.56 on WideSearch), while the weakest leans on read , down to 0.62, paging through larger windows to offset coarser localization. Third, the workspace these calls build is modest but real: the end-of-trajectory cache Cq holds 5–11 documents on BrowseComp and 11–15 on WideSearch, growing with backbone strength on both, and tracks the fetch count almost exactly (few pages are re-fetched), so the agent accumulates a standing set of pages and returns to them by re-querying the cache rather than re-materializing. Fourth, cross-cache grep is rare at the question level: only 1–10.5% of questions ever issue a whole-cache grep , and the great majority name a single file. The cross-page reach is thus available but seldom exercised by untrained backbones, which invites the reading that it contributes little; §4.3 tests that reading and finds the opposite. 
+
+Revisiting a page after leaving it. The behavior that most sharply separates a persistent workspace from a transient one is returning to a page after moving on . For the transient interfaces, coming back costs a fresh re-visit /re-open ; for F TE the page stays cached and is re-queried by grep /read at zero materialization cost. We measure the revisit rate : the share of materialized documents the agent extracts from again after touching a different document in between (Table 4). On BrowseComp, F TE revisits 12–20% of its documents against 3–10% for every transient interface. On WideSearch, whose broad tables force the agent to return to many pages as new fields come due, the gap widens to 8–12 × at every backbone, with F TE revisiting 67–76% of documents while the transient interfaces stay below 9%. The two benchmarks separate this behavior from its payoff. WideSearch is where the behavioral gap is widest, but it is also where a faithful fetch-time summary already reaches high coverage on its own (§4.2), so returning more often buys little end-task margin there. BrowseComp shows the narrower behavioral gap and the larger margin in Table 2: each question turns on a single fact, so one page worked a second time can decide the answer. What persistence supplies is thus the 
+
+opportunity to return: a page missed or only partially used on a first pass stays queryable off-context for the rest of the trajectory, so an incomplete first hypothesis is correctable many turns later rather than terminal. On the closed corpus, document-level supervision confirms that the returned-to pages are the gold ones and the dissociation holds at line resolution (Appendix ?? ). 
+
+Ablating the extraction tools. FTE gives the agent three capabilities over a retained body: grep to locate a hit, read to pull a bounded window around it, and a query scope that spans the whole cache. We remove one at a time, on the two open-web benchmarks and the primary Qwen3.5-35B-A3B backbone, the tier where coarser localization stresses the interface most (Table 5). The cache and fetch /list_fetched are untouched throughout, so each arm isolates the dropped capability: without grep the agent must find a range by paging 9Table 5 Extraction-tool ablation of F TE on the two open-web benchmarks (Qwen3.5-35B-A3B). F TE \ x-cache con-fines grep to one already-fetched page; FTE \ grep drops grep , FTE \ read drops read ; the persistent cache and                                      
+
+> fetch /list_fetched are unchanged. Columns match Table 2, splitting extraction into grep /read (fetch is selection). “—”: tool not in the toolset. The highlighted F TE (full) row repeats Table 2; bold marks the best per column for Acc /F1 and # Search (fewest search calls).
+> BrowseComp WideSearch
+> Profile Acc #Search fetch grep read Row-F1 Item-F1 #Search fetch grep read
+> FTE (full) 44.5 58.3 5.4 3.0 3.7 34.3 63.9 21.6 11.2 4.6 7.4 FTE
+
+\ x-cache 39.5 66.6 6.5 3.5 4.3 29.2 58.2 23.0 11.1 4.5 7.8 FTE \ grep 37.0 65.8 4.8 — 6.7 33.0 62.9 22.7 9.4 — 10.4 FTE \ read 39.5 64.4 5.8 6.6 — 33.9 62.2 26.1 13.1 13.1 —
+
+rather than by pattern, without read it must read through grep ’s ±context window, and with grep confined to one file it must work the cache a page at a time. 
+
+Both tools contribute, and their roles do not collapse into each other. Dropping either lowers end-task quality, sharply on BrowseComp ( −7.5 pp Acc without grep , −5.0 without read ) and mildly on WideSearch ( ≤ 1.3 Row-F1). The traces show the surviving tool taking over the missing one’s job, with total extraction flat: without the locator the agent roughly doubles read , paging to find ranges it can no longer pattern-match, and without the windowed reader it more than doubles grep , widening the ±context window until one call does the work of a pair (the share of grep calls asking for eight or more context lines rises threefold on BrowseComp and more than eightfold on WideSearch). Neither substitution is free, and on BrowseComp losing grep costs more: an agent without read still has a precise locator that doubles as a reader, whereas one without grep falls back on blind paging, so localization, not window size, is the scarcer capability. 
+
+The workspace pays only when it is jointly addressable. Confining grep to a single already-fetched page (F TE \ x-cache) costs as much as dropping an extraction tool outright, −5.0 pp on BrowseComp and −5.1 Row-F1 on WideSearch, and the budget goes somewhere revealing. Extraction barely moves, with grep and read within 0.6 calls of the full profile, while on BrowseComp search rises by 8.3 calls per question and fetch by 1.1. Stripped of a query that spans the workspace, the agent falls back on the search engine rather than on the pages it already holds: the substitution of §4.2, here produced causally by removing one capability from one profile. The fallback is far weaker on WideSearch, at 1.4 and 2.0 more search calls, consistent with per-field questions being answerable one page at a time. This arm also fills in the design space of Table 1: FTE \ x-cache retains bodies across the trajectory but addresses them one page at a time, the rung between O PEN +F IND and F TE. It does not sit between them in accuracy. On BrowseComp it falls below the transient O PEN +F IND at both backbones, 39.5 against 42.0 and 45.5 against 50.5: a workspace the agent must address one file at a time carries the bookkeeping of many pages without the reach that makes holding them worthwhile. Persistence and cache-wide scope are therefore two halves of one mechanism rather than additive contributions, which is why we read the F TE– OPEN +F IND contrast as the value of the workspace as a whole. Since the constraint is enforced by refusing cache-wide patterns, part of the drop is the retry cost of a refused call, and this arm is a lower bound on what retention alone delivers. 
+
+# 5 Conclusion 
+
+We argued that the dominant visit-and-read interface fuses document selection with evidence extraction, fixing a rendering before the agent knows what it will need, while browsing decouples the two but holds the selected body only in a transient single-page session. Fetch-then-Explore addresses both: pages are fetched into a per-question filesystem workspace and queried later through bounded tools such as grep and 
+
+> read
+
+, rather than entering the context wholesale. It leads BrowseComp accuracy at all three backbones and generally matches or exceeds the baselines on WideSearch. Behind these gains is the move a persistent workspace enables: returning to a page after leaving it, which Fetch-then-Explore does far more than any 10 transient interface, up to 8–12 × on WideSearch, so a page missed on a first pass stays correctable many turns later rather than terminal. Two extensions follow: layering cross-trajectory memory on the same substrate, and enriching the cache with fetch-time entity and structure indexes to surface candidates that lexical grep 
+
+cannot. More broadly, decoupling an operation from the medium that holds its output raises a structural question: where an agent’s working memory should live. 
+
+# References 
+
+Sandhini Agarwal, Lama Ahmad, Jason Ai, Sam Altman, Andy Applebaum, Edwin Arbus, Rahul K Arora, Yu Bai, Bowen Baker, Haiming Bao, et al. gpt-oss-120b & gpt-oss-20b model card. arXiv preprint arXiv:2508.10925 , 2025. David Ahn, Valentin Jijkoun, Gilad Mishne, Karin Müller, Maarten de Rijke, and Stefan Schlobach. Using Wikipedia at the TREC QA track. In Proceedings of the Thirteenth Text REtrieval Conference (TREC 2004) , 2004. Danqi Chen, Adam Fisch, Jason Weston, and Antoine Bordes. Reading Wikipedia to answer open-domain questions. In 
+
+Proceedings of the 55th Annual Meeting of the Association for Computational Linguistics (ACL) , 2017. Guoxin Chen, Zile Qiao, Xuanzhong Chen, Donglei Yu, Haotian Xu, Wayne Xin Zhao, Ruihua Song, Wenbiao Yin, Huifeng Yin, Liwen Zhang, Kuan Li, Minpeng Liao, Yong Jiang, Pengjun Xie, Fei Huang, and Jingren Zhou. Iterre-search: Rethinking long-horizon agents with interaction scaling, 2025a. URL https://arxiv.org/abs/2511.07327 .Zijian Chen, Xueguang Ma, Shengyao Zhuang, Ping Nie, Kai Zou, Andrew Liu, Joshua Green, Kshama Patel, Ruoxi Meng, Mingyi Su, Sahel Sharifymoghaddam, Yanxi Li, Haoran Hong, Xinyu Shi, Xuye Liu, Nandan Thakur, Crystina Zhang, Luyu Gao, Wenhu Chen, and Jimmy Lin. Browsecomp-plus: A more fair and transparent evaluation bench-mark of deep-research agent, 2025b. URL https://arxiv.org/abs/2508.06600 .DeepSeek-AI. DeepSeek-V4: Towards Highly Efficient Million-Token Context Intelligence, 2026. Mingyi Deng, Lijun Huang, Yani Fan, Jiayi Zhang, Fashen Ren, Jinyi Bai, Fuzhen Yang, Dayi Miao, Zhaoyang Yu, Yifan Wu, Yanfei Zhang, Fengwei Teng, Yingjia Wan, Song Hu, Yude Li, Xin Jin, Conghao Hu, Haoyu Li, Qirui Fu, Tai Zhong, Xinyu Wang, Xiangru Tang, Nan Tang, Chenglin Wu, and Yuyu Luo. Interactcomp: Evaluating search agents with ambiguous queries, 2025. URL https://arxiv.org/abs/2510.24668 .Yuwen Du, Rui Ye, Shuo Tang, Xinyu Zhu, Yijun Lu, Yuzhu Cai, and Siheng Chen. Openseeker: Democratizing frontier search agents by fully open-sourcing training data, 2026. URL https://arxiv.org/abs/2603.15594 .HuiMing Fan, Xiao Wang, Zheng Chu, Qianyu Wang, Zhuoyao Wang, Ming Liu, Bing Qin, and XingYu. Livebrowsec-omp: Are search agents searching, or just verifying what they already know?, 2026. URL https://arxiv.org/abs/ 2605.28721 .Pengcheng Jiang, Zhiyi Shi, Kelly Hong, Xueqiang Xu, Jiashuo Sun, Jimeng Sun, Hammad Bashir, and Jiawei Han. Harness-1: Reinforcement learning for search agents with state-externalizing harnesses, 2026. URL https://arxiv. org/abs/2606.02373 .Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, Sebastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Advances in Neural Information Processing Systems (NeurIPS) , 2020. Kuan Li, Zhongwang Zhang, Huifeng Yin, Liwen Zhang, Litu Ou, Jialong Wu, Wenbiao Yin, Baixuan Li, Zhengwei Tao, Xinyu Wang, Weizhou Shen, Junkai Zhang, Dingchu Zhang, Xixi Wu, Yong Jiang, Ming Yan, Pengjun Xie, Fei Huang, and Jingren Zhou. Websailor: Navigating super-human reasoning for web agent, 2025a. URL https://arxiv.org/ abs/2507.02592 .Xiaoxi Li, Wenxiang Jiao, Jiarui Jin, Guanting Dong, Jiajie Jin, Yinuo Wang, Hao Wang, Yutao Zhu, Ji-Rong Wen, Yuan Lu, and Zhicheng Dou. Deepagent: A general reasoning agent with scalable toolsets, 2025b. URL https://arxiv. org/abs/2510.21618 .Xiaoxi Li, Jiajie Jin, Guanting Dong, Hongjin Qian, Yutao Zhu, Yongkang Wu, Ji-Rong Wen, and Zhicheng Dou. Web-thinker: Empowering large reasoning models with deep research capability, 2025c. URL https://arxiv.org/abs/ 2504.21776 .Zhuofeng Li, Dongfu Jiang, Xueguang Ma, Haoxiang Zhang, Ping Nie, Yuyu Zhang, Kai Zou, Jianwen Xie, Yu Zhang, and Wenhu Chen. Openresearcher: A fully open pipeline for long-horizon deep research trajectory synthesis, 2026a. URL https://arxiv.org/abs/2603.20278 .
+
+11 Zhuofeng Li, Haoxiang Zhang, Cong Wei, Pan Lu, Ping Nie, Yi Lu, Yuyang Bai, Shangbin Feng, Hangxiao Zhu, Ming Zhong, Yuyu Zhang, Jianwen Xie, Yejin Choi, James Zou, Jiawei Han, Wenhu Chen, Jimmy Lin, Dongfu Jiang, and Yu Zhang. Beyond semantic similarity: Rethinking retrieval for agentic search via direct corpus interaction, 2026b. URL https://arxiv.org/abs/2605.05242 .Yi Lu, Zhuofeng Li, Ping Nie, Haoxiang Zhang, Yuyu Zhang, Kai Zou, Wenhu Chen, Jimmy Lin, Dongfu Jiang, and Yu Zhang. Dr-DCI: Scaling Direct Corpus Interaction via Dynamic Workspace Expansion, 2026. Dan Moldovan, Sanda Harabagiu, Marius Pasca, Rada Mihalcea, Roxana Girju, Richard Goodrum, and Vasile Rus. The structure and performance of an open-domain question answering system. In Proceedings of the 38th Annual Meeting of the Association for Computational Linguistics (ACL) , 2000. Reiichiro Nakano, Jacob Hilton, Suchir Balaji, Jeff Wu, Long Ouyang, Christina Kim, Christopher Hesse, Shantanu Jain, Vineet Kosaraju, William Saunders, Xu Jiang, Karl Cobbe, Tyna Eloundou, Gretchen Krueger, Kevin Button, Matthew Knight, Benjamin Chess, and John Schulman. WebGPT: Browser-assisted question-answering with human feedback. 
+
+arXiv preprint arXiv:2112.09332 , 2021. John Prager, Eric Brown, Anni Coden, and Dragomir Radev. Question-answering by predictive annotation. In Proceed-ings of the 23rd Annual International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR) ,2000. Ofir Press, Muru Zhang, Sewon Min, Ludwig Schmidt, Noah A. Smith, and Mike Lewis. Measuring and narrowing the compositionality gap in language models. In Findings of the Association for Computational Linguistics: EMNLP , 2023. Zile Qiao, Guoxin Chen, Xuanzhong Chen, Donglei Yu, Wenbiao Yin, Xinyu Wang, Zhen Zhang, Baixuan Li, Huifeng Yin, Kuan Li, Rui Min, Minpeng Liao, Yong Jiang, Pengjun Xie, Fei Huang, and Jingren Zhou. Webresearcher: Un-leashing unbounded reasoning capability in long-horizon agents, 2025. URL https://arxiv.org/abs/2509.13309 .Qwen Team. Qwen3.5: Towards Native Multimodal Agents, February 2026. URL https://qwen.ai/blog?id=qwen3.5 .Alireza Salemi, Chang Zeng, Atharva Nijasure, Jui-Hui Chung, Razieh Rahimi, Fernando Diaz, and Hamed Zamani. Grepseek: Training search agents for direct corpus interaction, 2026. URL https://arxiv.org/abs/2605.29307 .Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. Toolformer: Language models can teach themselves to use tools. In Advances in Neural Information Processing Systems (NeurIPS) , 2023. Sahil Sen, Akhil Kasturi, Elias Lumer, Anmol Gulati, and Vamse Kumar Subbiah. Is grep all you need? how agent harnesses reshape agentic search, 2026. URL https://arxiv.org/abs/2605.15184 .Zhengliang Shi, Yiqun Chen, Haitao Li, Weiwei Sun, Shiyu Ni, Yougang Lyu, Run-Ze Fan, Bowen Jin, Yixuan Weng, Minjun Zhu, Qiujie Xie, Xinyu Guo, Qu Yang, Jiayi Wu, Jujia Zhao, Xiaqiang Tang, Xinbei Ma, Cunxiang Wang, Jiaxin Mao, Qingyao Ai, Jen-Tse Huang, Wenxuan Wang, Yue Zhang, Yiming Yang, Zhaopeng Tu, and Zhaochun Ren. Deep research: A systematic survey, 2025. URL https://arxiv.org/abs/2512.02038 .Liangcai Su, Zhen Zhang, Guangyu Li, Zhuo Chen, Chenxi Wang, Maojia Song, Xinyu Wang, Kuan Li, Jialong Wu, Xuanzhong Chen, Zile Qiao, Zhongwang Zhang, Huifeng Yin, Shihao Cai, Runnan Fang, Zhengwei Tao, Wenbiao Yin, Chenxiong Qian, Yong Jiang, Pengjun Xie, Fei Huang, and Jingren Zhou. Scaling agents via continual pre-training, 2025. URL https://arxiv.org/abs/2509.13310 .MiroMind Team, Song Bai, Lidong Bing, Carson Chen, Guanzheng Chen, Yuntao Chen, Zhe Chen, Ziyi Chen, Jifeng Dai, Xuan Dong, Wenhan Dou, Yue Deng, Yunjie Fu, Junqi Ge, Chenxia Han, Tammy Huang, Zhenhang Huang, Jerry Jiao, Shilei Jiang, Tianyu Jiao, Xiaoqi Jian, Lei Lei, Ruilin Li, Ryan Luo, Tiantong Li, Xiang Lin, Ziyuan Liu, Zhiqi Li, Jie Ni, Qiang Ren, Pax Sun, Shiqian Su, Chenxin Tao, Bin Wang, Hellen Wang, Haonan Wang, James Wang, Jin Wang, Jojo Wang, Letian Wang, Shizun Wang, Weizhi Wang, Zixuan Wang, Jinfan Xu, Sen Xing, Chenyu Yang, Hai Ye, Jiaheng Yu, Yue Yu, Muyan Zhong, Tianchen Zhao, Xizhou Zhu, Yanpeng Zhou, Yifan Zhang, and Zhi Zhu. Mirothinker: Pushing the performance boundaries of open-source research agents via model, context, and interactive scaling, 2025a. URL https://arxiv.org/abs/2511.11793 .Tongyi DeepResearch Team, Baixuan Li, Bo Zhang, Dingchu Zhang, Fei Huang, Guangyu Li, Guoxin Chen, Huifeng Yin, Jialong Wu, Jingren Zhou, Kuan Li, Liangcai Su, Litu Ou, Liwen Zhang, Pengjun Xie, Rui Ye, Wenbiao Yin, Xinmiao Yu, Xinyu Wang, Xixi Wu, Xuanzhong Chen, Yida Zhao, Zhen Zhang, Zhengwei Tao, Zhongwang Zhang, Zile Qiao, Chenxi Wang, Donglei Yu, Gang Fu, Haiyang Shen, Jiayin Yang, Jun Lin, Junkai Zhang, Kui Zeng, Li Yang, Hailong Yin, Maojia Song, Ming Yan, Peng Xia, Qian Xiao, Rui Min, Ruixue Ding, Runnan Fang, Shaowei Chen, Shen Huang, Shihang Wang, Shihao Cai, Weizhou Shen, Xiaobin Wang, Xin Guan, Xinyu Geng, Yingcheng Shi, Yuning Wu, Zhuo 
+
+12 Chen, Zijian Li, and Yong Jiang. Tongyi deepresearch technical report, 2025b. URL https://arxiv.org/abs/2510. 24701 .Stefanie Tellex, Boris Katz, Jimmy Lin, Aaron Fernandes, and Gregory Marton. Quantitative evaluation of passage retrieval algorithms for question answering. In Proceedings of the 26th Annual International ACM SIGIR Conference on Research and Development in Information Retrieval (SIGIR) , 2003. Harsh Trivedi, Niranjan Balasubramanian, Tushar Khot, and Ashish Sabharwal. Interleaving retrieval with chain-of-thought reasoning for knowledge-intensive multi-step questions. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics (ACL) , 2023. Ellen M. Voorhees. The TREC-8 question answering track report. In Proceedings of the Eighth Text REtrieval Conference (TREC-8) , 1999. Xingyao Wang, Boxuan Li, Yufan Song, Frank F. Xu, Xiangru Tang, Mingchen Zhuge, Jiayi Pan, Yueqi Song, Bowen Li, Jaskirat Singh, Hoang H. Tran, Fuqiang Li, Ren Ma, Mingzhang Zheng, Bill Qian, Yanjun Shao, Niklas Muennighoff, Yizhe Zhang, Binyuan Hui, Junyang Lin, Robert Brennan, Hao Peng, Heng Ji, and Graham Neubig. OpenHands: An open platform for AI software developers as generalist agents. In The Thirteenth International Conference on Learning Representations (ICLR) , 2025. Yunhan Wang, Jiaan Wang, Lianzhe Huang, Xianfeng Zeng, and Fandong Meng. Evobrowsecomp: Benchmarking search agents on evolving knowledge, 2026. URL https://arxiv.org/abs/2606.13120 .Jason Wei, Zhiqing Sun, Spencer Papay, Scott McKinney, Jeffrey Han, Isa Fulford, Hyung Won Chung, Alex Tachard Passos, William Fedus, and Amelia Glaese. Browsecomp: A simple yet challenging benchmark for browsing agents, 2025. URL https://arxiv.org/abs/2504.12516 .Ryan Wong, Jiawei Wang, Junjie Zhao, Li Chen, Yan Gao, Long Zhang, Xuan Zhou, Zuo Wang, Kai Xiang, Ge Zhang, Wenhao Huang, Yang Wang, and Ke Wang. Widesearch: Benchmarking agentic broad info-seeking, 2025. URL 
+
+https://arxiv.org/abs/2508.07999 .Jialong Wu, Baixuan Li, Runnan Fang, Wenbiao Yin, Liwen Zhang, Zhengwei Tao, Dingchu Zhang, Zekun Xi, Yong Jiang, Pengjun Xie, Fei Huang, and Jingren Zhou. Webdancer: Towards autonomous information seeking agency, 2025a. URL https://arxiv.org/abs/2505.22648 .Xixi Wu, Kuan Li, Yida Zhao, Liwen Zhang, Litu Ou, Huifeng Yin, Zhongwang Zhang, Yong Jiang, Pengjun Xie, Fei Huang, Minhao Cheng, Shuai Wang, Hong Cheng, and Jingren Zhou. Resum: Unlocking long-horizon search intelli-gence via context summarization, 2025b. URL https://arxiv.org/abs/2509.13313 .Yunjia Xi, Jianghao Lin, Yongzhao Xiao, Zheli Zhou, Rong Shan, Te Gao, Jiachen Zhu, Weiwen Liu, Yong Yu, and Weinan Zhang. A survey of llm-based deep search agents: Paradigm, optimization, evaluation, and challenges, 2025. URL 
+
+https://arxiv.org/abs/2508.05668 .B. Y. Yan, Chaofan Li, Hongjin Qian, Shuqi Lu, and Zheng Liu. General agentic memory via deep research, 2025. URL 
+
+https://arxiv.org/abs/2511.18423 .John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. SWE-agent: Agent-computer interfaces enable automated software engineering. In Advances in Neural Information Process-ing Systems (NeurIPS) , 2024. Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. ReAct: Synergizing reasoning and acting in language models. In The Eleventh International Conference on Learning Representations (ICLR) ,2023. Rui Ye, Zhongwang Zhang, Kuan Li, Huifeng Yin, Zhengwei Tao, Yida Zhao, Liangcai Su, Liwen Zhang, Zile Qiao, Xinyu Wang, Pengjun Xie, Fei Huang, Siheng Chen, Jingren Zhou, and Yong Jiang. Agentfold: Long-horizon web agents with proactive context management, 2025. URL https://arxiv.org/abs/2510.24699 .Yuxiang Zheng, Dayuan Fu, Xiangkun Hu, Xiaojie Cai, Lyumanshan Ye, Pengrui Lu, and Pengfei Liu. Deepresearcher: Scaling deep research via reinforcement learning in real-world environments, 2025. URL https://arxiv.org/abs/ 2504.03160 .Peilin Zhou, Bruce Leon, Xiang Ying, Can Zhang, Yifan Shao, Qichen Ye, Dading Chong, Zhiling Jin, Chenxuan Xie, Meng Cao, Yuxin Gu, Sixin Hong, Jing Ren, Jian Chen, Chao Liu, and Yining Hua. Browsecomp-zh: Benchmarking web browsing ability of large language models in chinese, 2025. URL https://arxiv.org/abs/2504.19314 .
+
+13 Chiwei Zhu, Benfeng Xu, Mingxuan Du, Shaohan Wang, Xiaorui Wang, Zhendong Mao, and Yongdong Zhang. Fs-researcher: Test-time scaling for long-horizon research tasks with file-system-based agents, 2026. URL https:// arxiv.org/abs/2602.01566 .Shengyao Zhuang, Yuansheng Ni, Hengxin Fun, Jimmy Lin, and Xueguang Ma. Towards retrieving interaction spaces for agentic search, 2026. URL https://arxiv.org/abs/2606.06880 .
+
+# A Implementation Details 
+
+## A.1 Agent Implementation 
+
+A.1.1 Model backend and sampling parameters 
+
+The agent sampling uses temperature = 1.0, top_p = 0.95, max_tokens = 16,384, and presence_penalty =
+
+0.0. Two LLM backends are supported: vllm for self-hosted Qwen models and API for DeepSeek-V4-Pro. Both use the native tool-calling support. 
+
+A.1.2 System prompt 
+
+The agent receives the following system prompt, assembled from a fixed body, an optional variant-specific addendum, and a date footer: 
+
+You are a deep research assistant. Your core function is to conduct thorough, multi-source investigations into any topic. You must handle both broad, open-domain inquiries and queries within specialized academic fields. For every request, synthesize information from credible, diverse sources to deliver a comprehensive, accurate, and objective response. When you have gathered sufficient information and are ready to provide the definitive response, you must enclose the entire final answer within <answer></answer> tags. # Tool usage Use the available native tools whenever you need fresh evidence. [optional variant-specific addendum] Current date: YYYY-MM-DD 
+
+No per-profile description of the tools is added to the system prompt; the model learns the tool surface solely from the JSON schemas that the harness transmits as native tool definitions. The system prompt is shared identically across all tool profiles and backbones (§3.1). 
+
+## A.2 Tool Definitions and Implementation 
+
+A.2.1 Tool surface reference 
+
+Table 6 lists the full signatures and per-tool output bounds of the Fetch-then-Explore tool surface (§3.2), for the structured-tool form and the unified-shell re-skin. 
+
+A.2.2 Cache substrate on disk 
+
+Each trajectory receives a private cache root created with tempfile.mkdtemp(prefix="work-") ; the root is removed via shutil.rmtree at trajectory end (registered as an atexit hook so crashes still clean up). A fetched resource is written as a single UTF-8 text file under this root. Filenames are deterministic in the resource identifier so that a repeated fetch is a no-op: for URL-keyed resources the name is {host_-slug}-{16-char sha256_prefix}.txt (e.g. example-com-a1b2c3d4e5f6g7h8.txt ), where the safe prefix is the first ≤ 32 alphanumeric/hyphen characters of the docid. Each file begins with a three-line provenance header: 
+
+URL: <canonical resource URL> Fetched-At: <ISO-8601 UTC timestamp> Characters: <content_length> 
+
+14 Table 6 The Fetch-then-Explore tool surface (code profile id fetch_explore ). Resource is the canonical URL returned by the search service; returned bytes are bounded per tool by the last column. Tool Signature Returned to context  
+
+> search
+
+(query ) → [{title, resource, snippet }] top-K results, snippet fixed-length  
+
+> fetch
+
+(resource ) → (path, characters, status ) path + size header, never the body  
+
+> grep
+
+(pattern, path, context ) → matches up to GREP_MAX_MATCHES = 20 matches grouped by file; each match carries ±context lines around it (default 3, capped at 10; 
+
+context = 0 gives the matching line alone)  
+
+> read
+
+(path, offset, limit ) → line range at most READ_LIMIT = 200 lines, capped by a 50 KB output ceiling  
+
+> list_fetched
+
+() → [( path, resource, chars )] one header line per fetched file 
+
+(or Docid: for local-backend files), followed by a blank line and the normalized plain-text body. Because the filename is a hash of the resource identifier, a repeated fetch short-circuits: the body is already on disk, and only the header (path, size, newly/already-fetched flag) is returned to the agent — the body never enters the context. 
+
+A.2.3 Tool Schemas 
+
+The model sees each tool as a native function definition with name , description , and JSON Schema parameters .The exact specifications the harness transmits to the model are reproduced below. 
+
+search .
+
+{"type": "function", "function": { "name": "search", "description": "Search the web or local corpus and return ranked results for a single query.", "parameters": { "type": "object", "properties": { "query": { "type": "string", "description": "A single search query." }}, "required": ["query"] }}}
+
+fetch .
+
+{"type": "function", "function": { "name": "fetch", "description": "Download a webpage into the per-question workspace and return only the saved file path. This issues an actual HTTP request to the URL; it is NOT a lookup in a pre-existing 
+
+15 index. The full content is written to disk use grep to search across fetched files, read to inspect bounded slices, or bash for shell commands. Content is deliberately NOT returned inline to keep context manageable. Check list_fetched to see what is already in the workspace.", "parameters": { "type": "object", "properties": { "url": { "type": "string", "description": "A single URL to download." }}, "required": ["url"] }}}
+
+grep .
+
+{"type": "function", "function": { "name": "grep", "description": "Search fetched files for regex pattern matches. By default returns the matching lines only (no surrounding context); pass context=N to include $pm$N lines around each match (like grep -C) so you can read a hit in place instead of a follow-up read. The pattern is a case-insensitive regex, so pass a plain keyword or a regex (e.g. born|birth to match any of several terms). By default (omit the path argument), grep searches across ALL fetched files at once the recommended way to find which page(s) mention an entity when you have fetched several URLs and do not yet know which one carries the answer. Pass an explicit path only when you already know which single file to scan. Output is grouped by file: each file with matches gets a header line <path>:, followed by N: text entries (N is the 1-indexed line number, text is the matched line). Use the line number N directly as offset in a follow-up read(path, offset=N) call. Examples: grep(pattern= 'Marie Curie ') searches every fetched file; grep(pattern= 'born ',context=2) shows each hit with 2 lines on each side; grep(pattern= 'born in ',path= '/tmp/work-XXXX/foo.txt ') scans just that one file.", "parameters": { "type": "object", "properties": { "pattern": { "type": "string", "description": "A plain keyword or a case-insensitive regex (e.g. Marie|Curie)." }, "path": { "type": "string", "description": "Optional. File path or glob pattern. If omitted, grep searches ALL fetched files at once (recommended default). Specify a single path only to narrow an already-located match." }, "context": { "type": "integer", "description": "Optional. Number of surrounding lines to show on each side of a match (like grep -C). Omit to get a small default context; pass 0 for matching lines only, or a larger value (up to 10) to read a match in place without a separate read." }}, "required": ["pattern"] 
+
+16 }}}
+
+read .
+
+{"type": "function", "function": { "name": "read", "description": "Read a bounded LINE range from a specific fetched file (as returned by fetch or list_fetched). offset is the 1-indexed line number to start reading from (default 1); limit is the number of lines to return per call. Each output line is prefixed with its line number (N: text), so the line numbers grep returns plug straight in as offset here. The trailing message tells you exactly what to pass to continue: (Showing lines X-Y of Z. Use offset=N to continue.). Total output is also capped at ~50 KB to keep observations bounded, regardless of limit.", "parameters": { "type": "object", "properties": { "path": { "type": "string", "description": "File path returned by fetch or list_fetched." }, "offset": { "type": "integer", "description": "Optional. 1-indexed line number to start reading from. Defaults to 1. Pass the line number returned by grep to jump straight to a match." }, "limit": { "type": "integer", "description": "Optional. Maximum number of lines to return. Capped by a configured ceiling; a 50 KB output-byte cap also applies, so very long lines may shorten the effective window." }}, "required": ["path"] }}}
+
+list_fetched .
+
+{"type": "function", "function": { "name": "list_fetched", "description": "List all documents currently fetched for this question with their file paths and source identifiers. Use to discover available files before grep or read.", "parameters": { "type": "object", "properties": {} }}}
+
+17 visit (baseline) The visit behaviour depends on the tool profile (snippet / summary / full); the caller does not need to know which mode is active. 
+
+{"type": "function", "function": { "name": "visit", "description": "Visit a single webpage and summarize information relevant to a specific goal.", "parameters": { "type": "object", "properties": { "url": { "type": "string", "description": "A single URL to visit." }, "goal": { "type": "string", "description": "The information goal for the page visit." }}, "required": ["url", "goal"] }}}
+
+open (baseline). 
+
+{"type": "function", "function": { "name": "open", "description": "Open a webpage and return its extracted text (truncated). Subsequent find(pattern) calls search within THIS page. Open a different page to switch context.", "parameters": { "type": "object", "properties": { "url": { "type": "string", "description": "A single URL to open." }}, "required": ["url"] }}}
+
+find (baseline). 
+
+{"type": "function", "function": { "name": "find", "description": "Search the currently open page (from a prior open call) for regex or literal text matches. Returns matching lines prefixed with line numbers. Use open() to load a page first, then find() to locate specific information inside it.", "parameters": { 
+
+18 "type": "object", "properties": { "pattern": { "type": "string", "description": "Pattern to find in the current page." }}, "required": ["pattern"] }}}
+
+## A.3 Evaluation Implementation 
+
+All three benchmarks are evaluated using the official LLM-as-a-judge protocol provided by each benchmark. For BrowseComp and BrowseComp-Plus, the judge is DeepSeek-V4-Pro and outputs a structured response with fields extracted_final_answer , reasoning , correct (yes/no), and confidence (0–100); a prediction is scored Correct iff correct=yes . For WideSearch, the judge follows the benchmark’s official two-step pro-tocol: a vocabulary-alignment step maps the agent’s table to the gold schema, followed by an LLM-judge column step that scores each field. The final Acc is the strict all-or-nothing full-table match; Row-F1 and Item-F1 are computed over the aligned tables by the official scorer. The same judge configuration is applied identically to every profile and backbone, so judge choice enters all cells equally; our claims rest on intra-backbone deltas (each comparison in Table 2 is within one fixed backbone), which a uniform judge bias cannot manufacture or erase. The judge shares its model with one of the three agent backbones, so the DeepSeek-V4-Pro rows are scored by the same model that produced them. Any self-preference this induces applies to all five profiles in that row alike, and so shifts the row’s absolute level rather than the intra-backbone deltas we read; the two Qwen backbones are judged by a different model family throughout. 
+
+# B Supplementary Experimental Results 
+
+The per-question tool-call counts of F TE are already cross-backbone in the main text (Table 3). This section adds the parameter-level, call-sequence, and fetch-reuse distributions referenced in §4.3, all on F TE across the two open-web benchmarks (BC = BrowseComp, WS = WideSearch) and all three backbones. The two-level triage analysis (§ ?? ) runs on BrowseComp-Plus, which we evaluate on Qwen3.5-35B-A3B only; it is single-backbone by construction.  
+
+> grep
+
+pattern shape and scope Table 7 reports the grep pattern-length distribution (in characters) and the path-argument breakdown. Two qualitative facts hold across all runs: 74–92% of patterns contain regex metacharacters ( ., |, () , [] ), so backbones treat grep as a regex engine rather than a literal matcher; and the median pattern is ≤ 2 words. The path breakdown confirms the main-text reading: single-file search domi-nates, with 88–99.7% of calls naming one file. The one outlier is Qwen3.5-35B-A3B on BrowseComp, whose 12.0% call-level cross-cache share is driven by two stuck trajectories that repeatedly spam path-less grep ;measured per question (Table 3), the same backbone issues a whole-cache grep on only 7.5% of questions, so the call-level figure overstates how broadly the feature is used.  
+
+> read
+
+parameters Table 8 reports how often read carries an explicit offset /limit and their distributions (line-based). Both carry-rates are markedly higher on WideSearch than BrowseComp — backbones localize by line number more aggressively on the per-field task. The offset distribution shows reads rarely start at line 1 (the strongest backbone’s WideSearch p25 is 118), i.e. reads are seeded by grep ’s returned line num-bers. The limit distribution separates strategies: the strongest backbone prefers small, repeated windows (BrowseComp median 60), the weakest a single large window (WideSearch median 150, up to 1000). 
+
+Call-sequence n-grams Table 9 reports the most frequent tool-call bigrams and trigrams (s = search , f = fetch ,g = grep , r = read ). BrowseComp is dominated by the search run s →s→s (56–69% of trigrams); WideSearch 19 Table 7 grep pattern-length distribution (characters) and path-argument breakdown for F TE. N: total grep calls over the benchmark. x-cache : share targeting the whole cache ( path=* ); single : share naming one file. Pattern length (chars) Path argument Backbone Bench median p75 p90 max N x-cache % single % Qwen3.5-35B-A3B BC 32 46 61 110 590 12.0 88.0 WS 40 55 93 471 919 2.6 97.4 Qwen3.5-122B-A10B BC 28 39 53 111 732 2.6 97.4 WS 29 54 87 534 1225 4.9 95.1 DeepSeek-V4-Pro BC 38 51 66 140 1133 0.3 99.7 WS 32 56 93 1021 2560 0.8 99.2 
+
+Table 8 read parameter usage for F TE. N: total read calls. w/off , w/lim : share of read calls carrying an explicit offset /
+
+limit . offset (line number) and limit (line count) percentiles are over the calls that specify them. 
+
+offset limit 
+
+Backbone Bench N w/off % w/lim % median p90 median p90 Qwen3.5-35B-A3B BC 745 39.3 56.5 101 600 100 200 WS 1485 44.2 80.3 200 1000 150 300 Qwen3.5-122B-A10B BC 825 28.5 32.2 120 861 100 100 WS 1269 55.7 69.7 165 650 100 200 DeepSeek-V4-Pro BC 1154 29.6 43.4 116 810 60 100 WS 1643 64.8 81.1 201 607 70 200 
+
+surfaces same-type batches (f →f→f, g →g) absent from BrowseComp’s top entries. The s →s bigram share falls with backbone strength (75% → 65% on BrowseComp), and the r →s “read-then-re-search” edge (3.3– 4.6%) is the productive feedback loop. 
+
+Fetch reuse Table 10 reports how often a fetch re-fetches an already-cached URL. Repeat rates are low everywhere (under 5%) and lowest for the strongest backbone ( ≤ 1.4%), so the near-zero list_fetched usage, between 0.02 and 0.15 calls per question across the six cells, costs little: backbones avoid redundant fetches from context memory without enumerating the cache. 20 Table 9 Most frequent tool-call n-grams for F TE (% of all bigrams / trigrams). s = search , f = fetch , g = grep , r = read .Top bigrams Top trigrams Backbone Bench 1st 2nd 3rd 1st 2nd Qwen3.5-35B-A3B BC s→s 75.4 s→f 6.5 r→s 3.3 s→s→s 69.4 s→s→f 5.6 WS s→s 37.3 f→f 14.3 s→f 9.0 s→s→s 30.6 f→f→f 8.8 Qwen3.5-122B-A10B BC s→s 72.6 s→f 7.5 r→s 3.6 s→s→s 66.5 s→s→f 6.0 WS s→s 34.5 f→f 13.4 s→f 9.9 s→s→s 28.4 f→f→f 8.1 DeepSeek-V4-Pro BC s→s 64.5 s→f 9.6 f→g 4.5 s→s→s 56.0 s→s→f 8.3 WS s→s 40.4 f→f 10.8 g→g 9.7 s→s→s 33.3 s→s→f 6.3 
+
+Table 10 fetch URL reuse for F TE. Repeat % : share of fetches hitting an already-cached URL. Unique/q , Repeats/q : per-question unique and repeated fetches. Backbone Bench Fetches Unique Repeat % Unique/q Repeats/q Qwen3.5-35B-A3B BC 1084 1042 3.9 5.2 0.21 WS 2244 2180 2.9 10.9 0.32 Qwen3.5-122B-A10B BC 1461 1394 4.6 7.0 0.34 WS 2257 2218 1.7 11.1 0.20 DeepSeek-V4-Pro BC 2149 2129 0.9 10.6 0.10 WS 3053 3011 1.4 15.1 0.21 
+
+21

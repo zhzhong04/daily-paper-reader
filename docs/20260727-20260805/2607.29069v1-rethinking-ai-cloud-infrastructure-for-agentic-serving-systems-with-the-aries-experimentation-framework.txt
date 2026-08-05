@@ -1,0 +1,535 @@
+Title: Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework
+
+URL Source: https://arxiv.org/pdf/2607.29069v1
+
+Published Time: Mon, 03 Aug 2026 00:30:02 GMT
+
+Number of Pages: 8
+
+Markdown Content:
+# Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework 
+
+## Leonid Kondrashov ∗
+
+leonid001@e.ntu.edu.sg NTU Singapore Singapore 
+
+## Hongrui Liu ∗
+
+hongrui001@e.ntu.edu.sg NTU Singapore Singapore 
+
+## JooYoung Park ∗
+
+jooyoung001@e.ntu.edu.sg NTU Singapore Singapore 
+
+## Boxi Zhou ∗
+
+bzhou011@e.ntu.edu.sg NTU Singapore Singapore 
+
+## Zonghao Liu 
+
+liuz0138@e.ntu.edu.sg NTU Singapore Singapore 
+
+## Chengzhi Lu 
+
+chengzhi.lu@ntu.edu.sg NTU Singapore Singapore 
+
+## Riccardo Mancini 
+
+mancio@amazon.co.uk AWS United Kingdom 
+
+## Esha Choukse 
+
+esha.choukse@microsoft.com Microsoft USA 
+
+## Haris Javaid 
+
+haris.javaid@amd.com AMD, Singapore Singapore 
+
+## German Sviridov 
+
+German.Sviridov@amd.com AMD, Singapore Singapore 
+
+## Tao Peng 
+
+bergwolf@antgroup.com Ant Group China 
+
+## Chen Zhao 
+
+winters.zc@antgroup.com Ant Group China 
+
+## Anastasia Avdeeva 
+
+ananaskelly@ncspeech.org NCSpeech USA 
+
+## Aleksei Gusev 
+
+aleksei.gusev@ncspeech.org NCSpeech USA 
+
+## Marios Kogias 
+
+m.kogias@imperial.ac.uk Imperial College London United Kingdom 
+
+## Luo Mai 
+
+luo.mai@ed.ac.uk University of Edinburgh United Kingdom 
+
+## Dmitrii Ustiugov 
+
+dmitrii.ustiugov@ntu.edu.sg NTU Singapore Singapore 
+
+Abstract 
+
+Autonomous agents challenge conventional LLM serving by cou-pling repeated inference with persistent context and sandboxed tool execution. We present Aries, a full-stack experimentation frame-work that separates task semantics from execution configurations, reconstructs cross-component agent trajectories with correlated system telemetry, and exposes stateful tool execution through a consistent interface across heterogeneous sandbox substrates. We use Aries to conduct reproducible experiments on open agent har-nesses and benchmarks. We complement these experiments with production traces from a commercial platform, grounding low-level systems research in observed production behavior. Our results show that (1) token-centric metrics miss non-inference bottlenecks, (2) retaining additional context yields diminishing accuracy benefits while reducing serving capacity, and (3) tool sandboxes alternate between long idle periods and short resource bursts, while current snapshot-based state management makes aggressive suspension costly. A complementary security analysis further highlights the need to reduce the sandbox attack surface. We then discuss the 
+
+> ∗These authors contributed equally as co-first authors.
+
+vision for agent-native serving systems designed around trajectory-level metrics, adaptive context management, elastic sandbox re-source management, and sandboxes with minimized attack surface. 
+
+1 Introduction 
+
+Large Language Models (LLMs) are rapidly evolving from prompt responders into autonomous agents. Open-source agents such as 
+
+OpenClaw and Hermes have collectively attracted over half a million GitHub stars within months of their public releases [ 31 , 32 ], while closed-source commercial agents such as Claude and Codex are used by millions of people [ 7]. An agent places the model inside a feedback loop: it observes the current state, selects an action, executes that action through a tool, and uses the result to decide how the task should continue [ 27 , 28 , 49 ]. This shifts the system problem from serving isolated model requests to sustaining end-to-end agent trajectories. Agent serving therefore no longer ends when the model emits tokens; each model response is only one step in an execution loop whose progress depends on both generated text and runtime state. arXiv:2607.29069v1 [cs.DC] 31 Jul 2026 Conference’17, July 2017, Washington, DC, USA Kondrashov et al. 
+
+Agent Serving Goes Beyond Inference. Like conventional LLM serving, agentic workloads are often hosted in cloud AI in-frastructure [ 4 , 28 ], but they impose fundamentally different sys-tem requirements. Conventional LLM systems optimize individual model calls: scheduling and resource management are focused on producing the next model response efficiently [ 23 , 50 , 52 , 53 ]. This abstraction works when the surrounding application logic remains outside the serving system. In agent serving, however, each model call is only one step in a task loop. Faster GPU decoding remains useful, but end-to-end progress also depends on retained context, tool execution, and sandbox management. Agent serving there-fore requires a holistic, full-stack system design, beyond just fast inference serving. 
+
+Task Progress Needs System Visibility. Existing evaluation methods capture only part of agent execution. Agent benchmarks measure whether a task reaches the correct outcome [ 25 , 29 , 33 , 54 ], whereas system benchmarks typically measure isolated model calls, stateless functions, or task transactions [ 11 , 39 , 43 ]. Neither of the above connects task progress and correctness to cross-layer run-time behavior, while task–execution entanglement and substrate-dependent tool behavior hinder controlled comparison. We use the agent trajectory as the unit of observation. A trajec-tory is the ordered record of model invocations, tool interactions, harness decisions, and the final task outcome. Based on this abstrac-tion, we introduce Aries , a modular experimentation framework that separates task semantics from execution configuration, recon-structs cross-component trajectories with correlated telemetry, and standardizes tool execution across sandbox substrates, enabling reproducible comparisons and stage-level attribution of stalls and failures. We use Aries to conduct reproducible experiments on open benchmarks and complement them with production traces from a commercial platform (anonymized), thereby grounding low-level systems research in observed production behavior. 1
+
+Our experiments reveal limitations that the conventional model-call metrics hide. Harness and tool execution can account for a heavy part of the end-to-end latency (e.g., up to 48%), so LLM-engine token throughput may diverge from task-level execution efficiency. Context retention creates an accuracy–capacity trade-off: controlled sweeps show that avoiding context overflows can raise task success from 55% to 95%, but gains plateau at workload-dependent thresh-olds, while production traces and controlled telemetry show that retained state reduces serving capacity. Production and controlled measurements also reveal mostly idle-but-bursty tool sandboxes, for which snapshot-based suspension remains economically infea-sible. Our security analysis further motivates sandbox designs with minimal attack surfaces. Based on these insights, we discuss the vi-sion for agent-native serving systems that feature trajectory-aware observability, control planes for trajectory context management and for the elasticity of agent-aware sandboxes, and sandbox designs that minimize the attack surface of tool execution. 
+
+2 Background and Motivation 
+
+We first discuss the differences between the conventional LLM serving and emerging agentic workloads, and their implications 
+
+> 1The Aries code, toolchain, and the production traces are open source at https://github. com/hyscale-lab/aries (a) Conventional LLM Serving
+> GPU Inference Engine
+> LLM
+> 🗑
+> Per-request
+> KV released
+> Serving Frontend
+> Request
+> Response
+> (b) Agent Serving
+> GPU Inference
+> Engine
+> LLM
+> Trajectory Context State
+> (optional GPU-resident KV)
+> Host Side
+> Agent Harness
+> Tool Sandbox
+> Action /
+> Final Answer
+> Request
+> Response
+> Tool
+> Results
+> Tool
+> Calls
+> Prompt +
+> Context
+
+Figure 1: Overview of conventional LLM-serving and emerg-ing agent-serving systems. 
+
+for modern cloud AI infrastructure. We then discuss the existing benchmarking frameworks and why they fall short for systems research in agentic systems. 
+
+2.1 From Model Requests to Agent Trajectories 
+
+Conventional LLM serving systems are organized around the ex-ecution of individual model requests. As shown in Fig. 1a, the serving runtime processes a prompt, generates output tokens, man-ages accelerator memory, and returns a response [ 50 , 53 ]. Sched-uling and memory management are therefore scoped primarily to the active invocation. Depending on the cache policy, the en-gine may retain, offload, reuse, or reclaim the invocation’s KV-cache state after execution [ 23 , 34 , 36 , 52 ]. This request-centric design naturally prioritizes metrics such as time to first token, time per output token, request latency, and aggregate token through-put [18, 23, 35, 50, 52, 53]. Agent serving departs from this invocation-centric abstraction. As shown in Fig. 1b, the harness repeatedly invokes the LLM, dispatches tool calls to a sandboxed runtime, incorporates tool results into later prompts, and decides when the task is com-pleted [ 25 , 28 , 49 ]. A single user request may therefore span many dependent model and tool steps. In this paper, we define an agent trajectory as the ordered se-quence of LLM invocations, tool calls, tool results, and harness de-cisions produced while serving one user request. Individual model requests are steps within this larger execution unit rather than independent transactions. Trajectory state persists across these steps. The harness may represent this state as message history or structured events, while the serving layer may materialize reusable portions as cached model state, such as KV-cache prefixes. At the same time, model-generated actions execute on the host side within an isolated sandbox. Agent serving consequently spans GPU in-ference, host-side orchestration, persistent context state, and sand-boxed execution, with dependencies across all four components. 
+
+2.2 Limitations of Existing Benchmarking Frameworks 
+
+Existing benchmarks answer complementary questions at incom-patible granularities. Capability-oriented benchmarks evaluate whether an agent completes a realistic task, but largely treat the execution path as a black box [ 15 , 19 , 29 , 30 , 45 , 48 , 54 ]. Systems benchmarks can measure end-to-end performance and resource behavior, but typically consider individual requests or transactions as their unit of analysis [11, 13, 39, 43]. Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework Conference’17, July 2017, Washington, DC, USA Trajectory / Metrics Collector 
+
+> Prometheus / OTel / Grafana
+> Tool Sandbox
+> K8S / GKE / Lambda MicroVM / Modal
+> Agent Harness
+> OpenClaw / Hermes / OpenHands
+> LLM Backend
+> Cloud / Self Hosted
+> Aries Runner
+> Task Con fi g
+> LLM API
+> Execute Tool Call Resource Usage Trajectory Events LLM Requests Run Task Setup
+> LLM+GPU Metrics
+> Tool Adapt.
+> Manage Manage
+> Exec. Con fi g
+
+Figure 2: Aries architecture. The blue-colored components are instrumentation in the agent-serving loop, dedicated to bridging the measurement gap. 
+
+None of the prior frameworks and benchmarks reveal how sys-tem behavior affects progress within a multi-step agent task. Task semantics are often entangled with harness- and runtime-specific choices, execution events remain fragmented across model, harness, and sandbox components, and stateful tool behavior depends on the underlying substrate. Agent serving therefore creates a measure-ment gap between semantic task progress and cross-layer system execution, making it difficult to isolate configuration effects, recon-struct complete trajectories, and attribute resource bottlenecks to task-level delays and failures. 
+
+3 Aries: Trajectory-Level Telemetry 
+
+The goal of Aries is to bridge the measurement gap between se-mantic task outcomes and cross-layer system behavior by treating an agent trajectory as the first-class citizen. This entails three chal-lenges. First, task semantics are often entangled with execution choices, hindering controlled comparison across stacks. Second, agent execution spans independently managed components, mak-ing trajectories difficult to reconstruct or attribute from local logs. Third, tool execution is both stateful and substrate-dependent, com-plicating consistent comparison of its behavior and resource cost. Aries addresses these challenges with separate task and execution specifications, a shared trajectory schema that correlates cross-layer telemetry, and a substrate-independent interface for stateful tool execution and instrumentation. Fig. 2 presents the architecture of Aries. Task and execution loaders validate the specifications; the runner coordinates the har-ness and accesses LLM backends and sandbox substrates through adapters; and the telemetry collector merges framework events with cross-layer telemetry into a unified record. This design sepa-rates task semantics from execution configuration, preserves cross-component provenance, and standardizes stateful tool execution across sandbox substrates. 
+
+Preserving task semantics across configurations. Agent frameworks often embed task semantics within harness-specific logic, so replacing a runtime component may inadvertently change the task being evaluated. Aries therefore separates the task specifi-cation, which captures the workload and its success semantics, from the execution specification, which selects the harness, model back-end, sandbox, and telemetry stack. Dedicated loaders validate the two specifications, while LLM backend and sandbox adapters bind them to a concrete execution stack without task-specific changes. This separation enables controlled comparisons across configura-tions. 
+
+Reconstructing cross-component trajectories. Agent runs may contain overlapping, failed, or retried operations across inde-pendently managed components, making component-local logs and timestamps insufficient for reliable reconstruction and attribution. Aries propagates trajectory and event identifiers across model and tool boundaries and records causal and ordering metadata under a common event schema. The telemetry collector then associates component metrics with these events, revealing where delays and resource pressure arise along the trajectory. 
+
+Making stateful tool execution observable and portable. 
+
+Tool calls operate on a persistent environment whose state affects subsequent trajectory steps, while different sandbox substrates ex-pose different lifecycle and telemetry interfaces. Aries standardizes environment setup, tool invocation, state continuity, result col-lection, and telemetry hooks, while sandbox adapters map these operations onto concrete substrates. This makes tool execution a first-class, consistently observable stage of the trajectory while supporting different sandbox technologies. 
+
+4 Why Is Modern Cloud AI Infrastructure a Poor Fit for Agents? 
+
+Using Aries, we evaluate whether request-centric modern cloud AI infrastructure is sufficient for agent serving. Specifically, we ask which components determine the end-to-end critical path, how long-lived trajectory context affects serving efficiency and accuracy, how resources are utilized across LLM backends and tool sandboxes, and the adequacy of existing tool-isolation mechanisms. We first analyze an eight-hour workday production trace, including request lengths from ten LLM-serving instances and one-minute CPU and memory samples from 100 agent sandboxes, to establish high-level workload behavior at deployment scale. As the operational traces do not expose synchronized cross-layer events, we then reproduce the observed patterns with open harnesses and datasets and use Aries for deeper system-level analysis. For this controlled analysis, Aries integrates OpenHands [44 ], 
+
+Hermes Agent [ 31 ], and OpenClaw [32 ], and evaluates serving tasks from SWE-Bench Pro [ 8], Terminal-Bench 2 [ 41 ], and Deep-Research Bench [ 9]. We sample 20 tasks from each benchmark to achieve 50% task success rate (important for the accuracy studies) with OpenClaw and repeat each task five times. Unless otherwise stated, experiments use Qwen3.6-35B-A3B-FP8 [ 37 ], served locally by SGLang [52 ] on a 96-core node with one NVIDIA H100 GPU with 94 GB of HBM. 
+
+4.1 Harnesses & Tools Matter as Much as Models 
+
+Existing LLM-serving engines optimize token-centric metrics such as TTFT and TPOT [ 23 , 52 , 53 ]. These metrics omit the host-side intervals during which the harness processes model outputs or waits for tool execution, even though the agent cannot advance until these steps complete. As the per-step timing information is too sensitive to collect in the commercial cluster, we base the analysis of the utility of existing metrics on the setup with public datasets and harnesses which record these events under a shared trajectory identifier and time base. Our profiling highlights two key system insights: (1) Critical-Path Shift to Harness and Tool Execution: As shown in Fig. 3, tool execution is an important latency contributor, contributing from 13% to 48% of the total latency across datasets and harnesses, Conference’17, July 2017, Washington, DC, USA Kondrashov et al. OH HM OC                   
+
+> 0
+> 25
+> 50
+> 75
+> 100
+> Share (%)
+> 26 48 43
+> 74 52 54
+> OH HM OC
+> 30 38
+> 13
+> 69 59
+> 85
+> OH HM OC
+> 37 33 29
+> 61 62 62
+> (a) Terminal-Bench 2 (b) DeepResearch Bench (c) SWE-Bench Pro
+> LLM Harness Tool
+
+Figure 3: End-to-end average latency breakdown. Harness and tool execution contribute latency on par with LLM calls. 1       
+
+> 10
+> 100
+> 1k
+> 10k
+> 100k 0
+> 0.5
+> 1
+> CDF
+> 1
+> 10
+> 100
+> 1k
+> 10k
+> 100k
+> 1
+> 10
+> 100
+> 1k
+> 10k
+> 100k
+> Latency, ms
+> (a) TerminalBench 2 (b) DeepResearch Bench (c) SWE-Bench Pro
+> OH-Tool OH-LLM HM-Tool HM-LLM OC-Tool OC-LLM
+
+Figure 4: Latency distributions for LLM inference vs. tool execution. Tool calls exhibit a severe long tail spanning mul-tiple orders of magnitude. 
+
+while reaching 48% for Hermes Agent on Terminal-Bench 2. Beyond tool execution, the harness spends up to 9% of end-to-end time on orchestration and other host-side processing, further extending the interval between consecutive LLM calls and potentially prolonging the residency of trajectory state in GPU memory. (2) Long-Tailed Latency Profiles: Fig. 4 shows that while LLM latency remains important, tool calls exhibit a severe long tail that spans multiple orders of magnitude. Together, these results show that these massive host-side delays frequently dominate execution time, meaning that solely optimizing accelerator token generation cannot resolve the actual agent bottlenecks. 
+
+Takeaway 1: End-to-end task duration depends heavily on har-ness and tool sandbox execution, rather than model inference alone. 
+
+4.2 Long Context Dictates Efficiency & Accuracy 
+
+In conventional LLM serving, context lifetimes are typically scoped to the request-response cycle, allowing engines to reclaim KV cache pages post-query unless explicitly retained or offloaded for reuse [ 17 , 23 , 26 , 36 , 52 , 53 ]. Conversely, long-horizon agents gen-erate monotonically growing histories that persist across the entire trajectory. While existing frameworks apply semantic compression to fit system limits [ 5, 38 , 47 ], unmanaged context expansion still locks up physical GPU token pools and reduces serving concur-rency [ 21 , 24 ]. Retaining excessive history can increase tail delay, while aggressive compression may discard information required by later steps and reduce task accuracy [ 20 , 21 ]. Resolving this accuracy-efficiency tension requires shifting from passive memory allocation to trajectory-aware state management that balances the resource cost and future utility of retained context. We first compare the context lengths observed in agentic serving and conventional inference, both retrieved from the production platform. Then, we characterize the trade-offs associated with the context budget and how they affect the accuracy and efficiency of agentic serving with the public harnesses and datasets. In the latter analysis, across all evaluated benchmarks, we sweep the context Conv Agent 
+
+> 10 3
+> 10 4
+> 10 5
+> Ctx Len (tokens)
+
+(a) Context distribution Conv Agentic  
+
+> 0
+> 50
+> 100
+> 150
+> Max Resident Reqs
+> 176
+> 40
+
+(b) Resident capacity 
+
+Figure 5: Context length and resident capacity comparison across conversation and agent requests in the production cluster. Agent workloads consume larger per-request KV footprints than conventional serving, sharply reducing the number of processed requests in parallel by an LLM backend. 0                                           
+
+> 50
+> Rate (%)
+> 50 55
+> 35 45 40 45 45
+> OpenClaw
+> 0
+> 50
+> 55 55 60
+> 95 95 90 95
+> 0
+> 50 50 45 40 35 35 30 35
+> 64 96 128 160 192 224 256
+> Context window size(K)
+> 0
+> 50
+> Rate (%)
+> 30 40 50 50 45 35 35
+> (a) Terminal-Bench 2
+> Hermes
+> 64 96 128 160 192 224 256
+> Context window size(K)
+> 0
+> 50
+> 80 80 80 70 80 85
+> 70
+> (b) DeepResearch Bench
+> 64 96 128 160 192 224 256
+> Context window size(K)
+> 0
+> 50 25 35 35 30 35 35 30
+> (c) SWE-bench Pro
+> 0
+> 10
+> 20
+> 0
+> 50
+> 0
+> 5
+> 10
+> Event count
+> 0
+> 20
+> 0
+> 20
+> 0
+> 20
+> Event count
+> Task success Compactions Context overflows
+
+Figure 6: Compaction and context overflow counts with dif-ferent context window sizes, and the corresponding task suc-cess rate. Larger windows ease overflow/compaction pressure, but task success plateaus past workload-specific thresholds. 
+
+budget for both OpenClaw and Hermes Agent (omitting Open-Hands for brevity) to determine when additional retained history stops providing meaningful accuracy gains. We then quantify the cost of context retention when serving 32 concurrent active agen-tic sessions with a 256K context size, sampling backend resource utilization once per second. We make three key observations: (1) Trajectory State Amplifi-cation: Production traces reveal substantially larger agent contexts than those observed in conventional inference workloads, which matches our results with the public datasets and harnesses. As quan-tified in Fig. 5, the average agent context consumes a substantially larger KV footprint than conventional inference. Under a fixed 25GB budget with the Qwen3.6 model, this state amplification reduces the maximum resident capacity from over 176 concurrent serving requests to merely 40—a 4.4× reduction. (2) Context Sufficiency Thresholds: Using the open datasets and harnesses, we show that long-context retention improves accuracy only up to a task-specific threshold, beyond which additional history, albeit consuming more memory, provides little to no accuracy benefits. As shown in Fig. 6, 
+
+OpenClaw on DeepResearch Bench reaches peak success (95%) at 160K context, coinciding with the elimination of context over-flows. Conversely, Terminal-Bench 2 and SWE-Bench Pro plateau or degrade once overflow pressure is removed, performing best at small or mid-size windows rather than the maximum context size. 
+
+(3) Capacity-induced Batch Limitation: our results with public datasets further show that large retained state severely constrains serving capacity. Fig. 7a and Fig. 7b show that memory pressure limits effective batching despite a 32-session backlog; token-pool utilization peaks at 97%, while the engine sustains a median of only 22 concurrent requests. Under this pressure, the scheduler preempts Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework Conference’17, July 2017, Washington, DC, USA 0 10 20 30                     
+
+> Concurrent requests
+> 0
+> 25
+> 50
+> 75
+> 100
+> CDF (%)
+> Act. Res. Queue
+> (a) Concurrency of ac-tive trajectories (Act.), resident LLM-engine ses-sions (Res.), and queued sessions (Queue). 050 100
+> Utilization / pool used (%)
+> 0
+> 25
+> 50
+> 75
+> 100
+> CDF (%)
+> KV SM Occ HBM
+> (b) Resource pressure from KVC pool us-age(KV), SM activity(SM) and occupancy(Occ), and HBM activity(HBM). 10 −2 10 −1 10 010 1
+> Waiting time (s)
+> 0
+> 25
+> 50
+> 75
+> 100
+> CDF (%)
+> TTFT Queue
+> (c) Request waiting time measured by TTFT and SGLang queue time (Queue).
+
+Figure 7: CDFs over the one-hour window of the agent serv-ing. The workload sustains high concurrency and KV pres-sure, while long waits are concentrated in the request tail. 0.0 0.5 1.0    
+
+> CPU utilization
+> 0
+> 1
+> CDF
+> Harness CPU
+> (a) CPU utilization 0.0 0.5 1.0
+> Memory utilization
+> 0
+> 1
+> CDF
+> Harness Memory (b) Memory utilization
+
+Figure 8: CDFs of Harness CPU and memory utilization aggre-gating measurements taken every minute from the produc-tion cluster. The values are normalized for trace anonymiza-tion purposes. 
+
+active sessions, and the 𝑝 95 internal queueing delay reaches 7.9s (Fig. 7c). 
+
+Takeaway 2: Retaining context beyond its task-dependent utility yields diminishing accuracy benefits while increasing KV-cache occupancy, limiting batching, and prolonging queueing delays. The system must therefore actively manage trajectory state to balance task accuracy against serving efficiency. 
+
+4.3 Tool Sandboxes Must Be Elastic 
+
+Agent serving introduces CPU-based processing to the critical path: it alternates between idle intervals during LLM inference and short CPU/memory bursts during tool execution. Static peak resource provisioning avoids throttling these tool calls but leaves resources stranded a significant portion of the time. Cloud systems such as AWS Lambda MicroVMs [ 1] and Google Agent Sandbox [ 14 ] at-tempt to reduce waste by applying a stateful scale-to-zero approach via sandbox snapshot capture and restore (C/R). However, agentic tool execution patterns lead to a high number of capture-restore cycles, incurring additional costs, as we show below. We collect CPU and memory utilization from over 100 sandboxes on the same commercial platform, each co-hosting an OpenClaw-style harness and its tool calls. To confirm the trend and for in-depth analysis, we also collect CPU and memory utilization of harness and tool sandboxes in a controlled environment every second and analyze their distributions for OpenClaw and Hermes using the cloud DeepSeek V4 Flash API, which is production-grade and highly stable for tool call generation accuracy. We then analytically replay the recorded tool-call traces against the AWS Lambda MicroVMs pricing model [ 2] under different sandbox keepalive policies as in serverless deployments [ 12 , 40 ]. We report the instance cost (CPU and memory usage), the snapshot C/R cost, and their sum. The ∞0 1 2           
+
+> CPU util., cores
+> 0.5
+> 1.0
+> CDF
+> Harness
+> 010 20 30
+> CPU util., cores
+> 0.5
+> 1.0
+> Tool Environment
+> OpenClaw - TB2
+> Hermes - TB2
+> OpenClaw - SWE
+> Hermes - SWE
+> OpenClaw - DR
+> Hermes - DR
+> 010 20 30
+> CPU util., cores
+> 0.5
+> 1.0
+> Tool Calls only
+> (a) CPU 12
+> Memory util., GB
+> 0
+> 1
+> CDF
+> Harness
+> 0510
+> Memory util., GB
+> 0
+> 1
+> Tool Environment
+> 0510
+> Memory util., GB
+> 0
+> 1
+> Tool Calls only
+> (b) Memory
+
+Figure 9: Tool and harness CPU and memory utilization CDFs aggregating measurements taken every second. The tool en-vironment is mostly idle, with high CPU utilization spikes during tool calls. 0s 5s 30s 60s 300s 
+
+> Keepalive timeout
+> 0
+> 1
+> 2
+> 3
+> 4
+> 5
+> 6
+> 7
+> Absolute cost ($)
+> Instance
+> Snapshot C/R
+> Total
+
+Figure 10: Absolute customer-visible cost of snapshot-based stateful scale-to-zero under different keepalive timeouts based on AWS Lambda MicroVM billing model. Short keepalive reduces instance cost but triggers frequent snap-shot C/R, while longer keepalive reduces C/R by keeping the sandbox resident for more idle time. 
+
+keepalive point corresponds to the persistent sandbox. DeepRe-search is excluded from this comparison due to the tools’ low CPU usage. Fig. 8 shows that CPU compute and memory utilization in the pro-duction setting is spiky. We reproduce this with the public datasets and harnesses (Fig. 9), showing that agent tool sandboxes spend most of their trajectories at low utilization, yet exhibit sharp spikes in CPU and memory demand during tool execution. Across har-nesses and workloads, CPU and memory remain idle for more than 80% and 50% of the time, respectively. At the same time, the tool-call-conditioned distributions show much more intensive resource use: the portion of time with idle resources drops below 20% for both CPU and memory. Fig. 10 shows that both users and cloud providers have an incentive to reduce keepalive to lower their costs: users avoid paying for idle sandboxes, while providers reclaim stranded capacity sooner. Yet current snapshot-based mechanisms and pricing prevent this alignment: if tool sandboxes are torn down after each tool call, their cost falls by 65%, but repeated snapshot C/R raises the total customer cost to 4.9 × compared to the per-sistent baseline. Keeping tool sandboxes for longer reduces C/R overhead but increases idle time. Thus, today’s system forces a false choice between paying for idle capacity and paying for repeated snapshots and restores. However, these results suggest that the total cost can be reduced by 3 × in an ideal system compared to the persistent-sandbox baseline. Conference’17, July 2017, Washington, DC, USA Kondrashov et al. 25-08      
+
+> 25-09
+> 25-10
+> 25-11
+> 25-12
+> 26-01
+> 26-02
+> 26-03
+> 26-04
+> 0
+> 200
+> 400
+> 600
+> CVEs / month
+> 00152
+> 35
+> 20
+> 73
+> AI-found Linux Kernel CVEs
+> Other CVEs
+> AI-found CVEs
+> AI-found share
+> 0%
+> 5%
+> 10%
+> 15%
+> AI-found share
+
+Figure 11: Total and relative share of Linux kernel CVEs reported as found by AI agents or with AI assistance. There is a sharp increase in AI-found CVEs in Q2 of 2026. Takeaway 3: Agent sandboxes are mostly idle but bursty when tools execute. Both users and providers should benefit from idle resource reclamation, yet current state-management mechanisms and pricing make aggressive suspension uneconomical. 
+
+4.4 Tool Sandboxes Are Under Continuous Siege 
+
+Cloud infrastructure is already designed to handle untrusted code execution, and uses the same mechanisms to sandbox agentic workloads. Beyond LLM-specific challenges, e.g., KV caches side-channels [ 6] or sensitive input data [ 27 ], agents have the ability to autonomously discover and exploit vulnerabilities [ 42 , 46 , 51 ]. Frontier models already found advanced vulnerabilities in produc-tion system software, such as OS kernels and VMMs [ 3], hinting at the possibility of AI agents breaching cloud isolation. We use the share of Linux kernel CVEs identified by AI tools as a proxy for the ability of AI agents to find vulnerabilities au-tonomously. We compute that share as the proportion of commits in the Linux CVEs that explicitly mention using AI tools to find and fix vulnerabilities. We display our findings in Fig. 11. AI tools are playing an increasing role in finding vulnerabilities. On the Linux kernel, this is especially true since the introduction of Sashiko, an agentic patch review system [ 16 ]. The trend holds across CVE publishers, with a 3.5 × increase in published CVEs for the second quarter of 2026 compared to previous records [ 10 ]. Exploiting known CVEs is also becoming cheap: agentic systems can develop exploits for a few dollars [ 42 ]. Agentic workloads are already highly capable of carrying sophisticated attacks against the cloud infrastructure. Therefore, sandboxes should expose a minimal attack surface, but also rely on defense-in-depth mechanisms to anticipate latent vulnerabilities. 
+
+Takeaway 4: AI agents are highly capable of autonomously finding and exploiting vulnerabilities. Tool sandboxes should be de-signed to withstand advanced attacks and to anticipate increasing offensive model capabilities by reducing the attack surface. 
+
+5 Future Research Directions 
+
+Our results suggest that agent-serving systems should coordinate optimization decisions across the trajectory rather than manage model inference, context state, and tool execution independently. As illustrated in Fig. 12, this requires jointly optimizing task progress, capacity, and resources through four co-designed directions across the Runtime, Control, and Execution layers: (1) trajectory-capturing Elastic Compute & State Management 
+
+Context Management 
+
+> Runtime
+
+Hardened & Slim-fi t Sandboxes 
+
+LLM Backends 
+
+> Control Plane
+> Metrics Metrics
+> Execution Environment
+
+Agent Harness 
+
+Figure 12: Agent-native AI serving system vision. TB2 SWE DR         
+
+> 0
+> 50
+> 100
+> Generated tokens/s
+> TB2 SWE DR
+> 0
+> 50
+> Solved / 1M gen. tok.
+> TB2 SWE DR
+> 0
+> 20
+> Solved / hour
+> (a) token throughput (b) solved per 1M generated tokens (c) solved per hour
+> OpenHands Hermes OpenClaw
+
+Figure 13: Token throughput, solved tasks per 1 million gen-erated tokens, and solved tasks per hour. Token throughput can diverge from task goodput and execution efficiency in agent serving. 
+
+metrics spanning all layers; (2) control plane for trajectory-aware context management; (3) elastic tool execution management via sandbox control; and (4) minimizing the tool sandbox attack surface. 
+
+5.1 Trajectory-capturing Metrics 
+
+Future agent-serving metrics should continuously quantify how sys-tem execution contributes to task progress. As illustrated in Fig. 13, evaluation should connect end-to-end outcomes, such as task suc-cess and completion rate, with low-level measures of execution speed and cost, including latency, generated tokens, and resource consumption. Task goodput and solved tasks per generated token provide useful endpoint metrics, but they become available only after a trajectory completes and cannot guide runtime decisions. A key research direction is therefore to derive online utility signals from trajectory events. Such signals should estimate the incremental progress contributed by each model call, harness deci-sion, and tool interaction while accounting for its time and resource cost. They should distinguish productive actions from repeated or non-advancing steps and aggregate into end-to-end measures of task accuracy, execution speed, and system cost. This connection would allow low-level system optimizations to be evaluated by their actual contribution to agent task completion. 
+
+5.2 Control Plane for Trajectory-Aware Context Management 
+
+Our measurements in §4.2 reveal a workload-dependent trade-off between context sufficiency and serving capacity. Additional con-text increases KV-cache pressure and queueing delay, even when it provides only a small improvement in task success. This motivates a trajectory-aware control plane that monitors task and memory states, determines how context should be retained and placed, and directs the LLM backend to perform context compaction, KV-cache compression, or state transfer. (1) Adaptive Context Retention. 
+
+The control plane should estimate the future utility of context as a trajectory evolves and request compaction or compression when the expected accuracy benefit of retained state no longer justifies its memory cost. Such decisions must remain conservative enough to preserve information needed by later model invocations. (2) Rethinking AI Cloud Infrastructure for Agentic Serving Systems with the Aries Experimentation Framework Conference’17, July 2017, Washington, DC, USA 
+
+Hierarchical State Placement. The control plane should coordi-nate long-lived context placement across accelerator and lower-cost memory tiers rather than leaving all state resident on the accelerator. It should trigger KV-cache migration when the released accelerator capacity outweighs the transfer and restoration overhead. 
+
+5.3 Control Plane for Agent-Aware Elasticity 
+
+Our characterization in §4.3 shows that host-side resource demand is highly intermittent. Static provisioning wastes capacity, while conventional, horizontal autoscaling mechanisms are too expen-sive at such granularity. Future agent-serving platforms therefore require an elasticity control plane designed around model-driven, stateful execution. (1) Vertical, Model-Aware Compute Man-agement. Research should explore how signals from the model, harness, and runtime can guide timely vertical scaling of individual sandboxes to satisfy the identified volatile demand for memory and core count fluctuations. Key questions include which signals reliably predict demand, how uncertainty should be handled, and how resources should be allocated across competing trajectories. 
+
+(2) State Management for Elastic Execution. Because sandboxes retain files, processes, caches, and network state, elasticity requires decoupling execution state from physical placement and resource allocation. Research is needed on what state must remain resident, what can be externalized or reconstructed, and how to preserve consistency while resizing, suspending, or relocating sandboxes. 
+
+5.4 Sandboxes with a Minimal Attack Surface 
+
+AI agents are increasingly capable of autonomously finding and ex-ploiting vulnerabilities. Thus, cloud infrastructure should anticipate increasingly sophisticated adversarial workloads. (1) Defense-in-Depth and Minimizing Attack Surface. Sandboxes should be tailored to the workload to reduce the attack surface by restricting tool, network, and filesystem access based on the target tasks. Tool execution should leverage both host-side VM-level isolation and guest-side kernel-level sandboxing. For instance, workloads such as deep research do not need direct bash access, but can be granted a sandboxed JavaScript runtime within the guest. Also, the system design has to minimize the attack surface exposed to side-channel timing attacks across the agentic stack. (2) Formal Security Guar-antees. In the long term, formal verification of security properties is the only path to certifying the absence of vulnerabilities. Migration to verified systems, such as seL4 [ 22 ], as a host hypervisor or guest kernel, will require major but necessary system overhaul to en-sure the cloud remains secure despite models’ increasing offensive capabilities. 
+
+6 Conclusion 
+
+Agent serving turns conventional LLM serving into long-lived, state-ful trajectories spanning model execution, harness logic, and sand-boxes. We present Aries, a telemetry framework that combines re-producible experiments with production traces to characterize task and system behavior. Our findings motivate trajectory-capturing metrics, control planes for context management and agent-aware elasticity, and sandboxes with minimal attack surfaces. 
+
+References 
+
+[1] Amazon Web Services. 2026. AWS Lambda MicroVMs. https://aws.amazon.com/ lambda/lambda-microvms/. Accessed: 2026-07-03. [2] Amazon Web Services. 2026. AWS Lambda Pricing. https://aws.amazon.com/ lambda/pricing/. Accessed: 2026-07-03. [3] Nicholas Carlini, Newton Cheng, Keane Lucas, Michael Moore, Milad Nasr, Vinay Prabhushankar, Winnie Xiao, Hakeem Angulu, Evyatar Ben Asher, Jackie Bow, Keir Bradwell, Ben Buchanan, David Forsythe, Daniel Freeman, Alex Gaynor, Xinyang Ge, Logan Graham, Kyla Guru, Hasnain Lakhani, Matt McNiece, Mo-jtaba Mehrara, Renee Nichol, Adnan Pirzada, Sophia Porter, Andreas Terzis, and Kevin Troy. 2026. Assessing Claude Mythos Preview’s cybersecurity capabilities. Anthropic Research Blog. https://www.anthropic.com/research/mythos-preview Accessed: 2026-06-26. [4] Jinyuan Chen, Jiuchen Shi, Quan Chen, and Minyi Guo. 2025. Kairos: Low-latency multi-agent serving with shared llms and excessive loads in the public cloud. arXiv preprint arXiv:2508.06948 (2025). [5] Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and Deshraj Ya-dav. 2025. Mem0: Building production-ready ai agents with scalable long-term memory. arXiv preprint arXiv:2504.19413 (2025). [6] Kexin Chu, Zecheng Lin, Dawei Xiang, Zixu Shen, Jianchang Su, Cheng Chu, Yiwei Yang, Wenhui Zhang, Wenfei Wu, and Wei Zhang. 2025. Selective kv-cache sharing to mitigate timing side-channels in llm inference. arXiv preprint arXiv:2508.08438 (2025). [7] CryptoBriefing. 2026. Codex surges to 6 million active users, overtaking Claude Code’s 2 million. https://cryptobriefing.com/codex-surges-6m-users-overtakes-claude-code/. [8] Xiang Deng, Jeff Da, Edwin Pan, Yannis Yiming He, Charles Ide, Kanak Garg, Niklas Lauffer, Andrew Park, Nitin Pasari, Chetan Rane, et al . 2025. Swe-bench pro: Can ai agents solve long-horizon software engineering tasks? arXiv preprint arXiv:2509.16941 (2025). [9] Mingxuan Du, Benfeng Xu, Chiwei Zhu, Xiaorui Wang, and Zhendong Mao. 2025. DeepResearch Bench: A Comprehensive Benchmark for Deep Research Agents. arXiv preprint (2025). [10] Luke Emberson. 2026. Disclosure of serious cyber vulnerabilities spiked around the release of Claude Mythos Preview. Epoch AI. https://epoch.ai/data-insights/ cve-severity-spike Accessed: 2026-07-07. [11] Michael Ferdman, Almutaz Adileh, Onur Kocberber, Stavros Volos, Mohammad Alisafaee, Djordje Jevdjic, Cansu Kaynak, Adrian Daniel Popescu, Anastasia Ailamaki, and Babak Falsafi. 2012. Clearing the clouds: a study of emerging scale-out workloads on modern hardware. In Proceedings of the Seventeenth International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS’12). doi:10.1145/2150976.2150982 [12] Alexander Fuerst and Prateek Sharma. 2021. FaasCache: keeping serverless computing alive with greedy-dual caching. In Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (Virtual, USA) (ASPLOS ’21). Association for Computing Machinery, New York, NY, USA, 386–400. doi:10.1145/3445814.3446757 [13] Yu Gan, Yanqi Zhang, Dailun Cheng, Ankitha Shetty, Priyal Rathi, Nayan Katarki, Ariana Bruno, Justin Hu, Brian Ritchken, Brendon Jackson, et al . 2019. An open-source benchmark suite for microservices and their hardware-software implications for cloud & edge systems. In Proceedings of the twenty-fourth international conference on architectural support for programming languages and operating systems. 3–18. [14] Google Cloud. 2026. About GKE Agent Sandbox. https://docs.cloud.google.com/ kubernetes-engine/docs/concepts/machine-learning/agent-sandbox. Accessed: 2026-07-03. [15] Izzeddin Gur, Hiroki Furuta, Austin Huang, Mustafa Safdari, Yutaka Matsuo, Douglas Eck, and Aleksandra Faust. 2024. A real-world webagent with planning, long context understanding, and program synthesis. In International Conference on Learning Representations, Vol. 2024. 52690–52717. [16] Roman Gushchin. 2026. Sashiko: An Agentic Linux Kernel Code Review System. https://sashiko.dev/. [17] Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu, Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang, Yungang Bao, Ninghui Sun, et al . 2024. Memserve: Context caching for disaggregated llm serving with elastic memory pool. arXiv preprint arXiv:2406.17565 (2024). [18] Cunchen Hu, Heyang Huang, Liangliang Xu, Xusheng Chen, Jiang Xu, Shuang Chen, Hao Feng, Chenxi Wang, Sa Wang, Yungang Bao, Ninghui Sun, and Yizhou Shan. 2024. Inference without Interference: Disaggregate LLM Inference for Mixed Downstream Workloads. arXiv:2401.11181 [cs.DC] doi:10.48550/arXiv. 2401.11181 [19] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik R. Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-World GitHub Issues?. In The Twelfth International Conference on Learning Representations (ICLR 2024). https://openreview.net/forum?id=VTF8yNQM66 [20] Minki Kang, Wei-Ning Chen, Dongge Han, Huseyin A Inan, Lukas Wutschitz, Yanzhi Chen, Robert Sim, and Saravan Rajmohan. 2025. Acon: Optimizing context Conference’17, July 2017, Washington, DC, USA Kondrashov et al. 
+
+compression for long-horizon llm agents. arXiv preprint arXiv:2510.00615 (2025). [21] Sanjay Kariyappa and G Edward Suh. 2026. SideQuest: Model-Driven KV Cache Management for Long-Horizon Agentic Reasoning. arXiv preprint arXiv:2602.22603 (2026). [22] Gerwin Klein, Kevin Elphinstone, Gernot Heiser, June Andronick, David Cock, Philip Derrin, Dhammika Elkaduwe, Kai Engelhardt, Rafal Kolanski, Michael Norrish, et al . 2009. seL4: Formal verification of an OS kernel. In Proceedings of the ACM SIGOPS 22nd symposium on Operating systems principles. 207–220. [23] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAtten-tion. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP ’23) . Association for Computing Machinery, New York, NY, USA, 611–626. doi:10.1145/3600006.3613165 [24] Hanchen Li, Runyuan He, Qiuyang Mang, Qizheng Zhang, Huanzhi Mao, Xiaokun Chen, Hangrui Zhou, Alvin Cheung, Joseph Gonzalez, and Ion Stoica. 2025. Continuum: Efficient and robust multi-turn llm agent scheduling with kv cache time-to-live. arXiv preprint arXiv:2511.02230 (2025). [25] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu, Hangliang Ding, Kaiwen Men, Kejuan Yang, et al . 2024. Agentbench: Evalu-ating llms as agents. In International Conference on Learning Representations, Vol. 2024. 52989–53046. [26] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. (2025). arXiv:2510.09665 [cs.LG] https://arxiv.org/abs/2510.09665 [27] Junyu Luo, Weizhi Zhang, Ye Yuan, Yusheng Zhao, Junwei Yang, Yiyang Gu, Bohan Wu, Binqi Chen, Ziyue Qiao, Qingqing Long, et al . 2025. Large language model agent: A survey on methodology, applications and challenges. arXiv preprint arXiv:2503.21460 (2025). [28] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E Gonzalez, et al . 2026. Agentix: An Efficient Serving Engine for {LLM } Agents as General Programs. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26). 2443–2459. [29] Mike A Merrill, Alexander G Shaw, Nicholas Carlini, Boxuan Li, Harsh Raj, Ivan Bercovich, Lin Shi, Jeong Yeon Shin, Thomas Walshe, E Kelly Buchanan, et al .2026. Terminal-bench: Benchmarking agents on hard, realistic tasks in command line interfaces. arXiv preprint arXiv:2601.11868 (2026). [30] Grégoire Mialon, Clémentine Fourrier, Thomas Wolf, Yann LeCun, and Thomas Scialom. 2024. Gaia: a benchmark for general ai assistants. In International Conference on Learning Representations, Vol. 2024. 9025–9049. [31] Nous Research. 2026. Hermes Agent: The Agent That Grows with You. https: //github.com/NousResearch/hermes-agent. Open-source software repository; accessed July 10, 2026. [32] OpenClaw Contributors. 2026. OpenClaw: Personal AI Assistant. https://github. com/openclaw/openclaw. Open-source software repository; accessed July 10, 2026. [33] Harshith Padigela, Chintan Shah, and Dinkar Juyal. 2025. Ml-dev-bench: Com-parative analysis of ai agents on ml development workflows. arXiv preprint arXiv:2502.00964 (2025). [34] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Efficient Prefix Caching for Accelerating LLM-Based Multi-Agent Workflows. arXiv preprint arXiv:2507.07400 (2025). arXiv:2507.07400 https://arxiv.org/abs/2507.07400 [35] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM In-ference Using Phase Splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) . 118–132. doi:10.1109/ISCA59077. 2024.00019 [36] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. MOONCAKE: trading more storage for less computation — a KVCache-centric architecture for serving LLM chatbot. , Article 10 (2025), 16 pages. [37] Qwen Team. 2026. Qwen3.6-35B-A3B: Agentic Coding Power, Now Open to All. https://qwen.ai/blog?id=qwen3.6-35b-a3b. [38] Preston Rasmussen, Pavlo Paliychuk, Travis Beauvais, Jack Ryan, and Daniel Chalef. 2025. Zep: a temporal knowledge graph architecture for agent memory. arXiv preprint arXiv:2501.13956 (2025). [39] Vijay Janapa Reddi, Christine Cheng, David Kanter, Peter Mattson, Guenther Schmuelling, Carole-Jean Wu, Brian Anderson, Maximilien Breughe, Mark Charlebois, William Chou, et al . 2020. Mlperf inference benchmark. In 2020 ACM/IEEE 47th Annual International Symposium on Computer Architecture (ISCA). IEEE, 446–459. [40] Mohammad Shahrad, Rodrigo Fonseca, Inigo Goiri, Gohar Chaudhry, Paul Batum, Jason Cooke, Eduardo Laureano, Colby Tresness, Mark Russinovich, and Ricardo Bianchini. 2020. Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider. In 2020 USENIX Annual Technical Conference (USENIX ATC 20) . USENIX Association, 205–218. https://www. usenix.org/conference/atc20/presentation/shahrad [41] The Terminal-Bench Team. 2025. Terminal-Bench: A Benchmark for AI Agents in Terminal Environments. https://github.com/laude-institute/terminal-bench [42] Saad Ullah, Praneeth Balasubramanian, Wenbo Guo, Amanda Burnett, Hammond Pearce, Christopher Kruegel, Giovanni Vigna, and Gianluca Stringhini. 2025. From cve entries to verifiable exploits: An automated multi-agent framework for reproducing cves. arXiv preprint arXiv:2509.01835 (2025). [43] Dmitrii Ustiugov, Plamen Petrov, Marios Kogias, Edouard Bugnion, and Boris Grot. 2021. Benchmarking, Analysis, and Optimization of Serverless Func-tion Snapshots. In Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS’21). ACM. doi:10.1145/3445814.3446714 [44] Xingyao Wang, Simon Rosenberg, Juan Michelini, Calvin Smith, Hoang Tran, Engel Nyst, Rohit Malhotra, Xuhui Zhou, Valerie Chen, Robert Brennan, and Graham Neubig. 2026. The OpenHands Software Agent SDK: A Composable and Extensible Foundation for Production Agents. In Proceedings of the 9th Conference on Machine Learning and Systems (MLSys ’26) . arXiv:2511.03690 https://arxiv.org/abs/2511.03690 To appear. [45] Tianbao Xie, Danyang Zhang, Jixuan Chen, Xiaochuan Li, Siheng Zhao, Ruisheng Cao, Toh J Hua, Zhoujun Cheng, Dongchan Shin, Fangyu Lei, et al . 2024. Os-world: Benchmarking multimodal agents for open-ended tasks in real computer environments. Advances in Neural Information Processing Systems 37 (2024), 52040–52094. [46] Minrui Xu, Jiani Fan, Xinyu Huang, Conghao Zhou, Jiawen Kang, Dusit Niyato, Shiwen Mao, Zhu Han, Kwok-Yan Lam, et al . 2025. Forewarned is forearmed: A survey on large language model-based agents in autonomous cyberattacks. arXiv preprint arXiv:2505.12786 (2025). [47] Wujiang Xu, Zujie Liang, Kai Mei, Hang Gao, Juntao Tan, and Yongfeng Zhang. 2026. A-mem: Agentic memory for llm agents. Advances in Neural Information Processing Systems 38 (2026), 17577–17604. [48] Shunyu Yao, Noah Shinn, Pedram Razavi, and Karthik Narasimhan. 2024. 𝑡𝑎𝑢 -bench: A Benchmark for Tool-Agent-User Interaction in Real-World Domains. arXiv preprint arXiv:2406.12045 (2024). [49] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2022. React: Synergizing reasoning and acting in language models. arXiv preprint arXiv:2210.03629 (2022). [50] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A distributed serving system for {Transformer-Based }
+
+generative models. In 16th USENIX symposium on operating systems design and implementation (OSDI 22). 521–538. [51] Andy Zhang, Joey Ji, Celeste Menders, Riya Dulepet, Thomas Qin, Ron Wang, Junrong Wu, Kyleen Liao, Jiliang Li, Jinghan Hu, et al . 2026. Bountybench: Dollar impact of ai agent attackers and defenders on real-world cybersecurity systems. Advances in Neural Information Processing Systems 38 (2026). [52] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark W. Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Struc-tured Language Model Programs. In Advances in Neural Information Processing Systems (NeurIPS ’24). https://arxiv.org/abs/2312.07104 [53] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Associ-ation, Santa Clara, CA, 193–210. https://www.usenix.org/conference/osdi24/ presentation/zhong-yinmin [54] Shuyan Zhou, Frank F. Xu, Hao Zhu, Xuhui Zhou, Robert Lo, Abishek Sridhar, Xianyi Cheng, Tianyue Ou, Yonatan Bisk, Daniel Fried, Uri Alon, and Graham Neubig. 2024. WebArena: A Realistic Web Environment for Building Autonomous Agents. In The Twelfth International Conference on Learning Representations (ICLR 2024). https://openreview.net/forum?id=oKn9c6ytLx
