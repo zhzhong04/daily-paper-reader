@@ -1,21 +1,21 @@
 ---
 title: "CondenseFlow: Scalable Latent Space Collaboration via Semantic Compression for Multi-Agent Systems"
-title_zh: CondenseFlow：通过语义压缩实现多智能体系统的可扩展潜空间协作
+title_zh: CondenseFlow：面向多智能体系统的基于语义压缩的可扩展潜空间协作
 authors: "Xiaoyu Chen, Fengge Wu, Zhao Junsuo, Yun Fan"
 date: 2026-07-01
 pdf: "https://aclanthology.org/2026.findings-acl.669.pdf"
-tags: ["query:awc"]
-score: 7.0
-evidence: 将KV缓存压缩为固定大小表示用于多智能体通信，属于智能体缓存机制
-tldr: "基于LLM的多智能体系统中，全状态潜空间通信语义丰富但内存开销随协作轮数线性增长。本文提出CondenseFlow，引入轻量级模块Latent Thought Condenser（LTC），利用可学习语义探针将KV缓存压缩为固定大小表示，实现O(1)通信复杂度，并证明压缩误差受注意力集中度约束且跨轮可控。在七个基准和六个模型上，相比稠密传输，KV缓存内存减少超过99%，推理延迟降低约20%。该工作为多智能体协作提供可扩展的语义压缩通信方案。"
+tags: ["query:cache-reuse"]
+score: 8.0
+evidence: 将KV缓存压缩为定长表示，用于多智能体潜空间通信，降低缓存内存开销
+tldr: "针对多智能体潜空间通信中 KV 缓存内存随协作轮数线性增长的问题，CondenseFlow 提出潜在思维压缩器，用可学习语义探针将 KV 缓存压缩为固定大小表示，使通信复杂度降到 O(1)。理论上证明压缩误差受注意力集中度约束并可跨轮次累积控制。在七个基准、六个模型上的实验表明，对比稠密传输，KV 缓存内存降低超过 99%，推理延迟降低约 20%。该方法为多智能体高效共享上下文缓存提供了可扩展方案。"
 source: ACL-2026-Findings
 selection_source: conference_retrieval
 figures_json: "[{\"url\": \"assets/figures/acl-2026-findings/anthology-2026findings-acl669/fig-001.webp\", \"caption\": \"\", \"page\": 0, \"index\": 1, \"width\": 665, \"height\": 365}, {\"url\": \"assets/figures/acl-2026-findings/anthology-2026findings-acl669/fig-002.webp\", \"caption\": \"\", \"page\": 0, \"index\": 2, \"width\": 1619, \"height\": 1072}, {\"url\": \"assets/figures/acl-2026-findings/anthology-2026findings-acl669/fig-003.webp\", \"caption\": \"\", \"page\": 0, \"index\": 3, \"width\": 792, \"height\": 492}, {\"url\": \"assets/figures/acl-2026-findings/anthology-2026findings-acl669/fig-004.webp\", \"caption\": \"\", \"page\": 0, \"index\": 4, \"width\": 793, \"height\": 422}, {\"url\": \"assets/figures/acl-2026-findings/anthology-2026findings-acl669/fig-005.webp\", \"caption\": \"\", \"page\": 0, \"index\": 5, \"width\": 803, \"height\": 307}]"
 tables_json: "[{\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-001.webp\", \"caption\": \"\", \"page\": 0, \"index\": 1, \"width\": 1646, \"height\": 545}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-002.webp\", \"caption\": \"\", \"page\": 0, \"index\": 2, \"width\": 1643, \"height\": 544}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-003.webp\", \"caption\": \"\", \"page\": 0, \"index\": 3, \"width\": 669, \"height\": 248}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-004.webp\", \"caption\": \"\", \"page\": 0, \"index\": 4, \"width\": 584, \"height\": 252}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-005.webp\", \"caption\": \"\", \"page\": 0, \"index\": 5, \"width\": 664, \"height\": 288}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-006.webp\", \"caption\": \"\", \"page\": 0, \"index\": 6, \"width\": 547, \"height\": 431}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-007.webp\", \"caption\": \"\", \"page\": 0, \"index\": 7, \"width\": 697, \"height\": 286}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-008.webp\", \"caption\": \"\", \"page\": 0, \"index\": 8, \"width\": 837, \"height\": 343}, {\"url\": \"assets/tables/acl-2026-findings/anthology-2026findings-acl669/table-009.webp\", \"caption\": \"\", \"page\": 0, \"index\": 9, \"width\": 802, \"height\": 273}]"
-motivation: 多智能体潜空间通信内存开销随协作轮数线性增长，限制可扩展性。
-method: 提出Latent Thought Condenser模块，用可学习语义探针将KV缓存压缩为固定大小表示，实现O(1)通信复杂度。
-result: "在七个基准六种模型上KV缓存内存降低超99%，推理延迟降低约20%，且压缩误差可控。"
-conclusion: 语义压缩能显著降低多智能体通信内存开销，是可扩展潜空间协作的有效方案。
+motivation: 多智能体潜空间通信虽语义丰富，但 KV 缓存内存随协作轮次线性增长，成为扩展瓶颈。
+method: 提出潜在思维压缩器（LTC），通过可学习语义探针把 KV 缓存压缩成定长表示，实现 O(1) 通信复杂度。
+result: "在七个基准、六种模型上，KV 缓存内存降低超 99%，推理延迟降低约 20%，且压缩误差有理论界。"
+conclusion: 验证了通过语义压缩共享 KV 缓存可显著提升多智能体协作的可扩展性，适用于大规模场景。
 ---
 
 ## Abstract

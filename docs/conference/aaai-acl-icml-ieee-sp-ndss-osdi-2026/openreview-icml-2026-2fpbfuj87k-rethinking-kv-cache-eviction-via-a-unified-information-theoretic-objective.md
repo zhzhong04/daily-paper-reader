@@ -1,19 +1,19 @@
 ---
 title: Rethinking KV Cache Eviction via a Unified Information-Theoretic Objective
-title_zh: 通过统一信息论目标重新思考KV缓存驱逐
+title_zh: 基于统一信息论目标重新思考 KV 缓存驱逐
 authors: "Jiaming Yang, Chenwei Tang, Liangli Zhen, Jiancheng Lv"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/0e5ae4ce50e149a18ac7db8356aa5b486bfcf616.pdf"
-tags: ["query:awc"]
+tags: ["query:agent-cache"]
 score: 6.0
-evidence: 提出统一的KV缓存驱逐信息论目标，可迁移至智能体系统
-tldr: KV缓存是LLM推理的关键，但内存开销是长上下文生成的瓶颈。现有驱逐策略多依赖经验启发，缺乏严格理论基础。本文从信息瓶颈原理重新思考KV缓存驱逐，在注意力的线性-高斯代理下推导出封闭形式的互信息目标，刻画保留KV子集的有效信息容量。该公式表明多种现有驱逐策略可视为同一容量最大化原则的不同近似，并据此提出CapKV策略，为长上下文推理提供更可靠的缓存驱逐基础。
+evidence: 提出基于信息瓶颈的KV缓存驱逐策略，可迁移到多智能体协作场景的缓存驱逐
+tldr: 针对 KV 缓存驱逐缺少理论基础的问题，作者从信息瓶颈原理出发，在线性高斯注意力近似下推导出闭式互信息目标，刻画保留子集的有效信息容量，并揭示多种现有驱逐策略都是该容量最大化原则的不同近似。基于此提出 CapKV 策略，为缓存驱逐提供统一且可解释的依据。该工作可被多智能体系统中的各智能体独立使用，也为协作式驱逐算法奠定基础。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: 现有KV缓存驱逐策略缺乏理论根基，多依赖经验启发性规则。
-method: 基于信息瓶颈原理推导线性-高斯注意力代理下的封闭式互信息目标，并据此提出CapKV驱逐策略。
-result: 揭示了多种现有策略实为同一容量最大化原则的近似，CapKV提供了更严格的理论基础。
-conclusion: 信息论视角统一了KV缓存驱逐策略，为长上下文场景的缓存管理奠定了理论基础。
+motivation: 现有 KV 缓存驱逐策略多依赖经验启发式，缺乏统一理论支撑，难以指导多智能体场景中的共享缓存管理。
+method: 利用信息瓶颈原理，在线性高斯注意力代理模型下推导闭式互信息目标，并据此设计 CapKV 驱逐策略。
+result: 揭示了多种启发式驱逐策略实为同一容量最大化原则的近似，CapKV 提供理论指导下的驱逐方法。
+conclusion: 为 KV 缓存驱逐提供了统一信息论框架，可推广到多智能体协作缓存管理。
 ---
 
 ## Abstract

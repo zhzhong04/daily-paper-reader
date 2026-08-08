@@ -1,21 +1,21 @@
 ---
 title: "When KV Cache Reuse Fails in Multi-Agent Systems: Cross-Candidate Interaction is Crucial for LLM Judges"
-title_zh: 当KV缓存复用在多智能体系统中失效：跨候选交互对LLM法官至关重要
+title_zh: 当KV缓存复用在多智能体系统中失败：跨候选交互对LLM评判者至关重要
 authors: "Sichu Liang, Zhenglin Wang, Chujiajia, Pengfei Xia, Hui Zang, Deyu Zhou"
 date: 2026-07-01
 pdf: "https://aclanthology.org/2026.acl-long.327.pdf"
 tags: ["query:cache-reuse"]
 score: 9.0
-evidence: 研究多智能体LLM法官流程中KV缓存复用的失效问题
-tldr: 多智能体LLM系统中常由LLM法官聚合多个候选回答，为降低prefill开销，现有工作主张在部分共享上下文间复用KV缓存，并报告了生成智能体的显著加速。本文发现这些效率收益并不能统一迁移到法官为中心的推理中：在GSM8K、MMLU和HumanEval上，对执行智能体有效的复用策略可能严重扰动法官行为，使端任务准确率看似稳定但法官选择与稠密prefill高度不一致。作者提出法官一致性率（JCR）量化该风险，并提供诊断工具，提示跨候选交互对法官至关重要。
+evidence: 直接研究多智能体系统中的KV缓存复用及其在LLM评判者上的失败现象
+tldr: 多智能体LLM系统常用LLM评判者聚合多个候选答案，为降低预填充成本，近年工作倡导跨部分共享上下文复用KV缓存并取得可观加速。本文发现这些效率提升在评判者推理中并不能直接迁移：在GSM8K、MMLU、HumanEval上，对执行智能体有效的复用策略可能严重扰动评判者行为，端任务准确率看似稳定但选择结果与稠密预填充高度不一致。作者提出评判一致性率指标量化风险并给出诊断方法，为多智能体场景中安全复用KV缓存提供重要指导。
 source: ACL-2026-Long
 selection_source: conference_retrieval
 figures_json: "[{\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-001.webp\", \"caption\": \"\", \"page\": 0, \"index\": 1, \"width\": 691, \"height\": 727, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-002.webp\", \"caption\": \"\", \"page\": 0, \"index\": 2, \"width\": 1447, \"height\": 875, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-003.webp\", \"caption\": \"\", \"page\": 0, \"index\": 3, \"width\": 797, \"height\": 318, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-004.webp\", \"caption\": \"\", \"page\": 0, \"index\": 4, \"width\": 804, \"height\": 1040, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-005.webp\", \"caption\": \"\", \"page\": 0, \"index\": 5, \"width\": 797, \"height\": 362, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-006.webp\", \"caption\": \"\", \"page\": 0, \"index\": 6, \"width\": 793, \"height\": 305, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-007.webp\", \"caption\": \"\", \"page\": 0, \"index\": 7, \"width\": 804, \"height\": 297, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-008.webp\", \"caption\": \"\", \"page\": 0, \"index\": 8, \"width\": 801, \"height\": 602, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-009.webp\", \"caption\": \"\", \"page\": 0, \"index\": 9, \"width\": 1244, \"height\": 498, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-010.webp\", \"caption\": \"\", \"page\": 0, \"index\": 10, \"width\": 1319, \"height\": 402, \"label\": \"Figure\"}, {\"url\": \"assets/figures/acl-2026-long/anthology-2026acl-long327/fig-011.webp\", \"caption\": \"\", \"page\": 0, \"index\": 11, \"width\": 1327, \"height\": 381, \"label\": \"Figure\"}]"
 tables_json: "[{\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-001.webp\", \"caption\": \"\", \"page\": 0, \"index\": 1, \"width\": 1649, \"height\": 752, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-002.webp\", \"caption\": \"\", \"page\": 0, \"index\": 2, \"width\": 800, \"height\": 284, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-003.webp\", \"caption\": \"\", \"page\": 0, \"index\": 3, \"width\": 797, \"height\": 465, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-004.webp\", \"caption\": \"\", \"page\": 0, \"index\": 4, \"width\": 794, \"height\": 257, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-005.webp\", \"caption\": \"\", \"page\": 0, \"index\": 5, \"width\": 797, \"height\": 249, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-006.webp\", \"caption\": \"\", \"page\": 0, \"index\": 6, \"width\": 801, \"height\": 400, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-007.webp\", \"caption\": \"\", \"page\": 0, \"index\": 7, \"width\": 795, \"height\": 254, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-008.webp\", \"caption\": \"\", \"page\": 0, \"index\": 8, \"width\": 1356, \"height\": 597, \"label\": \"Table\"}, {\"url\": \"assets/tables/acl-2026-long/anthology-2026acl-long327/table-009.webp\", \"caption\": \"\", \"page\": 0, \"index\": 9, \"width\": 1562, \"height\": 2275, \"label\": \"Table\"}]"
-motivation: 多智能体LLM系统中KV缓存复用虽能加速生成智能体，但对法官为中心的推理可能造成严重扰动，现有复用策略未经充分验证。
-method: 通过GSM8K、MMLU和HumanEval上的实验分析复用策略对法官行为的影响，并提出法官一致性率（JCR）作为量化诊断指标。
-result: 发现有效于执行智能体的复用策略会显著降低法官决策一致性，端任务准确率看似稳定但选择不可复现。
-conclusion: 跨候选交互是法官可靠推理的关键，KV缓存复用需谨慎设计，JCR可作为评估与诊断工具。
+motivation: 多智能体系统通过复用部分共享上下文的KV缓存来加速，但该效率收益无法迁移到评判者推理，甚至破坏其选择一致性。
+method: 通过系统性实验对比执行智能体与评判者推理，提出评判一致性率指标并设计诊断方法以量化复用风险。
+result: 在GSM8K、MMLU、HumanEval上，复用策略虽保持端任务准确率稳定，但评判者选择与稠密预填充分歧严重，证明跨候选交互至关重要。
+conclusion: 揭示了KV缓存在多智能体系统中的复用边界，为安全高效的跨候选缓存复用提供了评测指标与诊断工具。
 ---
 
 ## Abstract

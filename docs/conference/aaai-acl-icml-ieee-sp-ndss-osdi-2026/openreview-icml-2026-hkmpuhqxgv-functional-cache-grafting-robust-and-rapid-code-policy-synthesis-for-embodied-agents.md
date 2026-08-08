@@ -1,19 +1,19 @@
 ---
 title: "Functional Cache Grafting: Robust and Rapid Code-Policy Synthesis for Embodied Agents"
-title_zh: 功能缓存嫁接：具身智能体代码策略的鲁棒快速合成
+title_zh: 功能缓存嫁接：面向具身智能体的鲁棒快速代码策略合成
 authors: "Saehun Chun, Wonje Choi, Sera Choi, Sanghyun Ahn, Honguk Woo"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/e6cbcea9f9e647f6863524749cc0e7f8e7a6545b.pdf"
-tags: ["query:awc"]
+tags: ["query:cache-reuse"]
 score: 8.0
-evidence: 提出FCGraft，通过缓存可复用的代码骨架与提示级Transformer键来加速具身智能体策略生成。
-tldr: 本文针对CodeLLM为具身智能体生成代码策略时预填充计算重复、解码鲁棒性差的问题，提出FCGraft框架。它维护一个包含已验证代码骨架及其提示级Transformer键的缓存库，通过功能缓存嫁接实现快速策略合成，避免重复的预填充开销，同时提升API匹配与安全防护的稳定性。实验表明该方法能显著降低延迟并提高策略生成鲁棒性，为智能体代码策略合成提供了高效的缓存复用机制。
+evidence: 功能缓存嫁接复用代码策略生成中的Transformer KV缓存，契合跨上下文KV复用
+tldr: 面向具身智能体的代码策略生成存在重复预fill计算延迟大和生成鲁棒性差的问题。FCGraft维护已验证函数级代码骨架及其关联的提示级Transformer键值缓存，通过功能缓存嫁接复用历史KV缓存，避免重复预fill计算。实验显示可显著加快策略生成并降低API不匹配等错误。该方法为智能体间共享上下文KV缓存、加速LLM智能体推理提供了具体实现路径。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: CodeLLM为具身智能体生成代码策略时面临重复预填充延迟高与纯生成解码鲁棒性差的问题。
-method: 提出功能缓存嫁接（FCGraft），维护已验证代码骨架库及其提示级Transformer键，在生成新策略时复用缓存。
-result: 实验验证FCGraft在缩短解码延迟和减少API错误等方面优于全生成式基线。
-conclusion: 功能级缓存可同时提升具身智能体代码策略合成的速度与鲁棒性。
+motivation: 代码LLM生成具身策略时重复预fill计算导致延迟高，且纯生成方式鲁棒性不足。
+method: FCGraft维护函数级代码骨架及其关联的提示级KV缓存，通过缓存嫁接复用历史计算。
+result: 减少重复预fill计算，提升代码策略生成的速度和鲁棒性。
+conclusion: 功能级KV缓存复用可有效加速智能体策略合成，并支撑跨上下文缓存共享。
 ---
 
 ## Abstract

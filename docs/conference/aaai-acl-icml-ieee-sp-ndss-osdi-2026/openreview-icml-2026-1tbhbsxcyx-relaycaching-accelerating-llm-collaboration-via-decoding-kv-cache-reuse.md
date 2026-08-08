@@ -1,19 +1,19 @@
 ---
 title: "RelayCaching: Accelerating LLM Collaboration via Decoding KV Cache Reuse"
-title_zh: RelayCaching：通过解码KV缓存复用加速LLM协作
+title_zh: 中继缓存：通过解码KV缓存复用加速LLM协作
 authors: "Yingsheng Geng, Yuchong Gao, Weihong Wu, Guyue Liu, Jiang liu"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/dd7715f9e938a8a2b1ec56452c5e47284e3f86fe.pdf"
 tags: ["query:cache-reuse"]
-score: 9.0
-evidence: 直接复用之前智能体的解码KV缓存到后续预填充阶段，避免重复计算
-tldr: 多智能体LLM协作中存在关键瓶颈：前一智能体生成的共享内容导致后续智能体重复预填充计算，显著增加KV缓存占用与首token延迟。现有KV缓存复用方法或难以保持对智能体生成内容的准确性，或因约束过严导致复用率低。RelayCaching提出一种免训练的推理方法，直接在后续预填充阶段复用前序智能体解码阶段的KV缓存，同时保持高准确率与高复用率。实验表明该方法能有效降低预填充冗余和TTFT，为多智能体推理的缓存复用提供了高效方案。
+score: 10.0
+evidence: 直接在多智能体LLM系统中跨智能体复用解码阶段的KV缓存，避免冗余预填充，符合跨上下文KV缓存复用需求。
+tldr: 多智能体大模型协作中，不同智能体经常处理共享内容，导致预填充阶段发生大量冗余计算，KV缓存占用与首令牌时延显著上升。现有KV缓存复用方法在智能体生成内容上难以兼顾准确性和高复用率。本文提出免训练的RelayCaching方法，直接复用前一智能体的解码KV缓存到后续预填充阶段，从而显著减少冗余预填充，并在保持准确性的同时提升缓存复用率，为多智能体协作推理提供了有效的缓存加速机制。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: 多智能体LLM系统中，前序智能体生成的共享内容会造成后续智能体的重复预填充，加剧键值缓存占用和首token延迟。
-method: 提出RelayCaching，一种免训练的推理方法，将前序智能体解码阶段生成的键值缓存直接复用到后续智能体的预填充阶段，以消除重复计算。
-result: 实验证明RelayCaching在保持输出准确性的同时，可显著降低键值缓存内存开销和首token时间，并实现更高的缓存复用率。
-conclusion: 该方法为多智能体LLM协作中的缓存复用提供了一种简单而高效的训练无关方案，缓解了协作推理的预填充冗余瓶颈。
+motivation: 多智能体LLM协作中共享内容的冗余预填充增加了KV缓存内存和首令牌时延。
+method: 提出RelayCaching，训练无关地将上一智能体的解码KV缓存复用到下一智能体的预填充阶段。
+result: 在保持准确率的同时显著降低KV缓存占用与首令牌时延，复用率和效果均优于现有方法。
+conclusion: 说明跨智能体解码KV缓存复用可有效加速LLM协作推理。
 ---
 
 ## Abstract

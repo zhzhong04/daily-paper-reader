@@ -1,19 +1,19 @@
 ---
 title: Learning to Evict from Key-Value Cache
-title_zh: 学习从键值缓存中驱逐
+title_zh: 从KV缓存中学习驱逐
 authors: "Luca Moschella, Laura Manduchi, Ozan Sener"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/875c835732794c107c4793b6fb93559f5ecd4c2c.pdf"
-tags: ["query:awc"]
-score: 8.0
-evidence: 通过强化学习智能体学习KV缓存驱逐策略，可迁移到基于智能体的系统中
-tldr: 现有KV缓存驱逐依赖启发式（如最近性、注意力分数），仅间接反映未来效用且带来开销。本文提出KVP框架，将驱逐形式化为强化学习问题，每头使用轻量级RL智能体对Token的未来效用排序，并基于整体奖励学习专门策略。实验显示其优于启发式驱逐方法，为LLM缓存管理提供了可迁移的学习式驱逐策略。
+tags: ["query:agent-cache"]
+score: 7.0
+evidence: 直接涉及KV缓存驱逐策略，但未涉及多智能体协作；方法可迁移到多智能体场景
+tldr: 针对大语言模型KV缓存记忆开销大、现有启发式驱逐策略仅能间接估计token未来效用的问题，提出将缓存驱逐重构为强化学习问题。方法引入KV Policy框架，每个注意力头由轻量级RL智能体基于预生成的轨迹学习专门化的驱逐策略，并以综合回报指导token有用性排序。实验证明学习式驱逐相比启发式方法能更有效地压缩缓存并保持生成质量，为缓存管理提供了可迁移到多智能体环境的通用策略。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: 现有KV缓存驱逐方法依赖启发式指标，无法直接反映Token未来效用且计算开销高。
-method: 提出KVP框架，将驱逐建模为强化学习，用轻量级逐头RL智能体基于键值向量学习Token排序策略。
-result: 在训练的生成轨迹上，KVP优于基于启发式的缓存驱逐基线，降低了推理成本。
-conclusion: 学习式驱逐策略能更有效地管理KV缓存，并适用于LLM驱动的代理系统。
+motivation: 现有KV缓存驱逐依赖近期性等启发式规则，无法准确预测token未来效用，且计算开销高。
+method: 将驱逐建模为强化学习排序问题，每个注意力头配备轻量级RL智能体学习专属驱逐策略。
+result: 学习式驱逐策略优于启发式方法，在压缩缓存的同时保持生成质量。
+conclusion: 验证了用RL智能体学习KV缓存驱逐的可行性，为多智能体缓存协作提供方法基础。
 ---
 
 ## Abstract

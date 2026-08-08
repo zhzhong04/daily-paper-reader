@@ -1,19 +1,19 @@
 ---
 title: "CONCUR: High-Throughput Agentic Batch Inference of LLM via Congestion-Based Concurrency Control"
-title_zh: CONCUR：通过基于拥塞的并发控制实现LLM智能体批量推理的高吞吐
+title_zh: CONCUR：基于拥塞控制的LLM高吞吐智能体批量推理
 authors: "qiaoling chen, Zhisheng Ye, Tian Tang, Peng Sun, Boyu Tian, Guoteng Wang, Shenggui Li, Yonggang Wen, Zhenhua Han, Tianwei Zhang"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/34e588f95f3adb2d1771f68b0ac1a31d517885fb.pdf"
-tags: ["query:awc"]
-score: 8.0
-evidence: 针对智能体批处理工作负载提出基于拥塞的并发控制机制，将KV缓存作为共享资源进行智能体级管理
-tldr: 面向智能体的批处理推理会使GPU KV缓存受到持续累积压力，在内存耗尽前就出现严重的吞吐下降，论文称之为中期抖动现象。为缓解该问题，CONCUR借鉴网络拥塞控制思想，将KV缓存视为共享资源，提出超越请求级管理的主动智能体级准入控制。实验表明该方法能大幅减少缓存效率崩塌，保持高吞吐的批推理性能，为智能体工作负载的缓存管理提供了新范式。
+tags: ["query:agent-cache"]
+score: 9.0
+evidence: 面向高吞吐智能体批量推理中KV缓存的主动式智能体级准入控制
+tldr: 多智能体工作负载下的批量推理会持续累积KV缓存压力，在显存耗尽前就导致吞吐骤降，作者称之为中段抖动。为此提出CONCUR，借鉴分布式拥塞控制思想，将KV缓存视为共享资源，采用主动式智能体级准入控制与反馈驱动调节，避免缓存效率崩塌。实验证明该方法能显著提升长会话智能体工作负载的吞吐。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: 智能体批处理推理中，长期存活的智能体会累积状态并压垮KV缓存，导致内存尚未耗尽就出现吞吐骤降的中期抖动。
-method: 借鉴分布式系统拥塞控制思想，将KV缓存视为共享资源，提出基于反馈调节的智能体级准入控制，动态管理并发智能体数量。
-result: 实验验证该方法能够有效抑制缓存效率崩塌，显著提升智能体批推理的吞吐与稳定性。
-conclusion: 该工作表明智能体级、主动式的缓存控制是解决智能体工作负载缓存压力的有效思路，推动KV缓存管理走向工作流感知。
+motivation: 多智能体工作负载会累积KV缓存压力，导致吞吐在中段严重恶化，现有请求级缓存管理无法解决。
+method: 提出CONCUR，基于拥塞控制的并发控制机制，将KV缓存作为共享资源进行反馈驱动的准入控制。
+result: 实验表明CONCUR有效缓解中段抖动，显著提升长会话智能体批量推理的吞吐。
+conclusion: 表明缓存管理需要从请求级提升到智能体级，并借鉴拥塞控制原理实现高效共享缓存。
 ---
 
 ## Abstract

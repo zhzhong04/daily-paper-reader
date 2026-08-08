@@ -1,19 +1,19 @@
 ---
 title: "Tvcache: A Tool-Value Cache for Post-Training LLM Agents"
-title_zh: TVCache：面向LLM智能体后训练的工具值缓存
+title_zh: TVCACHE：面向LLM智能体后训练的工具值缓存
 authors: "Abhishek Vijaya Kumar, Bhaskar Kataria, Byungsoo Oh, Emaad Manzoor, Rachee Singh"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/d1e3621dac7f3b26ccbadf9ce34b8beb98118d85.pdf"
 tags: ["query:awc"]
-score: 8.0
-evidence: 提出TVCACHE有状态工具值缓存，通过完整工具调用历史匹配来复用智能体后训练中的输出。
-tldr: 本文针对LLM智能体后训练中工具调用耗时且GPU空闲的问题，提出TVCACHE状态化工具值缓存。它维护已观测工具调用序列的树结构，通过最长前缀匹配保证命中时环境状态完全一致，从而安全复用工具输出。在终端任务等多个工作负载上，TVCACHE大幅减少了重复工具调用时间，显著加速了智能体后训练并降低成本，是一种面向智能体训练流程的高效缓存机制。
+score: 6.0
+evidence: 为LLM智能体后训练缓存工具调用序列并保证状态一致性，是面向智能体应用的工作流感知缓存机制。
+tldr: RL后训练LLM智能体时，外部工具调用通常耗时而GPU空闲，且工具输出依赖环境状态，朴素缓存可能导致错误复用。TVCACHE构建工具调用序列树，采用最长前缀匹配仅在完整工具历史一致时命中缓存，从而保证状态一致并降低后训练时间和成本。在终端任务等工作负载上验证了其有效性，为智能体后训练中的工具结果缓存提供了状态感知的解决方案。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: LLM智能体后训练中工具调用耗时数秒甚至分钟，GPU空闲，重复调用间可缓存但需保证环境状态一致。
-method: 构建工具调用序列树，利用最长前缀匹配实现状态一致的工具输出缓存复用。
-result: 在多种工作负载上显著减短训练时间，降低了工具调用成本。
-conclusion: 状态敏感的有值工具缓存能有效加速LLM智能体的后训练过程。
+motivation: LLM智能体后训练中重复工具调用造成GPU空闲与高成本，而朴素缓存会因状态差异失效。
+method: TVCACHE采用工具调用序列树和最长前缀匹配，仅当完整工具历史一致时命中缓存。
+result: 在多种终端任务等工作负载上降低后训练工具调用开销，减少等待时间。
+conclusion: 状态感知的缓存机制是加速智能体后训练中工具调用的有效手段。
 ---
 
 ## Abstract

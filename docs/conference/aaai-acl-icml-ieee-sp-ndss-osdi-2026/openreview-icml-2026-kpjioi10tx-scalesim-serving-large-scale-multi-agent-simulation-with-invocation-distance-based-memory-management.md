@@ -1,19 +1,19 @@
 ---
 title: "ScaleSim: Serving Large-Scale Multi-Agent Simulation with Invocation Distance-Based Memory Management"
-title_zh: ScaleSim：基于调用距离内存管理的大规模多智能体模拟服务
+title_zh: ScaleSim：基于调用距离的显存管理实现大规模多智能体仿真服务
 authors: "Zaifeng Pan, Yipeng Shen, Zhengding Hu, Zhuang Wang, Aninda Manocha, Zheng Wang, Zhongkai Yu, Yue Guan, Yufei Ding"
 date: 2026-04-30
 pdf: "https://openreview.net/pdf/d9dfdf4ac70f47d90baf3e88c3a4b4cc6038d60c.pdf"
-tags: ["query:awc"]
-score: 9.0
-evidence: 针对大规模多智能体模拟中的前缀缓存与内存管理，利用调用距离进行调度。
-tldr: 本文针对LLM多智能体模拟因每个智能体维护私有GPU状态（模型、前缀缓存、适配器）而难以扩展的问题，提出ScaleSim系统。该系统通过统一定义智能体调用距离，利用稀疏激活和可预测的调用顺序来调度GPU内存，尤其对前缀缓存进行高效调度和驱逐。实验表明ScaleSim在有限GPU资源下支持更大规模的多智能体模拟，为多智能体系统的缓存调度提供了有效方案。
+tags: ["query:agent-cache"]
+score: 8.0
+evidence: 提出基于调用距离的显存管理抽象，管理多智能体LLM仿真中的私有前缀缓存，应对多智能体系统的缓存调度与驱逐问题。
+tldr: 大规模多智能体LLM仿真的部署常因每个智能体私有的模型、前缀缓存和适配器等GPU常驻状态而难以扩展。论文利用智能体激活稀疏且调用顺序可估计的特性，提出调用距离这一统一抽象，并基于它构建显存高效的服务系统ScaleSim，以此管理各智能体的前缀缓存、模型等资源。实验表明该方法能显著降低显存压力，支撑更大规模的多智能体仿真，为智能体协作场景中的缓存与显存调度提供了实用方案。
 source: ICML-2026-Accepted
 selection_source: conference_retrieval
-motivation: 大规模LLM多智能体模拟中每个智能体持有私有GPU状态，缓存与模型易占满显存，难以扩展。
-method: 提出调用距离抽象估计未来请求顺序，并据此进行统一内存调度，优化前缀缓存等状态的管理。
-result: 实验显示ScaleSim在内存受限条件下支持更多智能体，显著提升了大模拟的服务规模。
-conclusion: 利用调用顺序特性可大幅改善多智能体模拟的内存效率与可扩展性。
+motivation: 多智能体仿真中每个智能体私有GPU状态导致显存快速耗尽，难以扩展。
+method: 使用调用距离统一估计智能体未来请求顺序，据此在服务系统中管理模型与前缀缓存。
+result: 显著降低大规模多智能体仿真的GPU显存压力，支持更多智能体运行。
+conclusion: 调用距离抽象能有效指导多智能体仿真中的显存与缓存资源管理。
 ---
 
 ## Abstract
