@@ -1,0 +1,724 @@
+Title: TEPA: Revoking Stale Memories for Conflict-Robust Language Agents
+
+URL Source: https://arxiv.org/pdf/2608.07429v1
+
+Published Time: Mon, 10 Aug 2026 01:10:37 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# TEPA: Revoking Stale Memories for Conflict-Robust Language Agents 
+
+Yan Zhou 1, Yue Ouyang 1, Kaiyang Zheng 1, Suncheng Xiang 2∗
+
+1School of Mathematics and Statistics, Changsha University of Science and Technology, Changsha, China 
+
+2School of Biomedical Engineering, Shanghai Jiao Tong University, Shanghai, China. E-mail: 
+
+xiangsuncheng17@sjtu.edu.cn 
+
+Abstract 
+
+Long-term memory enables language agents to reuse past facts, preferences, and task experience. Persistence also cre-ates a central falsifiability problem: when the world changes, stale memories can remain retrievable and pollute the prompt. We characterize this failure mode as memory pollution : degra-dation caused by active memories that newer conflicting evidence has superseded. We introduce TEPA, a revocable evidence-memory mechanism that makes validity an explicit state of memory. TEPA represents observations as keyed precedents and revokes active precedents when fresh evidence contradicts them under the same key, allowing retrieval to draw from current evidence while preserving revoked his-tory for audit. Across controlled hidden-regime drift, real file-backed executable drift, and preference-update streams, revo-cation prevents stale active memory from remaining in the retrieval set after reversal. In controlled drift over 50 seeds, append-only and last-write-wins memory fell below no mem-ory during full reversal (append-only and last-write-wins both 0.210, no memory 0.309, TEPA 0.950), and the same pattern reproduced under real file execution (append-only 0.203, no memory 0.298, TEPA 0.950). On clean MemoryAgentBench SH-6k, TEPA matches a strong last-write-wins cache, con-firming that current-key replacement is the decisive operation for single-hop fact consolidation. Boundary tests on multi-hop and very long-context MemoryAgentBench settings ex-pose retrieval-chain and context-selection bottlenecks beyond fact-level validity tracking. Together, these results establish lifecycle revocation as a core memory operation for agents that must falsify, audit, and later re-promote evolving knowl-edge. 
+
+Introduction 
+
+Language agents increasingly rely on long-term memory to reuse user facts, reflections, task experience, and skills across interactions (Shinn et al. 2023; Zhong et al. 2024; Park et al. 2023; Zhao et al. 2024; Wang et al. 2023; Xu et al. 2026; Chhikara et al. 2025). This persistence is useful, yet it creates a falsifiability problem. Once retrieved, a memory becomes prompt evidence, and stale evidence can dominate the current interaction. Agent memory systems have become increasingly ef-fective at growing reusable experience. Reflexion appends lessons, MemoryBank accumulates conversational memo-ries, Generative Agents rank memory streams, ExpeL stores experiential rules, and recent systems add richer memory 
+
+> ∗
+
+Corresponding author. Append-only memory TEPA: revocable memory                      
+
+> 1evidence
+> The capital of France is Paris.
+> The capital of France is Lyon.
+> store
+> key: capital(france)
+> stale value: Paris
+> t1 10:01
+> fresh value: Lyon
+> t2 10:15
+> 2retrieve
+> stale Paris
+> t1 10:01
+> fresh Lyon
+> t2 10:15
+> prompt
+> Paris (10:01) Lyon (10:15)
+> ...
+> 3prompt
+> warning
+> What is the capital of France?
+> Context is mixed: Paris (stale) and Lyon (fresh).
+> Answer may be inconsistent.
+> 1evidence
+> The capital of France is Paris.
+> The capital of France is Lyon.
+> ledger
+> key: capital(france)
+> conflict-key check
+> stale
+> Paris
+> t1 10:01
+> !
+> same-key conflict
+> fresh
+> Lyon
+> t2 10:15
+> revoked
+> stale Paris
+> t1 10:01
+> active
+> fresh Lyon
+> t2 10:15
+> 2retrieve fresh Lyon
+> t2 10:15
+> prompt
+> Lyon (10:15)
+> ...
+> 3prompt
+
+✓ 
+
+> clean
+> What is the capital of France?
+> Context is clean: Lyon (fresh).
+> Answer is consistent.
+
+✓
+
+Figure 1: Conceptual overview of revocable evidence mem-ory. Append-only memory keeps stale and fresh evidence active under the same key, allowing both to be retrieved into the agent prompt. TEPA performs a conflict-key check, moves superseded precedents into a revoked archive, and re-trieves active current evidence. construction and retrieval (Shinn et al. 2023; Zhong et al. 2024; Park et al. 2023; Zhao et al. 2024; Pan et al. 2025; Xu et al. 2026; Kang et al. 2025; Yu et al. 2026). Falsification remains less explicit: when later evidence contradicts an old memory, the obsolete item may remain retrievable alongside the current fact. We characterize the resulting degradation as memory pol-lution . It is related to concept drift (Gama et al. 2004; Bifet and Gavalda 2007; Gama et al. 2014), but has a distinct op-erational form in language-agent memory: the stale object is textual evidence inserted into the prompt. We focus on stale-conflict consolidation , where later observations supersede earlier values under the same key and evaluation asks for the current answer. This setting captures changed preferences, updated entity attributes, and hidden tool-regime shifts, and aligns with recent long-term memory benchmarks (Maha-rana et al. 2024; Wu et al. 2024; Hu, Wang, and McAuley 2025; Wu et al. 2026). It lets us pose a direct systems ques-tion: can persistent memory remain useful when its own evidence must be falsified? We introduce TEPA, a revocable evidence-memory mech-anism. TEPA converts observations into keyed precedents, assigns each precedent an explicit lifecycle state, and re-trieves active precedents. When fresh evidence conflicts with an active precedent under the same key, TEPA performs a arXiv:2608.07429v1 [cs.AI] 7 Aug 2026 local state transition that removes the stale precedent from ordinary retrieval while keeping it available for audit. A trial-validated variant, TEPA-Full, tests candidate precedents be-fore promotion when executable validation is available. Fig-ure 1 summarizes the mechanism. Our evaluation first tests whether memory can become worse than no memory when stale evidence remains ac-tive, then measures whether revocation prevents that fail-ure. Across the controlled, executable, and preference-update stale-conflict streams, append-only and key-cache baselines degrade under reversal while revocable lifecycle memory remains robust. MemoryAgentBench SH-6k situates this mechanism within standard fact-consolidation benchmarks, and the multi-hop and very long-context variants identify the next bottlenecks for retrieval-chain construction. Our contributions are: 
+
+• We formulate memory pollution as a validity-state failure in long-term language-agent memory, and define a phase-wise pollution index relative to no memory. 
+
+• We propose TEPA, a conflict-keyed evidence-memory mechanism with explicit precedent states and revocation. 
+
+• We evaluate TEPA across four conflict settings— controlled, executable, preference-update, and MemoryAgentBench—against mechanism baselines and ablations with paired statistical tests. 
+
+Related Work 
+
+Memory systems for agents. Language-agent memory systems store different forms of experience for later reuse. Reflexion stores verbal lessons from failed attempts (Shinn et al. 2023); MemoryBank maintains long-term conversa-tional memories with forgetting-inspired updates (Zhong et al. 2024); Generative Agents retrieve memory-stream records by recency, importance, and relevance (Park et al. 2023); ExpeL distills experience into reusable rules (Zhao et al. 2024). Recent systems such as SeCom, A-MEM, Mem0, MemoryOS, and broader agentic-memory frameworks im-prove memory construction, retrieval, evolution, and deploy-ment (Pan et al. 2025; Xu et al. 2026; Chhikara et al. 2025; Kang et al. 2025; Yu et al. 2026). These works establish the value of persistent memory. Our work studies the com-plementary operation that these systems leave comparatively implicit: deactivating a previously useful memory after newer conflicting evidence supersedes it. 
+
+Memory benchmarks and stale conflict. Long-term memory benchmarks increasingly test whether agents can use information accumulated over long histories. LoCoMo evaluates long-term conversational memory (Maharana et al. 2024); LongMemEval and LongMemEval v2 study assistant memory over extended interactions (Wu et al. 2024, 2026); MemoryAgentBench evaluates memory through incremen-tal interactions and includes conflict-resolution settings (Hu, Wang, and McAuley 2025). Recent stale-memory and agent-memory benchmarks further emphasize validity detection, provenance, interdependent multi-session tasks, and broader memory competencies (Chao et al. 2026; Joshi 2026; He et al. 2026; Tan et al. 2025). Motivated by these benchmarks, we study explicit lifecycle updates as the memory operation underlying single-hop stale-conflict consolidation. 
+
+Relation to retrieval and drift. Retrieval-augmented gen-eration and long-context methods improve access to exter-nal evidence (Lewis et al. 2020; Karpukhin et al. 2020; Liu et al. 2024), while concept-drift and continual-learning methods study adaptation under changing distributions (Bifet and Gavalda 2007; Gama et al. 2014; Kirkpatrick et al. 2017; Lopez-Paz and Ranzato 2017). TEPA operates at the memory-state layer, deciding which explicit memories re-main active before retrieval inserts them into the prompt. Additional related-work discussion is provided in the sup-plementary material. 
+
+Problem Formulation 
+
+Episode stream. Let an agent interact with an episode stream E = ( e1, . . . , e T ). Each episode is 
+
+et = ( ct, x t, z t),
+
+where ct is the visible decision context, xt is the post-action evidence item used to update memory, and zt is a hidden benchmark regime. Before acting, method m ob-serves ct, retrieves from memory, and selects a(m) 
+
+> t
+
+. It then observes y(m) 
+
+> t
+
+∈ { 0, 1} together with xt and updates mem-ory. The hidden regime remains evaluator-side. A phase function ϕ(t) ∈ Φ maps each episode to a phase, where 
+
+Φ = {stable , light , reversal , return } in our drift benchmarks. 
+
+Memory and retrieval. The agent maintains memory 
+
+Mt after episode t. At decision time it retrieves a sub-set ρ(ct, At) ⊆ A t, where At ⊆ M t is the active mem-ory set. A method policy πm then selects a(m) 
+
+> t
+
+conditioned on (ct, ρ (ct, At)) . Append-only memory keeps every stored item active. Revocable memory separates active precedents 
+
+At from revoked precedents Rt.
+
+Conflict keys. Each evidence item is mapped to a key-value pair (kt, v t) by key extractor κ and value extractor ν:
+
+kt = κ(xt) and vt = ν(xt). The key identifies what the evidence is about, such as a user preference slot or a tool-regime slot; the value is the current claim under that key. Two evidence items conflict when they share a key but assert incompatible values: 
+
+conflict( xi, x j ) = ⊮[κ(xi) = κ(xj ) ∧ ν(xi)̸ = ν(xj )] .
+
+Stale-conflict consolidation asks the agent to answer using the current value for each key. The extractors κ and ν are deterministic in the reported benchmarks; the supplementary material audits sensitivity when keys are noisy. 
+
+Success rate and pollution. For method m and phase ϕ,let 
+
+Sm,ϕ = 1
+
+|T ϕ|
+
+X
+
+> t∈T ϕ
+
+y(m)
+
+> t
+
+where Tϕ = {t : ϕ(t) = ϕ} and y(m) 
+
+> t
+
+is the success observed after method m acts. We define the phase-wise memory pol-lution index of method m relative to no memory as 
+
+MPI m,ϕ = SNoMem ,ϕ − Sm,ϕ 
+
+SNoMem ,ϕ 
+
+.Positive MPI means the method is worse than no memory in that phase. We use it as a reversal-phase diagnostic alongside absolute success. A key failure case is Sm,ϕ < S NoMem ,ϕ for an append-only memory method during reversal. 
+
+Method 
+
+Table 1 summarizes the notation used in the formulation and method. 
+
+Precedents with Explicit Validity State 
+
+Algorithm 1 gives the full memory-update procedure. TEPA represents memory as a set of precedents. A prece-dent is 
+
+p = ( k, v, s, f, σ, τ ),
+
+where k is the conflict key, v is the asserted value or ac-tion pattern, s and f are support and conflict counts, σ is the lifecycle state, and τ is the creation time. Retrieval is conditioned on the active state, σ = Active. The retriever used in drift benchmarks returns active prece-dents whose key matches the current task key, ordered by recency within that key. In MemoryAgentBench, all meth-ods use the same lexical top-k answer context after their memory-state update. The posterior mean of a precedent is estimated with a Beta-Bernoulli model: 
+
+q(p) = sp + αsp + fp + α + β ,
+
+with α = β = 1 in all experiments. We use this posterior as a transparent state variable for lifecycle transitions; the update rule asks whether recent evidence still supports an active precedent. 
+
+Lifecycle Update 
+
+When an episode produces evidence (kt, v t), TEPA com-pares it with active precedents sharing key kt. If an active precedent p asserts the same value, its support count sp in-creases. If it asserts an incompatible value, its conflict count 
+
+fp increases. A precedent leaves the active set when either its posterior mean falls below θrev after nmin = 5 total ob-servations or, once at least nrec = 3 same-key outcomes are available, its recent success rate falls below θrec = 0 .34 .Fresh evidence can later promote a new precedent under the same key. The lifecycle states serve different purposes. Hypothe-sis stores candidate precedents before promotion. Active precedents are retrievable. Revoked marks a precedent as contradicted by fresher same-key evidence. Revoked mem-ory remains in the archive for audit while leaving the active retrieval set. 
+
+Trial-Validated Promotion 
+
+TEPA-Full adds trial-by-execution before promotion. Given a candidate precedent p and a held-out task set H, a task execu-tor evaluates whether injecting p improves reward on support tasks, avoids harm on counterfactual tasks, and keeps unre-lated domains uncontaminated. With the default trial budget of 3, the executor allocates one support, one counterfactual, and one contamination check. A candidate is promoted after 
+
+Algorithm 1 TEPA memory update 
+
+Require: Episode stream E, active memory A0 = ∅,archive R0 = ∅ 
+
+> 1:
+
+for t = 1 , . . . , T do  
+
+> 2:
+
+Retrieve Rt ← ρ(ct, At−1) 
+
+> 3:
+
+Execute policy a(m) 
+
+> t
+
+∼ πm(ct, R t) and observe 
+
+y(m) 
+
+> t
+
+, x t 
+
+> 4:
+
+Extract kt = κ(xt) and vt = ν(xt) 
+
+> 5:
+
+for each p ∈ A t−1 with p.k = kt do  
+
+> 6:
+
+if p.v = vt then  
+
+> 7:
+
+p.s ← p.s + 1  
+
+> 8:
+
+else  
+
+> 9:
+
+p.f ← p.f + 1  
+
+> 10:
+
+if q(p) < θ rev after nmin observations or (recent count ≥ nrec and recent success < θ rec ) then  
+
+> 11:
+
+move p from A to R with state Revoked  
+
+> 12:
+
+end if  
+
+> 13:
+
+end if  
+
+> 14:
+
+end for  
+
+> 15:
+
+if accumulated supports for (kt, v t) ≥ θprop then  
+
+> 16:
+
+create or update candidate p′ in state Hypothesis  
+
+> 17:
+
+if q(p′) ≥ θpro or p′ passes trial validation then  
+
+> 18:
+
+set p′.σ = Active and add p′ to A 
+
+> 19:
+
+end if  
+
+> 20:
+
+end if  
+
+> 21:
+
+end for 
+
+at least 60% of trials are positive and at least one support trial succeeds. The trial variant matches default TEPA on controlled drift and improves robustness on preference up-dates, where validation can catch incorrect candidates before activation. 
+
+Design Contrast 
+
+Append-only memory keeps all stored evidence active. Tem-poral recency and sliding windows reduce exposure to old evidence, sometimes discarding useful memories or retain-ing stale recent ones. Reactive forgetting clears memory after detected failure at a global level. Oracle reset knows phase boundaries and serves as a diagnostic upper bound. TEPA makes the unit of update a keyed precedent; each revocation affects active precedents sharing the conflicting key while preserving other keys for retrieval. 
+
+Naming convention. Unless qualified, TEPA denotes the default revocable variant (TEPA-Rev in Table 3). TEPA-NoRev is an ablation that omits revocation. TEPA-Full is the trial-validated variant used in preference-update experi-ments. 
+
+Theoretical role of revocation. A simple risk view closes the link between revocation and the pollution index. Under a single-key supersession model, suppose the current value 
+
+v+ and a stale value v− share key k, with v−̸ = v+. If append-only retrieval exposes v− with probability ξ and the downstream policy follows it with probability η, then append-only memory incurs at least ξη excess 0–1 risk relative to a memory state that revokes v− while keeping v+ active. Table 1: Notation used in the formulation and method. 
+
+Symbol Name Definition 
+
+Core objects 
+
+et Episode Interaction at time t, consisting of visible context, post-action evidence, and hidden regime. 
+
+ct Context Visible task or query context supplied to the agent. 
+
+xt Evidence Fact, preference, tool outcome, or task experience observed after acting and used to update memory. 
+
+a(m) 
+
+> t
+
+Action Agent answer or tool/action choice produced by method m.
+
+y(m) 
+
+> t
+
+Outcome Binary task success indicator observed after method m acts. 
+
+zt Hidden regime Benchmark state controlling the current correct value; unobserved by the agent. 
+
+ϕ(t) Phase Drift phase containing episode t.
+
+Mt Memory All stored precedents after episode t.
+
+At Active set Precedents eligible for retrieval. 
+
+Rt Revoked archive Revoked precedents excluded from normal retrieval. 
+
+ρ Retriever Function returning active precedents for a context. 
+
+πm Policy Method-specific decision rule mapping context and retrieved precedents to an action or answer. 
+
+Conflict mechanics 
+
+κ, ν Extractors Functions mapping evidence to conflict key κ(x) and asserted value ν(x).
+
+p Precedent Keyed memory record (k, v, s, f, σ, τ ).
+
+k, v Key and value Conflict key and asserted value. 
+
+s, f Evidence counts Support and failure/conflict counts for a precedent. 
+
+σ State Lifecycle state in {Hypothesis, Active, Revoked}. 
+
+q(p) Posterior mean Beta-Bernoulli estimate of current validity for precedent p.
+
+α, β Prior counts Beta prior parameters used in q(p); set to one in all experiments. 
+
+H Held-out tasks Trial-validation task set used by TEPA-Full. 
+
+Validation and metrics 
+
+θprop , θ rev ,θpro , θ rec Thresholds Proposal, revocation, promotion, and recent-success thresholds. 
+
+nmin ,nrec Observation counts Minimum total and recent-window observation counts for revocation checks. 
+
+Sm,ϕ Success rate Mean task success of method m in phase ϕ.
+
+MPI m,ϕ Pollution index Relative gap between no memory and method m in phase ϕ.
+
+This gives a sufficient condition for memory pollution. Let b denote the benefit, relative to no memory, of any still-current evidence retrieved by append-only memory in a phase. When stale exposure dominates useful reuse, 
+
+ξη > b , append-only memory has higher expected error than no memory, equivalently Sappend ,ϕ < S NoMem ,ϕ and 
+
+MPI append ,ϕ > 0. Revocation targets exactly the harmful term ξη : conditioned on stale exposure and stale following, the answer is wrong by construction; removing only the con-tradicted same-key value eliminates that exposure while pre-serving current evidence. The supplementary material gives the full proof and the Beta-statistic consistency note. 
+
+Experimental Setup 
+
+Research questions. We evaluate four questions. RQ1: Can append-only memory become worse than no memory under hidden reversal? RQ2: Does revocation prevent that failure in controlled and executable environments? RQ3: Do trials improve updates to stale user preferences? RQ4: How does the same lifecycle mechanism transfer to external mem-ory benchmarks? 
+
+Benchmarks. We use four evaluation settings. Controlled hidden-regime drift and real file-backed executable drift test whether append-only memory becomes harmful under tool-regime reversal. A preference-update stream tests stale user-profile updates. MemoryAgentBench SH-6k provides an ex-ternal single-hop fact-consolidation benchmark (Hu, Wang, and McAuley 2025); MH-6k and long-context variants are reported as boundary settings. Full benchmark details are provided in the supplementary material. 
+
+Baselines. We use mechanism baselines that isolate al-ternatives to revocation: no memory, append-only memory, temporal recency, semantic retrieval, sliding window, reac-tive forgetting, last-write-wins, conflict-aware recency, and oracle reset. These baselines share the same task streams, answer backend, and scoring pipeline, so performance dif-ferences reflect memory-state behavior under controlled sys-tem conditions. The no-memory baseline measures base task success when no stored evidence is exposed to the prompt. A method falling below this baseline reveals memory pollution: retrieved memory has become an active source of harm. In the drift benchmarks, last-write-wins writes successful same-key experiences, so a stale hidden-regime precedent remains until a new successful value is obtained. In MemoryAgent-Bench, the stream directly supplies asserted facts, making last-write-wins the strongest clean single-hop replacement baseline. TEPA ablations include no-revocation, threshold variants, recent-window variants, and trial-budget variants. The exact baseline definitions are provided in the supple-mentary material. 
+
+Metrics and statistics. For drift and preference bench-marks, the primary metric is phase-wise success rate Sm,ϕ .For MemoryAgentBench, the primary metric is substring exact match. We report bootstrap 95% confidence intervals across seeds or paired task samples, one-tailed paired permu-tation tests for directional comparisons, Holm–Bonferroni correction for families of comparisons, and paired effect sizes 
+
+dz where applicable. Unless otherwise stated, confidence in-tervals are 95%. 
+
+Why paired tests. The paired design removes a major source of variance: some generated tasks or memory queries are intrinsically easier than others. Comparing methods on matched task indices therefore estimates the effect of the memory mechanism while controlling for task sampling. The reported confidence intervals quantify uncertainty over the paired experimental stream. 
+
+Implementation details. Controlled, executable, and preference-update benchmarks use deterministic benchmark executors so that the experiments isolate memory behav-ior from language-model sampling variance. MemoryAgent-Bench uses a fixed DeepSeek-v4-Flash answer backend un-der the same prompt and scoring pipeline for all meth-ods. The default TEPA configuration uses proposal thresh-old θprop = 3 , revocation threshold θrev = 0 .3, promotion threshold θpro = 0 .6, and trial budget 3 for TEPA-Full. All methods are evaluated on the same splits and query orders within each benchmark. 
+
+Extraction and leakage controls. The reported experi-ments use schema-based conflict keys for controlled attri-bution. In controlled and executable drift, κ(x) is the tuple of task type, domain, and input type, while ν(x) is the suc-cessful tool pattern recorded by the executor. In preference updates, the key is the preference slot and profile context; in MemoryAgentBench SH-6k, it is parsed from the fact subject and relation template. Deployable methods receive the vis-ible episode stream, while phase labels, future boundaries, and current hidden regimes remain evaluator-side variables. Oracle reset uses privileged phase information and therefore functions as a diagnostic upper bound. These controls make the comparison test memory-state behavior: whether stale same-key evidence remains active after newer conflicting evidence arrives. 
+
+Results 
+
+Controlled Drift Exposes Memory Pollution 
+
+Table 2 summarizes the main evidence, and Figure 2 shows the controlled hidden-regime drift result. In stable and light-drift phases, append-only memory performs well because the stored precedent remains correct. During full reversal, the same active memory becomes harmful: append-only, last-write-wins, and conflict-aware recency each fall to 0.210 success, below the no-memory baseline of 0.309. This yields Table 2: Main evidence summary. Drift and preference rows report full-reversal success; MemoryAgentBench reports substring exact match. Preference uses TEPA-Full; MAB uses TEPA-Rev.                     
+
+> Setting Append NoMem LWW TEPA family
+> Controlled 0.210 0.309 0.210 0.950
+> Executable 0.203 0.298 0.203 0.950
+> Preference 0.138 0.837 –0.872
+> MAB SH-6k 0.583 –0.890 0.890
+
+a positive pollution index of 0.318. TEPA maintains 0.950 success in the same phase by revoking stale precedents. The paired TEPA-vs-append-only difference over all tasks is 0.167 (CI [0.162, 0.172], Holm p < 0.001 , dz = 9 .68 ); TEPA’s overall advantage over last-write-wins is numeri-cally identical (0.167, CI [0.162, 0.172]), because last-write-wins behaves like append-only in the drift stream under our benchmark design. During full reversal, the TEPA-vs-last-write-wins difference is 0.740 (CI [0.722, 0.756], Holm 
+
+p < 0.001 ). The identical 0.950 value for TEPA in controlled and exe-cutable reversal reflects the shared drift schedule and deter-ministic memory-update logic. Errors concentrate in the first few same-key trials after reversal, before sufficient contradic-tory evidence accumulates. Once revocation fires, retrieval contains the current precedent and subsequent same-key tasks are solved deterministically. The 0.950 plateau there-fore measures the adaptation latency of the lifecycle rule: the system pays a small transition cost, then recovers a clean active set. This behavior is important because it links the aggregate success rate to a concrete memory event, namely the moment a contradicted precedent leaves retrieval. The supplementary phase-wise heatmap summarizes the same pattern across methods. The full-reversal column iso-lates the central phenomenon. Append-only, semantic re-trieval, temporal recency, and no-revocation all remain near 0.210 success. Reactive forgetting improves to 0.796, but still trails TEPA at 0.950. Oracle reset reaches 0.812 because it is given phase-boundary resets but uses the same weak base executor. This pattern supports the mechanism claim: stale active memory is the driver of the collapse across methods with different storage policies. 
+
+The Effect Reproduces with Real File Execution 
+
+The executable benchmark tests whether the controlled result survives contact with real file I/O and tool execution. Fig-ure 3 reports phase-wise success as a compact dot-interval matrix: columns are drift phases, rows are methods, and hor-izontal intervals show 95% confidence intervals over seeds. Under full reversal, append-only and last-write-wins memory reach 0.203 success while no memory reaches 0.298, giving a pollution index of 0.319. TEPA reaches 0.950, outperform-ing reactive forgetting at 0.771. The TEPA-vs-append-only and TEPA-vs-last-write-wins differences during full reversal are both 0.748 (CI [0.728, 0.768], Holm p < 0.001 ). The no-memory-vs-append-only reversal gap is also significant: 0.095 (CI [0.083, 0.107], Holm p < 0.001 , dz = 2 .10 ). 0 20 40 60 80 100 120 140 160        
+
+> Task number
+> 0.00 0.25 0.50 0.75 1.00
+> 10-task moving success pollution
+> Shaded bands: 95% seed CI; n = 50 seeds
+> TEPA Append-only No Memory Reactive Forgetting TEPA-NoRev
+> Stable Light Drift Full Reversal Partial Return
+
+Figure 2: Memory pollution under controlled hidden-regime drift. Curves show 10-task moving averages over 50 seeds with 95% seed confidence bands. During full reversal, append-only memory falls below no memory because the stale precedent remains active; TEPA revokes the stale precedent and stays robust. 0.2 0.6 1.0       
+
+> TEPA Reactive No memory Append NoRev
+> Method
+> Stable
+> 0.2 0.6 1.0
+> Light
+> 0.2 0.6 1.0 pollution -9.5%
+> 0.95
+> Reversal
+> 0.2 0.6 1.0
+> Return
+> Success rate with 95% CI
+
+Figure 3: Real file-backed tool execution validation. Columns are drift phases and rows are memory methods; points show phase-wise success rates over 50 seeds with 95% confidence intervals. The highlighted reversal column reproduces mem-ory pollution in executable tasks: append-only memory is below no memory, while TEPA remains robust. 
+
+Preference Updates Require Trial-Validated Revocation 
+
+The preference-update stream tests cases where stale long-term profiles are corrected by fresh session feedback. The supplementary preference-update plot shows that append-only memory collapses under preference reversal: 0.138 full-reversal success versus 0.837 for no memory. Last-write-wins improves over append-only but still falls below no memory overall (0.686 vs. 0.837). Augmenting last-write-wins with the same validation rule used by TEPA-Full raises its suc-cess to 0.863, yet it still trails TEPA-Full overall by 0.048 (CI [0.026, 0.069], Holm p = 0 .0011 ), with a larger 0.240 gap concentrated in the full-reversal phase (CI [0.156, 0.330]). TEPA-Full reaches 0.910 overall and is statistically indis-tinguishable from no memory (difference 0.002, CI [-0.011, 0.014], Holm p = 1 .000 ). The gap shows that validation and lifecycle state play complementary roles: validation fil-ters candidate promotion, while revocation clears old active preferences. This setting is deliberately difficult for relevance-based memory because the stale profile remains semantically on-topic after its value has been superseded by newer feedback. The result separates two operations that are easy to conflate. Validation prevents some bad candidates from being pro-moted; lifecycle revocation removes previously active pref-erences that remain attractive to retrieval because they match the current query. 
+
+MemoryAgentBench Single-Hop Conflict Resolution 
+
+MemoryAgentBench SH-6k provides an external stale-conflict consolidation test. Table 3 reports substring ex-act match over three query-order seeds and 300 queries. TEPA-Rev reaches 0.890, matching the strong last-write-wins current-key cache and outperforming TEPA-NoRev at 0.630. This result shows that current-key replacement is the decisive operation for clean single-hop fact updates where the latest fact is directly observed. The lifecycle state, archive, and trial-validation machinery become most valuable in the drift and preference settings above, where valid updates must be inferred from interaction outcomes. 
+
+Ablations Confirm the Role of Revocation 
+
+Figure 4 separates component necessity from hyperparam-eter sensitivity. Panel (a) compares full-reversal success directly: removing revocation collapses performance from 0.950 to 0.211, matching append-only behavior and falling below no memory. Panel (b) reports each variant as a Table 3: MemoryAgentBench SH-6k single-hop conflict res-olution. Metric is substring exact match over three query-order seeds and 300 queries.                
+
+> Method Substring EM
+> Current-state methods
+> TEPA-Rev 0.890
+> Last-write-wins 0.890
+> TEPA-NoRev 0.630
+> Stale-memory baselines
+> Append-only 0.583 Sliding window 0.580 Reactive forgetting 0.580 Conflict-aware recency 0.580 Temporal recency 0.510 0.2 0.5 0.8 1.0
+> Full-reversal success
+> TEPA No memory NoRev
+> no-memory level
+> a
+> 0.95 0.31 0.21
+> −3 −2 −1 0
+> Overall success change vs default (pp)
+> Prop-1 Prop-5 Rev-0.5 Default Win-2 Rev-0.2 Trial-6 Full Trial-1 Win-5
+> default b
+
+Figure 4: Ablation results. Panel (a): full-reversal dot inter-vals show that removing revocation collapses performance below no memory. Panel (b): hyperparameter variants are shown as percentage-point changes from the default TEPA setting; most thresholds and trial budgets stay close to zero, while a larger recent window slows adaptation. percentage-point change from the default TEPA setting. Threshold variants around the default ( θrev ∈ [0 .2, 0.4] ,
+
+θpro ∈ [0 .5, 0.7] ) and trial-budget variants (1, 3, 5) remain close to zero, while a larger recent window is the main nega-tive outlier. The ablations identify revocation as the essential component for hidden-regime reversal and show that nearby threshold choices preserve the effect. 
+
+Boundary Conditions 
+
+Boundary experiments separate memory-state validity from harder retrieval problems. TEPA remains useful on SH-32k (0.680 substring exact match), but drops to 0.040 on MH-6k and 0.000 on SH-262k. Fact-level revocation addresses stale single-hop conflicts; multi-hop relational retrieval and long-context selection emerge as the next architectural challenges. The full boundary table is provided in the supplementary material. 
+
+Discussion 
+
+The results point to a design principle for agent memory: persistent memory should track validity alongside relevance. Stale evidence can remain highly relevant to the current query, giving similarity, recency, and larger context a weak signal for supersession. TEPA addresses this at the memory-state layer by removing the contradicted same-key precedent before retrieval while preserving current evidence. The same lifecycle view explains the memory dynamics reported in the supplement: append-only storage grows with every observed fact, windowed or recency-based memory caps exposure by age or position, and TEPA keeps active memory compact by moving contradicted precedents out of the active set while retaining them for audit. The MemoryAgentBench boundary results sharpen the architectural picture. Revocation repairs the validity state of single-hop facts before they enter the prompt; multi-hop chain construction and very-long-context selection point to retrieval planners as the next systems layer. Two practical consequences follow. Mechanism baselines act as shared-evaluator controls under the same backend and task stream. Archiving revoked precedents supports audit, diagnosis, and later re-promotion while keeping ordinary retrieval focused on currently active evidence. 
+
+Limitations 
+
+TEPA assumes useful conflict keys can be extracted from evidence, a natural fit for preference slots, entity attributes, and tool-regime records, and a harder problem for open-ended memories whose conflict relation is implicit. The MH-6k and long-context MemoryAgentBench results mark where chain construction, cross-key composition, and very-long-context selection become dominant beyond fact-level validity tracking. The supplementary key-noise audit quantifies this transition directly: TEPA degrades smoothly as structured key noise increases, while append-only and last-write-wins remain near their reversal failure modes because they lack a lifecycle signal for stale hidden-regime precedents. 
+
+Conclusion 
+
+We introduced TEPA, a revocable evidence-memory mecha-nism for stale-conflict consolidation. Append-only memory can become worse than no memory when stale conflicting evidence remains active, and conflict-keyed revocation pre-vents this failure in controlled, executable, and preference-update settings. The broader takeaway is operational: persis-tent memory needs an explicit validity state. A memory item can be relevant, recent, and still wrong once its value has been superseded; revocation removes such evidence from or-dinary retrieval while preserving it for validation, audit, and later re-promotion. This view recasts long-term memory as an inspectable lifecycle governed by validity evidence and state transitions. Each precedent carries a key, evidence, state, and contradic-tion history, allowing agents to explain why a memory is active, revoked, or ready for re-promotion. References 
+
+Asai, A.; Wu, Z.; Wang, Y.; Sil, A.; and Hajishirzi, H. 2024. Self-rag: Learning to retrieve, generate, and critique through self-reflection. In International conference on learning rep-resentations , volume 2024, 9112–9141. Bifet, A.; and Gavalda, R. 2007. Learning from time-changing data with adaptive windowing. In Proceedings of the 2007 SIAM international conference on data mining ,443–448. SIAM. Borgeaud, S.; Mensch, A.; Hoffmann, J.; Cai, T.; Rutherford, E.; Millican, K.; Van Den Driessche, G. B.; Lespiau, J.-B.; Damoc, B.; Clark, A.; et al. 2022. Improving language models by retrieving from trillions of tokens. In International conference on machine learning , 2206–2240. PMLR. Chao, H.; Bai, Y.; Sheng, R.; Li, T.; and Sun, Y. 2026. STALE: Can LLM Agents Know When Their Memories Are No Longer Valid? arXiv preprint arXiv:2605.06527 .Chaudhry, A.; Ranzato, M.; Rohrbach, M.; and Elhoseiny, M. 2018. Efficient lifelong learning with a-gem. arXiv preprint arXiv:1812.00420 .Chhikara, P.; Khant, D.; Aryan, S.; Singh, T.; and Yadav, D. 2025. Mem0: Building production-ready ai agents with scal-able long-term memory. arXiv preprint arXiv:2504.19413 .Du, P. 2026. Memory for autonomous llm agents: Mech-anisms, evaluation, and emerging frontiers. arXiv preprint arXiv:2603.07670 .Gama, J.; Medas, P.; Castillo, G.; and Rodrigues, P. 2004. Learning with drift detection. In Brazilian symposium on artificial intelligence , 286–295. Springer. Gama, J.; Žliobait˙ e, I.; Bifet, A.; Pechenizkiy, M.; and Bouchachia, A. 2014. A survey on concept drift adaptation. 
+
+ACM computing surveys (CSUR) , 46(4): 1–37. Gao, Y.; Xiong, Y.; Gao, X.; Jia, K.; Pan, J.; Bi, Y.; Dai, Y.; Sun, J.; Wang, M.; and Wang, H. 2023. Retrieval-augmented generation for large language models: A survey. 
+
+arXiv preprint arXiv:2312.10997 .Guu, K.; Lee, K.; Tung, Z.; Pasupat, P.; and Chang, M. 2020. Retrieval augmented language model pre-training. In 
+
+International conference on machine learning , 3929–3938. PMLR. He, Z.; Wang, Y.; Zhi, C.; Hu, Y.; Chen, T.-P.; Yin, L.; Chen, Z.; Wu, T. A.; Ouyang, S.; Wang, Z.; et al. 2026. Memoryarena: Benchmarking agent memory in in-terdependent multi-session agentic tasks. arXiv preprint arXiv:2602.16313 .Hu, Y.; Wang, Y.; and McAuley, J. 2025. Evaluating memory in llm agents via incremental multi-turn interactions. arXiv preprint arXiv:2507.05257 .Izacard, G.; Lewis, P.; Lomeli, M.; Hosseini, L.; Petroni, F.; Schick, T.; Dwivedi-Yu, J.; Joulin, A.; Riedel, S.; and Grave, E. 2022. Few-shot learning with retrieval augmented language models. arXiv preprint arXiv:2208.03299 , 1(2): 4. Jiang, X.; Li, F.; Zhao, H.; Wang, J.; Shao, J.; Xu, S.; Zhang, S.; Chen, W.; Tang, X.; Chen, Y.; et al. 2024. Long Term Memory: The Foundation of AI Self-Evolution. arXiv 2024. 
+
+arXiv preprint arXiv:2410.15665 .Joshi, R. 2026. Eywa: Provenance-Grounded Long-Term Memory for AI Agents. arXiv preprint arXiv:2605.30771 .Kang, J.; Ji, M.; Zhao, Z.; and Bai, T. 2025. Memory os of ai agent. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , 25972–25981. Karpukhin, V.; Oguz, B.; Min, S.; Lewis, P.; Wu, L.; Edunov, S.; Chen, D.; and Yih, W.-t. 2020. Dense passage retrieval for open-domain question answering. In Proceedings of the 2020 conference on empirical methods in natural language processing (EMNLP) , 6769–6781. Khandelwal, U.; Levy, O.; Jurafsky, D.; Zettlemoyer, L.; and Lewis, M. 2019. Generalization through memoriza-tion: Nearest neighbor language models. arXiv preprint arXiv:1911.00172 .Kirkpatrick, J.; Pascanu, R.; Rabinowitz, N.; Veness, J.; Des-jardins, G.; Rusu, A. A.; Milan, K.; Quan, J.; Ramalho, T.; Grabska-Barwinska, A.; et al. 2017. Overcoming catas-trophic forgetting in neural networks. Proceedings of the national academy of sciences , 114(13): 3521–3526. Lewis, P.; Perez, E.; Piktus, A.; Petroni, F.; Karpukhin, V.; Goyal, N.; Küttler, H.; Lewis, M.; Yih, W.-t.; Rocktäschel, T.; et al. 2020. Retrieval-augmented generation for knowledge-intensive nlp tasks. Advances in neural information process-ing systems , 33: 9459–9474. Liu, N. F.; Lin, K.; Hewitt, J.; Paranjape, A.; Bevilacqua, M.; Petroni, F.; and Liang, P. 2024. Lost in the middle: How language models use long contexts. Transactions of the association for computational linguistics , 12: 157–173. Lopez-Paz, D.; and Ranzato, M. 2017. Gradient episodic memory for continual learning. Advances in neural informa-tion processing systems , 30. Maharana, A.; Lee, D.-H.; Tulyakov, S.; Bansal, M.; Bar-bieri, F.; and Fang, Y. 2024. Evaluating very long-term conversational memory of llm agents. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , 13851–13870. Meng, K.; Bau, D.; Andonian, A.; and Belinkov, Y. 2022a. Locating and editing factual associations in gpt. Advances in neural information processing systems , 35: 17359–17372. Meng, K.; Sharma, A. S.; Andonian, A.; Belinkov, Y.; and Bau, D. 2022b. Mass-editing memory in a transformer. arXiv preprint arXiv:2210.07229 .Mitchell, E.; Lin, C.; Bosselut, A.; Finn, C.; and Manning, C. D. 2021. Fast model editing at scale. arXiv preprint arXiv:2110.11309 .Mitchell, E.; Lin, C.; Bosselut, A.; Manning, C. D.; and Finn, C. 2022. Memory-based model editing at scale. In Inter-national Conference on Machine Learning , 15817–15831. PMLR. Pan, Z.; Wu, Q.; Jiang, H.; Luo, X.; Cheng, H.; Li, D.; Yang, Y.; Lin, C.-Y.; Zhao, H. V.; Qiu, L.; et al. 2025. On mem-ory construction and retrieval for personalized conversational agents. arXiv preprint arXiv:2502.05589 .Parisi, G. I.; Kemker, R.; Part, J. L.; Kanan, C.; and Wermter, S. 2019. Continual lifelong learning with neural networks: A review. Neural networks , 113: 54–71. Park, J. S.; O’Brien, J.; Cai, C. J.; Morris, M. R.; Liang, P.; and Bernstein, M. S. 2023. Generative agents: Interac-tive simulacra of human behavior. In Proceedings of the 36th annual acm symposium on user interface software and technology , 1–22. Rolnick, D.; Ahuja, A.; Schwarz, J.; Lillicrap, T.; and Wayne, G. 2019. Experience replay for continual learning. Advances in neural information processing systems , 32. Shinn, N.; Cassano, F.; Gopinath, A.; Narasimhan, K.; and Yao, S. 2023. Reflexion: Language agents with verbal re-inforcement learning. Advances in neural information pro-cessing systems , 36: 8634–8652. Tan, H.; Zhang, Z.; Ma, C.; Chen, X.; Dai, Q.; and Dong, Z. 2025. Membench: Towards more comprehensive evalu-ation on the memory of llm-based agents. In Findings of the Association for Computational Linguistics: ACL 2025 ,19336–19352. Wang, G.; Xie, Y.; Jiang, Y.; Mandlekar, A.; Xiao, C.; Zhu, Y.; Fan, L.; and Anandkumar, A. 2023. Voyager: An open-ended embodied agent with large language models. arXiv preprint arXiv:2305.16291 .Wu, D.; Ji, Z.; Kawatkar, A.; Kwan, B.; Gu, J.-C.; Peng, N.; and Chang, K.-W. 2026. LongMemEval-V2: Evaluating Long-Term Agent Memory Toward Experienced Colleagues. 
+
+arXiv preprint arXiv:2605.12493 .Wu, D.; Wang, H.; Yu, W.; Zhang, Y.; Chang, K.-W.; and Yu, D. 2024. Longmemeval: Benchmarking chat as-sistants on long-term interactive memory. arXiv preprint arXiv:2410.10813 .Wu, Y.; Rabe, M. N.; Hutchins, D.; and Szegedy, C. 2022. Memorizing transformers. arXiv preprint arXiv:2203.08913 .Xu, W.; Liang, Z.; Mei, K.; Gao, H.; Tan, J.; and Zhang, Y. 2026. A-mem: Agentic memory for llm agents. Advances in Neural Information Processing Systems , 38: 17577–17604. Yu, Y.; Yao, L.; Xie, Y.; Tan, Q.; Feng, J.; Li, Y.; and Wu, L. 2026. Agentic memory: Learning unified long-term and short-term memory management for large language model agents. arXiv preprint arXiv:2601.01885 .Zhang, Z.; Dai, Q.; Bo, X.; Ma, C.; Li, R.; Chen, X.; Zhu, J.; Dong, Z.; and Wen, J.-R. 2025. A survey on the memory mechanism of large language model-based agents. ACM Transactions on Information Systems , 43(6): 1–47. Zhao, A.; Huang, D.; Xu, Q.; Lin, M.; Liu, Y.-J.; and Huang, G. 2024. Expel: Llm agents are experiential learners. In Pro-ceedings of the AAAI Conference on Artificial Intelligence ,volume 38, 19632–19642. Zhong, W.; Guo, L.; Gao, Q.; Ye, H.; and Wang, Y. 2024. Memorybank: Enhancing large language models with long-term memory. In Proceedings of the AAAI conference on artificial intelligence , volume 38, 19724–19731. 
+
+Supplementary Material Appendix A: Mechanism Trace and Memory Dynamics 
+
+This appendix visualizes the lifecycle mechanism discussed in the main paper. The figures below are audit views of internal memory state: Figure 5 follows one representative precedent through promotion, reversal-induced revocation, and later re-promotion, and Figure 6 shows active memory size over time. 
+
+How to read Figure 5. The top panel tracks the posterior mean q(p) of a single precedent. The revocation threshold is crossed when repeated counter-evidence arrives during full reversal. The bottom panel records the corresponding dis-crete lifecycle state, illustrating the archived-state behavior discussed in the main text. 
+
+Memory-size interpretation. The main paper discusses this interpretation; the figure records the corresponding active-set trace. 
+
+Appendix B: Statistical Audit 
+
+Figure 7 provides the phase-wise method audit referenced in the main text. It makes the same point as the main drift curve with more method-level granularity: the reversal phase is where stale active memory becomes harmful. The main paper reports only the comparisons needed to interpret each result. This appendix records the statistical protocol used for all reported significance claims. Figure 9 visualizes the main paired effects, and Table 4 lists the nu-merical comparisons used in the paper. Tests are paired whenever possible: for a fixed seed and task index, each method is evaluated on the same generated task or query. Let 
+
+di = y(A) 
+
+> i
+
+− y(B) 
+
+> i
+
+be the paired binary success difference for comparison A versus B. We report the mean paired differ-ence ¯d, a nonparametric bootstrap 95% confidence interval, a one-tailed paired permutation test when the hypothesis is directional, and paired effect size dz = ¯d/ sd( d) when de-fined. P-values are corrected within each comparison family using Holm–Bonferroni correction. 
+
+Why use paired tests. The main paper explains the ratio-nale for paired tests. Here we use the same matched task or query indices for every comparison family before applying bootstrap intervals, permutation tests, and Holm–Bonferroni correction. 
+
+Appendix C: Benchmark Construction and Leakage Controls 
+
+All methods within a benchmark share the same split, query order, executor, and scoring pipeline. The evaluation suite is: controlled hidden-regime drift (50 seeds, 160 tasks per seed, phase success rate), real file-backed executable drift (50 seeds, 160 tasks per seed, phase success rate), preference-update stream (50 seeds, 160 tasks per seed, phase success rate), MemoryAgentBench SH-6k (3 query-order seeds, 300 queries, substring exact match), and MemoryAgentBench boundary settings (20–100 queries, substring exact match). This textual summary replaces a wide setup table in the main paper to avoid appendix float pages. Table 5 reports the most space-efficient version of the boundary analysis. The omitted SH-6k and SH-32k values are already reported in the main text and MemoryAgent-0 20 40 60 80 100 120 140 160 0.0 0.2 0.4 0.6 0.8 1.0 
+
+> Posterior mean
+
+Stable Light Drift Full Reversal Partial Return 
+
+> promote revoke
+
+a        
+
+> 020 40 60 80 100 120 140 160
+
+Episode 
+
+> Revoked Hyp./Arch. Deprecated Active
+> Status
+> PROMOTED active → deprecated deprecated → archived archived → active
+
+bFigure 5: Precedent lifecycle trace in controlled drift. The posterior drops under reversal, triggering revocation, and later evidence can support re-promotion. 0 20 40 60 80 100 120 140 160 
+
+Episode 
+
+020 40 60 80 100 120    
+
+> Active memory size
+> Stable Light Drift Full Reversal Partial Return 22128
+
+TEPA TEPA-NoRev Append-only 
+
+Figure 6: Memory-size evolution. Revocation keeps active memory compact while append-only memory accumulates stale evidence. Bench result table; the purpose here is to show the two stress conditions where the current method fails. Table 6 audits a key assumption rather than introducing a new benchmark. The task stream is unchanged, but the mem-ory system receives a corrupted key view with probability ρ,quantifying how structured key errors affect the controlled reversal setting. Stable Light Drift Full Reversal Partial Return TEPA TEPA-Full Oracle Reset Reactive Forgetting Temporal Recency Sliding Window Semantic Retrieval Append-only TEPA-NoRev No Memory                               
+
+> 0.99 1.00 0.95 0.94 0.98 1.00 0.95 0.94 0.99 0.99 0.81 1.00 0.99 1.00 0.80 0.95 0.99 1.00 0.21 1.00 0.99 1.00 0.22 0.93 0.99 1.00 0.21 1.00 0.99 1.00 0.21 1.00 0.99 1.00 0.21 1.00 0.90 0.91 0.31 0.90 stale-memory stress
+> 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 1.0
+> Success rate
+
+Figure 7: Phase-wise success rates in controlled hidden-regime drift. The highlighted reversal phase shows that append-only and no-revocation variants become worse than no memory, whereas revocable memory remains high. 
+
+Controlled hidden-regime drift. The controlled bench-mark is intentionally minimal. The visible context is similar across phases, but the hidden accepted tool changes. This iso-lates the failure mode that the paper studies: whether memory can be falsified when a previously correct precedent becomes wrong under a hidden reversal. Because the executor is deter-ministic, the benchmark removes language-model sampling variance and makes memory state the primary variable. Table 4: Key paired statistical comparisons used in the main text. Differences are success-rate or exact-match differences, depending on the benchmark metric. 
+
+Benchmark Comparison Mean diff. 95% CI Corrected p
+
+Controlled drift, overall TEPA vs. append-only 0.167 [0.162, 0.172] < 0.001 
+
+Controlled drift, overall TEPA vs. last-write-wins 0.167 [0.162, 0.172] < 0.001 
+
+Controlled drift, reversal TEPA vs. append-only 0.740 [0.722, 0.756] < 0.001 
+
+Controlled drift, reversal TEPA vs. last-write-wins 0.740 [0.722, 0.756] < 0.001 
+
+Controlled drift, reversal no memory vs. append-only 0.098 [0.085, 0.112] < 0.001 
+
+Real executable, overall TEPA vs. append-only 0.171 [0.165, 0.176] < 0.001 
+
+Real executable, overall TEPA vs. last-write-wins 0.171 [0.165, 0.176] < 0.001 
+
+Real executable, reversal TEPA vs. append-only 0.748 [0.728, 0.768] < 0.001 
+
+Real executable, reversal TEPA vs. last-write-wins 0.748 [0.728, 0.768] < 0.001 
+
+Real executable, reversal no memory vs. append-only 0.095 [0.083, 0.107] < 0.001 
+
+Preference update, overall TEPA-Full vs. append-only 0.234 [0.222, 0.246] < 0.001 
+
+Preference update, overall TEPA-Full vs. last-write-wins 0.224 [0.087, 0.392] < 0.001 
+
+Preference update, reversal TEPA-Full vs. append-only 0.734 [0.707, 0.760] < 0.001 
+
+Preference update, overall TEPA-Full vs. no memory 0.002 [-0.011, 0.014] 1.000 0.60 0.65 0.70 0.75 0.80 0.85 0.90 0.95 
+
+> Overall success rate
+> TEPA-Full No Memory Oracle Reset TEPA Reactive Forgetting Temporal Recency TEPA-NoRev Semantic Retrieval Append-only Sliding Window
+> no-memory level
+> 0.910 0.908 0.865 0.852 0.849 0.844 0.683 0.676 0.676 0.623 catastrophic pollution
+
+Figure 8: Preference-update stream. The horizontal lollipop plot shows overall success over 50 seeds. Append-only mem-ory preserves stale preferences and falls far below no mem-ory. TEPA-Full recovers to the no-memory level by validating updates before promotion. 
+
+Real file-backed executable drift. The executable vali-dation uses generated CSV/JSON files and calls real tool libraries. The accepted backend changes for CSV tasks un-der reversal, while JSON tasks act as stable controls. This setup guards against the criticism that the controlled bench-mark is only a symbolic reward function: the agent’s action is evaluated through real file I/O and code execution. 
+
+Preference-update stream. The preference benchmark separates long-term profile evidence from fresh session evi-dence. The stale profile remains visible to memory methods, while the current answer is determined by newer feedback. 
+
+MemoryAgentBench. MemoryAgentBench SH-6k is used as an external single-hop conflict-resolution bench-mark. All compared methods run under the same query order Table 5: MemoryAgentBench boundary settings. Values are substring exact match. Dashes indicate settings not included in the audited run. 
+
+Method MH-6k SH-262k TEPA-Rev 0.040 0.000 TEPA-NoRev 0.010 0.000 Temporal recency 0.070 –Append-only 0.080 0.350 
+
+Table 6: Key-extraction noise audit on controlled drift. Values are full-reversal success rates over 50 seeds. Noise perturbs the structured memory key seen by memory systems, while the executable task and correct answer remain unchanged. 
+
+Method 0% 5% 10% 20% TEPA 0.950 0.908 0.886 0.777 Reactive forgetting 0.796 0.745 0.731 0.613 Last-write-wins 0.210 0.212 0.212 0.215 Append-only 0.210 0.212 0.212 0.215 No memory 0.309 0.304 0.302 0.297 
+
+and answer-scoring pipeline. Boundary settings, including MH-6k and very long-context variants, are reported as limits rather than as positive claims. 
+
+Conflict-key and value extraction. The main text summa-rizes the schema-based extractors used in each benchmark. Table 6 adds the key-noise audit that stress-tests this as-sumption in controlled drift; extending the same analysis to open-domain LLM-parsed keys is left as future work. 
+
+Leakage controls. No method receives the hidden phase label zt or the future phase boundary at decision time, ex-cept the diagnostic oracle-reset baseline. TEPA receives only the evidence stream and must infer stale evidence through conflict-keyed updates. 
+
+Appendix D: Baseline Definitions and Fidelity 
+
+The paper separates two categories that are easy to conflate. 
+
+Mechanism baselines are controls implemented under the 0.0 0.1 0.2 0.3 0.4 0.5 0.6 0.7           
+
+> Mean success-rate difference with 95% CI
+> Controlled: TEPA vs Append Controlled reversal TEPA vs NoRev TEPA vs NoMemory TEPA vs Reactive Real-tool reversal Real-tool vs NoMemory Preference vs Append Preference vs NoRev TEPA-Full vs TEPA
+> Controlled Preference Real-tool
+> *** dz=9.7 *** dz=12.0 *** dz=12.0 *** dz=7.9 *** dz=0.8 *** dz=10.2 *** dz=7.2 *** dz=5.4 *** dz=5.4 *** dz=1.5
+
+Figure 9: Statistical audit summary. Forest plot entries show paired mean differences with 95% confidence intervals and corrected significance markers. shared evaluator to test a memory principle such as append-only storage, recency, or sliding windows. Ablations are vari-ants of TEPA and are not counted as baselines. This separa-tion is important because the paper’s claim is about a memory lifecycle operation, not about a full deployed assistant stack. A shared evaluator improves fairness because every method sees the same queries, answer backend, and scoring function. Table 7 summarizes what each mechanism baseline tests. 
+
+Appendix E: Hyperparameters and Implementation Details 
+
+Table 8 lists the default hyperparameters and evaluation con-stants used unless otherwise specified in the main text. 
+
+Deterministic versus model-backed settings. The main paper summarizes this split. In implementation, deterministic streams are used for causal memory-state tests, while Mem-oryAgentBench uses a fixed answer backend and prompt to test transfer to natural-language queries. 
+
+Scalability audit. Table 9 reports the microbenchmark un-derlying the main-text scalability discussion. The audit uses up to one million updates and reports update cost per 1k updates plus keyed query cost. 
+
+Appendix F: Extended Related Work 
+
+This appendix records related areas that inform the work but are not central enough to occupy main-text space. The main text focuses on agent memory systems and stale-conflict benchmarks because they define the immediate problem. The areas below motivate design boundaries: TEPA is a memory-lifecycle mechanism, not a general retrieval architecture, a continual-learning algorithm, or a model-editing method. 
+
+Retrieval-augmented and long-context generation. 
+
+Retrieval-augmented generation brings external evidence into the prompt or into model computation (Lewis et al. 2020; Karpukhin et al. 2020; Guu et al. 2020; Borgeaud et al. 2022; Izacard et al. 2022; Asai et al. 2024; Gao et al. 2023). Long-context and memory-augmented Transformer work expands the amount of evidence that can be accessed directly or through non-parametric memory (Khandelwal et al. 2019; Wu et al. 2022; Liu et al. 2024). These methods primarily address access: whether relevant information can be found and presented to the model. Memory pollution is different because the harmful evidence can be highly relevant but obsolete. TEPA therefore changes the active memory set before retrieval, rather than proposing a new dense retriever or longer context window. 
+
+Concept drift and continual learning. Concept-drift methods detect or adapt to changes in a streaming data dis-tribution (Gama et al. 2004; Bifet and Gavalda 2007; Gama et al. 2014). Continual-learning methods try to retain old capabilities while learning new ones, often through regular-ization, replay, or episodic memory (Kirkpatrick et al. 2017; Lopez-Paz and Ranzato 2017; Chaudhry et al. 2018; Rolnick et al. 2019; Parisi et al. 2019). These literatures motivate the idea that old evidence can become unreliable, but their update target is usually a classifier, parameter vector, or train-ing distribution. TEPA instead updates the status of explicit textual memories that are candidates for prompting. 
+
+Model editing and factual updates. Model-editing meth-ods update factual associations in model parameters or aux-iliary editing memories (Meng et al. 2022a,b; Mitchell et al. 2021, 2022). The motivation overlaps with ours: knowl-edge can become stale and must be revised. The layer dif-fers. Model editing changes the model or an editor module, whereas TEPA changes the active memory state and leaves the base model fixed. This makes revocation transparent and reversible, but it also means that TEPA cannot correct para-metric knowledge when no relevant evidence is retrieved. 
+
+Skill libraries and autonomous memory agents. Sys-tems such as Voyager store executable skills for lifelong exploration (Wang et al. 2023), while recent surveys and Table 7: Mechanism baseline definitions. Each baseline isolates one alternative to conflict-keyed revocation under the shared evaluator.                        
+
+> Baseline Memory operation Purpose No memory Retrieve no stored evidence Measures base task difficulty without memory exposure Append-only Keep all evidence active Tests whether stale active evidence causes pollution Temporal recency Prefer most recent memories Tests age-based forgetting without conflict keys Semantic retrieval Rank memories by lexical relevance Tests retrieval without lifecycle state Sliding window Keep only a fixed recent window Tests capacity-limited forgetting Reactive forgetting Forget after detected failure Tests global reactive reset rather than local revocation Last-write-wins Keep only the newest value for each con-flict key Strong current-key cache baseline without posterior, archive, or trials Conflict-aware recency Collapse same-key conflicts only in re-trieved candidates Tests whether retrieval-time recency is enough without per-sistent lifecycle state Oracle reset Reset at true phase boundary Diagnostic upper bound with unavailable phase knowledge
+
+Table 8: Default hyperparameters and evaluation constants.                        
+
+> Quantity Value Role Proposal threshold θprop 3 supports Evidence needed before proposing a precedent Revocation threshold θrev 0.3 Posterior cutoff for removing active stale precedents Promotion threshold θpro 0.6 Posterior cutoff for activating candidate precedents Beta prior (α, β )(1, 1) Prior counts in q(p)
+> TEPA-Full trial budget 3 checks Support, counterfactual, and contamination checks Controlled/executable/preference seeds 50 each Random streams per drift benchmark Tasks per drift seed 160 Four phases of 40 tasks MemoryAgentBench SH-6k 3 seeds, 300 queries External single-hop stale-conflict validation
+
+Table 9: Scalability microbenchmark. Update cost is mil-liseconds per 1k updates; query cost is microseconds per key lookup.                      
+
+> Updates Method Upd. Query 100k Append scan 0.115 823.971 100k Last-write-wins 0.275 0.241 100k TEPA lifecycle 0.322 0.216 1M Append scan 0.114 4006.250 1M Last-write-wins 0.440 0.399 1M TEPA lifecycle 0.513 0.301
+
+frameworks describe broader memory mechanisms for au-tonomous agents (Zhang et al. 2025; Jiang et al. 2024; Du 2026). These works broaden the design space of agent mem-ory. Our experiments deliberately avoid claiming general autonomous-agent memory performance. The evidence in this paper supports a specific operation: conflict-keyed revo-cation for stale evidence. 
+
+Stale-memory validity and provenance. Concurrent work increasingly treats memory validity as an explicit eval-uation target. STALE asks whether agents can know when stored memories are no longer valid (Chao et al. 2026); Eywa emphasizes provenance-grounded memory and the distinc-tion between revisable beliefs and immutable evidence (Joshi 2026); MemoryArena studies interdependent multi-session agentic tasks (He et al. 2026); and MemBench broadens memory evaluation dimensions for LLM-based agents (Tan et al. 2025). These works are complementary to our study. They motivate richer evaluation of stale memories, while TEPA isolates one concrete operation–revocation of stale active evidence under a conflict key–and tests it under con-trolled, executable, preference-update, and MemoryAgent-Bench settings. 
+
+Appendix G: Theoretical Notes 
+
+This appendix formalizes the limited theoretical claim used in the main text. The goal is not to prove that TEPA is globally optimal for all long-term memory tasks. The claim is nar-rower: in stale-conflict consolidation, where a newer value supersedes an older value under the same key, keeping the stale value active creates avoidable risk. 
+
+Key-current model. Consider a single conflict key k. At time t, the environment has a current value v⋆t . An evidence item xt reveals a candidate value vt = ν(xt) for key k. A later item supersedes an earlier one when it has the same key and an incompatible value. The evaluation query asks for v⋆t ,and the loss is 0–1 error: 
+
+ℓ(at, v ⋆t ) = ⊮[at̸ = v⋆t ].
+
+Let an append-only memory state contain both a stale value 
+
+v− and the current value v+ under key k, with v−̸ = v+ =
+
+v⋆t . A revocation memory state removes v− from the active set and retrieves only active current evidence for that key. We make no assumption about the internal language model except the following exposure condition: if stale evidence is retrieved together with current evidence, the downstream decision rule follows the stale evidence with probability η ≥
+
+0.
+
+Proposition 1: revocation weakly dominates under single-key supersession. Under the key-current model, if stale and current evidence share the same key and the current ev-idence is available, a retrieval policy that excludes the stale evidence has expected 0–1 loss no larger than a policy that retrieves both. If the downstream decision rule follows re-trieved stale evidence with probability η > 0, the dominance is strict. 
+
+Proof. Let A denote the event that append-only retrieval exposes the stale item v− to the decision rule together with 
+
+v+. Conditioned on A, the decision rule outputs v− with probability η and therefore incurs loss one on those cases because v−̸ = v⋆t . On the complementary cases, the two policies have the same current evidence available, and the re-vocation policy has not removed any correct active value for key k. Thus the stale item contributes an additional nonneg-ative error term to append-only retrieval and contributes no additional correct information under the key-current assump-tion. The expected loss of append-only retrieval is therefore at least the expected loss of retrieval after revocation, with strict inequality whenever A occurs with positive probability and η > 0. □
+
+Proposition 2: pollution scales with stale exposure. Let 
+
+q = Pr( A) be the probability that append-only retrieval exposes stale evidence for key k, and let η = Pr( at = v− |
+
+A) be the probability that the downstream decision follows the stale evidence once exposed. If revocation leaves the current value available, then the excess risk of append-only memory over revocable memory satisfies 
+
+Lappend − L revoke ≥ qη. 
+
+More generally, if following stale evidence increases ex-pected task loss by ∆ > 0, then 
+
+Lappend − L revoke ≥ qη ∆.
+
+Proof. The event A occurs with probability q. Conditional on A, stale following occurs with probability η. Each stale-following event adds loss ∆ relative to a decision that uses the current value. Taking expectation gives the lower bound. The 0–1 case is recovered by setting ∆ = 1 . □
+
+This proposition supplies the formal excess-risk statement underlying the main-text intuition about stale exposure. 
+
+Proposition 3: posterior revocation is consistent within a stationary segment. Let a precedent p receive Bernoulli feedback Zi ∈ { 0, 1} within a stationary segment, where 
+
+Zi = 1 means the precedent is supported and E[Zi] = μ.With Beta prior (α, β ), the posterior mean after n feedback events is 
+
+qn(p) = α + Pni=1 Zi
+
+α + β + n .
+
+For any revocation threshold θrev , if μ < θ rev then qn(p) <θrev eventually with probability one; if μ > θ rev , then the probability of false revocation after sufficiently many obser-vations decays exponentially in n.
+
+Proof sketch. By the strong law of large numbers, 
+
+n−1 Pni=1 Zi → μ almost surely. Since the prior con-tribution (α + β)/n vanishes, qn(p) → μ almost surely. Therefore, for μ < θ rev , the posterior mean eventually falls below the threshold almost surely. For μ > θ rev , choose 
+
+ϵ = ( μ − θrev )/2. A false revocation event after the prior becomes negligible implies that the empirical mean deviates below μ − ϵ. Hoeffding’s inequality bounds this probability by exp( −2nϵ 2) up to constants from the finite prior. □
+
+Scope of the theory. The propositions justify only stale single-key conflict revocation. They do not claim guarantees for retrieval-chain construction, compositional answering, or long-context selection. 
+
+Appendix H: Reproducibility Notes 
+
+Appendix defines benchmark construction and leakage con-trols, Appendix defines method controls, and Table 8 collects run constants. The statistical protocol is given in Appendix B.

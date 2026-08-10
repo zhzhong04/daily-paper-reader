@@ -1,0 +1,475 @@
+Title: Context Compaction Theory
+
+URL Source: https://arxiv.org/pdf/2608.01326v1
+
+Published Time: Tue, 04 Aug 2026 01:26:37 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# Context Compaction Theory 
+
+Hayder Tirmazi 
+
+AllSpice Inc. and Boston University 
+
+hayder@bu.edu 
+
+Sam Markelon 
+
+Proof Trading 
+
+sam@prooftrading.com 
+
+Allison Bishop 
+
+Proof Trading and City College of New York 
+
+abishop@ccny.cuny.edu 
+
+Michael Mitzenmacher 
+
+Harvard University 
+
+michaelm@eecs.harvard.edu 
+
+# Abstract 
+
+Large Language Models (LLMs) have a bounded context window. The context window is the maximum input size an LLM can consume for a single inference. AI agents rely on a process called context compaction to fit their state within the context window when calling an LLM. Despite its ubiquity, context compaction has received essentially no formal analysis. In this paper, we initiate a formal study of context compaction. We first introduce a framework consisting of two games that capture the two algorithmic strategies for context compaction used by contemporary AI agents in practice. The Context Selection Game models context compaction algorithms that select a subset of an agent’s accumulated state to retain. The Context Generation Game models context compaction algorithms that summarize an agent’s state by an arbitrary message of bounded length. We then prove an equivalence between the Context Generation Game and one-way communication complexity. The minimum context compaction budget for answering a set of queries within a target error is equal to the one-way communication complexity of the induced communication problem at the same error. Known bounds from communication complexity therefore transfer directly to context compaction. We also show that the Context Selection Game corresponds to a restricted class of one-way communication protocols. Any gap between selection and generation is therefore a gap between two classes of communication protocols. We prove that there exists a set of queries for which generation needs strictly less budget than selection. The equivalence between the Context Generation Game and one-way communication also lets us measure how well a deployed context compaction algorithm performs on a query relative to the optimal strategy. For example, we develop this comparison on set membership queries, where a Bloom filter is a near-optimal context compaction algorithm. We present a case study that evaluates Anthropic’s context compaction endpoint on set membership queries. In our case study, the endpoint answers membership queries with a substantially higher error rate than a Bloom filter of the same size. 
+
+# 1 Introduction 
+
+AI agents are increasingly used to assist with complex tasks such as writing code [3, 9, 19, 43], debugging systems [43], and conducting research [5, 39, 49]. An agent is an application that accomplishes a task by repeatedly calling a Large Language Model (LLM) and executing the actions that the LLM requests. Over the course of a task, the agent accumulates a state. The state includes the messages the user has sent, the responses of the LLM, and the results of actions such as reading a file. 
+
+Preprint. arXiv:2608.01326v1 [cs.DS] 2 Aug 2026 Agent    
+
+> Agent
+> ✗Larger Than LLM's Context Window
+> Old Internal State
+> User Query
+> LLM Response
+> Tool Result
+> LLM Response
+> Context
+> Compaction
+> ✓Fits LLM's Context Window
+> New Internal State
+> LLM Response
+> Compacted Context LLM
+> Tool
+
+Figure 1: Context compaction in an agent. The agent stores an internal state that grows as it works. The internal state holds the user’s queries, the LLM’s responses, and the results of tool calls. The LLM has a bounded input size called the context window. When the internal state exceeds the context window, the agent runs a context compaction algorithm that produces a compacted context. This compacted context, together with the LLM’s next response, becomes the agent’s new internal state, which fits within the context window. The agent carries this new internal state forward. An LLM accepts an input of bounded size, and the agent must construct this input on every call. The bound on the input size is called the LLM’s context window. When the agent’s state is small, the agent sends its entire state to the LLM. When the agent’s state grows beyond the context window, the agent must construct a smaller input that preserves the information the LLM will need. This process is called context compaction [4, 8]. Figure 1 shows the relationship between the agent, its internal state, and the LLM. The constraint that drives context compaction is the bounded input of the LLM. The size of the agent’s memory is not the constraint. Agents also face a second, softer pressure. The reasoning quality of an LLM degrades as its input grows. This phenomenon is called context rot [47]. Context rot pushes agents to do context compaction even before their state reaches the context window. This smaller usable limit is the effective context window. During context compaction, an agent summarizes its state or selects a subset of it. Systems such as Claude Code [3], Cursor [9], and Codex [34] all implement variants of this strategy, typically triggered when context usage exceeds a threshold, e.g., 95% of the allowed context window. Context compaction itself introduces a new failure mode. After a context compaction, the agent replaces its internal state with the compacted context and only sends the compacted context to the LLM in later steps of the session. Therefore, information a context compaction discards no longer reaches the LLM in future steps of the session. This can cause the agent to make decisions inconsistent with the original conversation. Note that the agent can and does maintain a record of the full history in storage. However, the agent does not act on the full history going forward, because working from the full history instead of replacing it with the compacted context would require re-running a context compaction algorithm over the full history on every query. This alternative is slow and costly, as we show in Section 2.2. Despite its ubiquity, context compaction has received essentially no formal analysis. Existing work on context compaction mostly focuses on empirical evaluations [22, 24, 30] and does not provide formal guarantees on what information is preserved or lost. In this paper, we initiate a formal study of context compaction with the following contributions. 
+
+A theoretical framework for context compaction. In Section 3, we introduce two games for analyzing context compaction. The Context Selection Game formalizes context compaction by selection, in which a selector chooses a subset of items to retain subject to a budget constraint, and an adversary then issues a query that must be answered using only the selected subset. The Context Generation Game extends the framework to context compaction by generation, in which the context compaction algorithm emits an arbitrary message of bounded length, and the query must be answered from that message. Both games model a single invocation of context compaction. An agent session invokes context compaction many times. We relate the single-invocation model to the full agent loop in Section 2.2. We classify production context compaction algorithms used by Codex, Claude Code, Gemini CLI, and OpenCode as instances of these two games. 
+
+Generation as one-way communication. In Section 4, we prove an equivalence between the Context Generation Game and one-way communication (Theorem 1). More precisely, we show that for any set of queries, the minimum budget at which a context generation algorithm achieves 2error ≤ ϵ equals the one-way randomized communication complexity of the induced communication problem at error ϵ. The equivalence lets us import communication-complexity results into the context compaction setting. We also show that the Context Selection Game (Corollary 2) corresponds to a restricted protocol class within one-way communication. We exhibit a family of queries on which selection needs a factor of Θ(log n) more budget than generation to reach the same error (Theorem 3). 
+
+A case study of deployed context compaction. In Appendix A, we present a case study that uses our equivalence to measure a context compaction endpoint deployed in production. We record a set of 15 ,000 items in the context of Anthropic’s context compaction endpoint. We tell the endpoint that its result will only be used for set membership queries. We then ask membership queries and compare the error rate to a Bloom filter of the same compacted size. Note that a Bloom filter is an optimal context compaction algorithm for set membership up to a constant factor. We find that the endpoint answers membership queries with an error rate close to a random guess. We show using a control experiment that information lost during context compaction causes this error. 
+
+1.1 Related Work 
+
+Context compaction relates to several lines of work on managing what an LLM reads and remembers, most of them empirical or systems-oriented. We review the most relevant below and, in each case, note how it differs from our formal study of what context compaction must retain. 
+
+Context Compaction Most prior work on context compaction is empirical. Prior work evalu-ates prompt compression methods [22, 23] and context compaction methods in agents [24, 30] by downstream task accuracy. These methods do not provide formal guarantees on what information remains in an agent’s compacted context. Context compaction methods in production agents such as Claude Code [3], Codex [34], Gemini CLI [19], and OpenCode [42] are typically based on LLM summarization and are also largely guided by empirical evaluation. 
+
+Inference-level Context Management A separate line of work acts inside the LLM’s inference engine. This includes KV-cache eviction methods such as H2O [48] and StreamingLLM [45] that drop low-value tokens from the attention cache so that a long context fits in fixed memory. Liu et al. [31] show that LLMs use long context unevenly and accuracy drops when the relevant information sits in the middle of a long context. These inference-level methods are not available to most agent developers for three reasons. Firstly, agents often access an underlying LLM only through externally hosted inference providers such as AWS Bedrock [2]. Secondly, the LLM an agent uses may be proprietary, making it difficult to modify its inference implementation. Finally, modern agents often switch among several LLMs, using them as interchangeable backends independent of the agent’s design [40]. The primary lever an agent developer controls is the context it constructs and sends to the LLM. Agents therefore rely on context compaction. Note that LLM inference-level context management methods are complementary to context compaction methods, and an agent takes advantage of both. 
+
+LLMs and Set Membership Recent work studies how reliably LLMs answer set membership questions [20, 21]. Hergert et al. [21] find that instruction-tuned LLMs are brittle even on explicit membership queries. Closest to our setting, Guo and Li [20] show that an LLM storing items in bounded memory trades off forgetting against hallucinating similar to a Bloom filter trading space against false positives. Guo and Li [20] study the memory an LLM acquires during training. Our work, on the other hand, studies context compaction at inference time. This is relevant in the agentic setting because an agent’s task usually depends on information the LLM never saw in training, such as the current codebase, the files it has edited, and its tool outputs. This information exists only in the context that the agent sends to the LLM. Context compaction shrinks that context, and therefore determines how much of this information the LLM can use. Approximate membership is also a popular benchmark for learned and neural data structures [25, 32, 36]. 
+
+# 2 Preliminaries 
+
+In this section, we provide an overview of how production agents work and why context compaction is necessary for long-running agentic sessions. We use OpenAI’s Codex [34] v0.125.0 as our primary 3reference agent for this discussion. Codex is one of the most popular agents that is also open-source, which allows us to analyze its implementation in detail. However, Codex is not unique in its design. The vast majority of popular agents today including Claude Code [3], OpenCode [42], Block’s Goose [11], and Gemini CLI [19] implement the same core agent loop design as Codex. Therefore, our analysis of Codex’s design and context compaction mechanism is representative of a broad class of popular agents. We mention other agents including Claude Code, OpenCode, and Gemini CLI only when their designs differ in meaningful and informative ways. The remainder of this section is organized as follows. Section 2.1 introduces LLMs and the tool-calling interface used by modern agents. Section 2.2 describes a canonical agent loop and the role of context compaction within it. Section 2.3 works through a concrete example agent session using Codex. Section 2.4 surveys the context compaction algorithms used by Codex, Claude Code, Gemini CLI, OpenCode, and others. 
+
+2.1 LLMs and Tools 
+
+Tokens are the basic units of text that LLMs process. They are usually words or subword units within a fixed vocabulary. An LLM is a function that takes a sequence of tokens as input and produces another sequence of tokens as output. This process is called inference. Agents build on LLM inference to perform specific tasks. For a given LLM inference, the input sequence of tokens is called the context of the LLM for that inference. Every LLM has a hard architectural limit on the number of input tokens it can process during a single inference. This hard limit on the input token count is called the LLM’s context window. We denote this limit by W . Inputs longer than W tokens cannot be processed by the LLM during a single inference. In the rest of this paper, when we refer to context, we mean specifically the input token sequence sent to the LLM during inference. This is the standard way in which practitioners use the term context in the agentic setting. In addition to the hard context window limit W , recent work has documented a phenomenon known as context rot [47] which degrades the reasoning quality of LLMs as the context length grows. Due to context rot, there is often a cutoff point even smaller than the hard limit W where the LLM’s reasoning quality degrades in a way that is no longer desirable. This cutoff point is the effective context window, often much smaller than W . This means context window size is often a concern for agents even for sessions that are short enough to fit within the hard limit W .Modern LLMs also allow agents to specify custom tools. The agent provides these tools. Its developer, its user, or a third-party developer can write them. Agents typically use tools to perform tasks outside the LLM’s capabilities, such as file reads, shell commands, and web search. In some systems, the tools might even be other LLMs [47] or other agents [28]. The agent registers a set of tool schemas which are typically structured JSON definitions describing each tool’s name, parameters, and behavior. The agent sends the tool schemas to the LLM as context during inference. When the LLM wants to use a tool, instead of producing plain text it produces a structured tool call request containing the tool name and its arguments. The agent receives these tool call requests. It executes the tool and includes the result in its next input to the LLM. An agent can also register a system prompt. The system prompt is a static block of instructions describing the LLM’s role, operating rules, and any task-specific guidance. The agent prepends the system prompt to the context of every LLM inference in a session. As a concrete example, the first few lines of Codex’s system prompt for GPT-5 read:   
+
+> An excerpt from Codex’s system prompt for GPT-5 You are Codex, based on GPT-5. You are running as a coding agent in the Codex CLI on a user’s computer. ## General - When searching for text or files, prefer using ‘rg‘ or ‘rg –files‘ respectively because ‘rg‘ is much faster than alternatives like ‘grep‘. (If the ‘rg‘ command is not found, then use alternatives.)
+
+The full Codex system prompt continues for several hundred lines, covering editing constraints, planning, sandboxing, and other operating rules. 4Algorithm 1 An agent’s main loop  
+
+> 1:
+
+I ← { P } ∪ T  
+
+> 2:
+
+loop  
+
+> 3:
+
+u ← RECEIVE USER MESSAGE ()  
+
+> 4:
+
+I ← I ∪ { u} 
+
+> 5:
+
+repeat  
+
+> 6:
+
+I ← COMPACT (I) 
+
+> 7:
+
+(R, T ) ← LLM (I) 
+
+> 8:
+
+I ← I ∪ { R} 
+
+> 9:
+
+if T̸ = ∅ then  
+
+> 10:
+
+E ← { EXECUTE (τ ) : τ ∈ T } 
+
+> 11:
+
+I ← I ∪ E 
+
+> 12:
+
+end if  
+
+> 13:
+
+until T = ∅ 
+
+> 14:
+
+Show R to the user  
+
+> 15:
+
+end loop Algorithm 2 Single invocation setting  
+
+> 1:
+
+I ← the agent’s internal state  
+
+> 2:
+
+I ← COMPACT (I) 
+
+> 3:
+
+q ← a future user query  
+
+> 4:
+
+R ← LLM (I ∪ { q})
+
+2.2 Agents 
+
+As mentioned above, an agent is an application that relies on LLM inference. An agent coordinates three core operations. The first operation is invoking an LLM. The second operation is executing one or more tools. The third operation is updating its own internal state. The internal state of an agent at iteration t, denoted It, is the working state the agent carries about its task and the world. It includes 1) messages sent to the agent, 2) the LLM’s responses, 3) tool calls and their results, and 4) anything programmatically tracked, computed, or retrieved by the agent’s own code that does not fall into the other categories. To call the LLM, the agent must present its internal state as an input of at most W
+
+tokens, where W is the size of the LLM’s context window. When It fits within the context window, the agent sends it to the LLM directly. When It exceeds the context window, the agent invokes a context compaction algorithm that replaces It with a bounded internal state that encodes the relevant information and satisfies |I t| ≤ W . Note that the agent’s own memory is not the constraint here. The agent could store everything it has gathered. In fact, agents often store the full transcript of their session. The constraint is that the LLM that the agent uses accepts at most W tokens of input. An alternative would be for the agent to recompute a summary from the stored session history on every call. However, this design balloons the agent’s cost per user query in terms of LLM usage as well as the time taken to serve each user query. Agents commonly do context compaction by asking the LLM to summarize the history. This method is called LLM-based summarization. Consider a coding session with 800 ,000 tokens of history. Claude Fable 5 has a context window of 1,000 ,000 
+
+tokens [6]. This history fills most of Claude Fable 5’s context window. Suppose the agent re-derives a 100 ,000 -token summary from the history with LLM-based summarization. The summarization call reads 800 ,000 input tokens and generates 100 ,000 output tokens. Fable 5 charges $10 per million input tokens and $50 per million output tokens [6]. The call therefore costs $8 in input and $5 in output. That adds up to $13 for a single query. Fable 5 generates about 65 output tokens per second [10]. That is about 15 milliseconds per output token. Generating the 100 ,000 -token summary alone takes about 26 minutes. Reading the 800 ,000 -token input adds further delay. Note that prompt caching [7] can potentially reduce the input cost in our calculation, but even then the output cost is unaffected. As the history grows over the session, this cost and delay increase monotonically. Most deployed agents therefore feed only the compacted state to the LLM in later steps of the agent’s session, even though they keep the raw history in storage. This is the context compaction problem we study in this paper. An agent operates in two nested loops. The outer loop processes user messages over the course of a session. The inner loop processes a single user message via repeated LLM calls and tool executions, until the LLM produces a response with no further tool calls. The initial internal state is I = {P }∪T ,where P is the system prompt and T is the set of tool schemas. The full loop is given in Algorithm 1. Line 1 initializes the internal state I with the system prompt P and the tool schemas T . The outer loop on lines 2–15 iterates over user messages received during the session, and the inner loop on 5lines 5–13 processes a single user message via repeated LLM inferences and tool executions. On each iteration of the outer loop, line 3 waits for a new user message u and line 4 adds the message to the agent’s internal state. On each iteration of the inner loop, line 6 invokes C OMPACT to fit the internal state within the context window, so that |I| ≤ W . Then line 7 conducts LLM inference on the internal state to obtain a response R and a possibly empty set T = {τ1, . . . , τ n} of tool call requests. Line 8 adds the response R to the internal state. If T is non-empty, lines 10 and 11 execute the tool calls requested by the LLM and add their results E to the agent’s internal state. The results of the tool calls are then communicated to the LLM during the next iteration of the inner loop. The inner loop terminates when the LLM produces a response with no tool calls. Line 14 then shows that response to the user, and the outer loop waits for the next user message. Note that the inner loop is often referred to as a reasoning and acting (ReAct) loop [17, 46]. The C OMPACT routine on line 6 is the focus of this paper. The C OMPACT routine reduces the internal state to at most W tokens. When the agent’s internal state already fits within the context window, the agent can pass it through to the LLM unchanged. When the agent’s internal state exceeds W tokens, the agent must perform context compaction. The tool results E added to the internal state on line 11 may include file contents, command output, error messages, and other tool-specific outputs. Between context compactions, the internal state grows as the agent appends responses and tool results. Each invocation of the context compaction algorithm resets the internal state to a context of at most W
+
+tokens. A single user message can trigger dozens of inner iterations, and a session can contain many user messages. In Algorithm 1, the agent carries the compacted context forward. After a context compaction, the agent uses the compacted context, the new response, and any new tool results as its new internal state. When the agent does context compaction again, it operates on a state that already contains the output of earlier context compactions. This matches deployed agents including Codex [34], Claude Code [3], Gemini CLI [19], OpenCode [42], Goose [11], and Cursor [9]. All of these agents feed the compacted context to the LLM in place of the full history, and each later context compaction builds on the previous summary. We discuss more details on context compaction mechanisms in existing agents in Section 2.4. As we explained above, recomputing a fresh context from the full history on every turn would be expensive. This cost is why deployed agents carry the compacted context forward. Our model captures a single invocation of context compaction, shown as Algorithm 2 beside the full loop. The agent does context compaction on its internal state, producing a bounded context. A query then arrives and must be answered from that context alone. Since the context compaction is committed before the query arrives, the context compaction algorithm cannot depend on the query. We study a single invocation because it is the necessary first step toward understanding a full agent session. An agent does context compaction many times. Each context compaction runs on the output of an earlier one and can only discard more information. A single invocation is therefore the base case. It is also the most favorable case for the agent. If a single context compaction cannot preserve an answer, neither can a session of many context compactions. Repeated context compaction is a natural extension of this setting. We leave its analysis as an open problem in Section 5. In the case of OpenAI’s Codex specifically, the agent loop is organized into “turns”. The vast majority of currently popular agents including Claude Code [3], OpenCode [42], Block’s Goose [11], and Gemini CLI [19] implement the agent loop in a similar manner, though with different data structures and implementation details. 
+
+2.3 Example 
+
+In this section, we provide a concrete example of an agent, in our case OpenAI’s Codex, operating in its main loop. Consider a session where Codex is given the following user message u0.
+
+> > Can you fix the TypeError in main.py?
+
+where main.py is a Python file that contains a function that raises a TypeError . We assume the system prompt P is the default system prompt for Codex’s GPT-5 model and T is the default set of tool schemas. We use two of Codex’s built-in tools. The first tool is shell which executes a shell command and returns its standard output. The second tool is apply_patch which edits one or more files by applying a patch. 6The agent loop proceeds as follows. 
+
+Iteration 0. The agent sends its internal state I0 = {u0, P } ∪ T to the LLM. The LLM responds with R0 = “Let me read the file” and a single tool call T0 = {shell(“cat main.py”) }.The agent executes the tool and obtains E0, the contents of main.py . The agent’s internal state becomes I1 = I0 ∪ { R0} ∪ E0.
+
+Iteration 1. The agent sends I1. The LLM responds with R1 = “I see the issue on line 42” and a tool call T1 = {apply_patch(...) } patching main.py . After execution, I2 = I1 ∪{ R1}∪ E1
+
+where E1 is the patch confirmation. 
+
+Iteration 2. The agent sends I2. The LLM responds with R2 = “Let me verify by running the tests” and a tool call T2 = {shell(“pytest”) }. The pytest output is large, so E2 is large. After the update, |I 3| exceeds the effective context window, the threshold at which the agent triggers context compaction. 
+
+Iteration 3. The agent therefore does context compaction on I3 so that it fits within the context window. The agent’s choice of what to keep determines whether it retains the bug fix decision R1, the test failure details E2, or the original user goal u0.In this example, Iteration 3 is the first iteration at which the agent has to perform context compaction. The agent must choose what information to retain and what information to discard in order to fit the context window constraint. If the agent retains R1 but discards E2, then the agent may forget the test failure details and fail to fix the bug. If the agent retains E2 but discards R1, then the agent may forget that it already decided on a fix and fail to apply it. If the agent retains u0 but discards both 
+
+R1 and E2, then the agent may forget both the bug fix decision R1 and the test failure details E2,and fail to make any progress on fixing the bug. This example illustrates how context compaction can lead to loss of information that is relevant for future reasoning steps, which motivates our formal analysis of context compaction in this paper. 
+
+2.4 Existing Context Compaction Mechanisms 
+
+OpenAI’s Codex maintains a per-model token threshold that sits below the context window. When token usage crosses this threshold, an automatic context compaction task runs while the conversation still fits within the context window. The context compaction task assembles the entire conversation history together with a fixed context compaction prompt and sends it to the LLM. The prompt instructs the LLM to produce a summary of the existing conversation history. The LLM’s summary then replaces the conversation history for future iterations of the agent loop. This is LLM-based summarization. After context compaction, Codex warns the user that “long threads and multiple com-pactions can cause the model to be less accurate,” [34] explicitly acknowledging that repeated context compaction degrades quality. Note that Codex’s context compaction mechanism is independent of the underlying LLM. It is identical whether the LLM is a frontier LLM accessed via an API or a small open-weight LLM running locally. Therefore, the context compaction problem is a property of the agent design rather than of any particular LLM provider. The vast majority of popular agents today make use of LLM-based summarization in the same way as Codex. Some agents use it as their only strategy, similarly to Codex. For example, Gemini CLI [19] triggers context compaction at a configurable percentage of the context window and instructs the LLM to produce a structured XML snapshot. Other agents combine LLM-based summarization with a set of other context compaction strategies. Claude Code uses a tiered eviction strategy that tries cheap alternatives such as inline compression of large tool outputs before invoking LLM-based summarization [4, 8]. OpenCode [42] can additionally prune the outputs of old tool calls. This pruning is separate from its LLM-based summarization, which OpenCode invokes when the conversation exceeds the usable context window. A large number of context compaction algorithms also use some form of selection instead of LLM-based summarization. The OpenAI Assistants API [33] offers a truncation strategy parameter with a 
+
+last_messages mode that keeps the N most recent messages and an auto mode that drops middle messages to fit a token budget. LangChain’s trim_messages utility [27] lets users manage context by dropping messages from a conversation according to a configurable strategy, e.g., dropping the oldest messages. Aider’s repo map [18] ranks code symbols by a PageRank-style importance score and selects the top-k that fit a budget. Token-level prompt compressors such as LLMLingua [22] 7and Selective Context [29] delete low-information tokens, producing a compressed prompt that is a sub-sequence of the original tokens. 
+
+# 3 Models for Context Compaction 
+
+In this section, we formalize context compaction as a two-player game between the context com-paction algorithm and an adversary that represents the future information needs of an agent. We define two games. They differ in the kind of context compaction they model. Our formalization treats the agent’s context as a set of discrete items instead of a sequence of tokens. The items are atomic units of information such as variable names, error messages, design decisions, or instructions. This abstraction lets us reason about what information is preserved or lost, independent of how the underlying LLM processes tokens. Both games model a single invocation of context compaction. Section 3.1 introduces the Context Selection Game, which captures context compaction algorithms that select a subset of an agent’s context. Section 3.2 introduces context compaction by generation as a superclass of context compaction by selection and formalizes the Context Generation Game. Finally, Section 3.3 classifies existing context compaction algorithms used in production agents within our framework. 
+
+3.1 Context Selection Game 
+
+The Context Selection Game models context compaction algorithms that select a subset of an agent’s context. The game is played between a selector and an adversary. A selector receives an item universe 
+
+X chosen by the adversary. In real applications, X is extracted from the agent’s conversation history. The selector must then choose a subset S ⊆ X to retain. The subset S is subject to a size budget that captures the LLM’s context window limit. The adversary then issues a query q from a given query space Q, and the selector’s score is determined by how well the retained subset S answers q under a value function vq . The formal definition follows. 
+
+Definition 1 (Context Selection Game). An instance of the Context Selection Game consists of an item universe X , a size function s, a budget B, a query space Q, and a query regime. The item universe X = {x1, . . . , x N } represents atomic units of information extracted from a conversation history. Each item xi has a size s(xi) > 0 representing the amount of context window space it occupies. The budget B > 0 is the maximum total size of items that can be retained within the context window of an LLM. Each query q ∈ Q has a value function vq : 2 X → [0 , 1] specifying how well a retained subset answers q. The query regime specifies how queries are chosen (see Definition 2). The game is played between two players, a selector, i.e., the context compaction algorithm, and an adversary, which represents the future information needs of an agent. The game proceeds in three stages. First, the adversary fixes the item universe X = {x1, . . . , x N } and the size of each item. Second, the selector observes X and chooses a subset S ⊆ X with P 
+
+> xi∈S
+
+s(xi) ≤ B. Third, a query q ∈ Q is chosen according to the query regime. The selector is then awarded a score 
+
+val( S, q ) := vq (S) and incurs error err( S, q ) := 1 − val( S, q ), which it seeks to minimize. Note that the budget B, the query space Q, and the query regime are fixed before the game starts and are known to both players. ⋄
+
+The difficulty of context compaction depends on what the selector knows about future queries. If query patterns are predictable, e.g., users may tend to ask about recent instructions, the selector can prioritize accordingly. If queries are adversarial, such as a red-teamer probing for information the agent forgot, the selector must hedge. We formalize this as two query regimes. 
+
+Definition 2 (Query regimes). We study two query regimes. In the stochastic query regime, the item universe and the query are drawn together from a known distribution μ over pairs (X , q ). This draw replaces the adversarial choice of the item universe in the first stage. The selector observes X but not 
+
+q. Its error is the expected error under μ. In the oblivious adversary query regime, the adversary fixes the item universe as in the first stage and then chooses the query q with no access to the subset S
+
+chosen by the selector. Its error is the worst case of its error over all inputs (X , q ). ⋄
+
+Note that the stochastic query regime and the oblivious adversary query regime differ in the quantity we are trying to find bounds for. A result that assumes the stochastic regime guarantees a bound on the expected error, where the expectation is over both the draw of (X , q ) from μ and the selector’s internal randomness. On the other hand, a result that assumes the oblivious adversary regime bounds 8the error on every input, where the expectation is over the selector’s internal randomness alone. The minimum budget in the oblivious adversary regime, at any target error, is therefore at least the minimum budget in the stochastic regime at the same target error, for every distribution μ. For example, a context compaction algorithm designed for a distribution μ may achieve a low error in expectation and still have a high error on an input that μ draws rarely. An oblivious adversary can choose that particular bad input. The choice of what counts as an item is a modeling decision about selection granularity. At the coarsest granularity, a single tool result or the response of a single LLM inference, is one item. At the finest granularity, every token in the internal state of an agent is its own item. Our framework is agnostic to the choice of granularity. Given any partition of the internal state It into items, the Context Selection Game asks which subset of those items to retain. A separate, orthogonal problem to context selection is lossless compression, i.e., encoding an item in fewer tokens without discarding any of its information. Lossless compression applies to each item on its own. Throughout this paper we treat the encoding of an item into tokens as a black box. We measure the size of an item xi by the size function s(xi), which accounts for any lossless compression of that item. Sizes are additive across the retained set. The retained set therefore has size P 
+
+> xi∈S
+
+s(xi).The subset view defines a class of context compaction algorithms. A context compaction algorithm is a selection algorithm if its output identifies an unordered subset S ⊆ X . Its cost is the additive P 
+
+> xi∈S
+
+s(xi), where each retained item may be losslessly compressed on its own. We denote the class of selection algorithms SELECT . The Context Selection Game models SELECT .
+
+3.2 Context Generation Game 
+
+We now extend the Context Selection Game to capture context compaction by generation. Our definition of a selection algorithm in Section 3.1 imposes three restrictions. A selection algorithm 1) must output a subset S ⊆ X , 2) must not use the order of the retained items to convey information, and 3) has an output of size P 
+
+> xi∈S
+
+s(xi), i.e., the sum of the sizes of the retained items. A generation algorithm drops all three restrictions. A generation algorithm 1) may emit new tokens that appear in no item of X , such as the tokens of an LLM-generated summary, 2) may reorder any retained items to convey information, and 3) may encode the whole retained set at a size below P 
+
+> xi∈S
+
+s(xi).For example, a generation algorithm can record which items of X belong to S with one bit per item of X . When S contains most of X , this encoding is far smaller than P 
+
+> xi∈S
+
+s(xi). We use 
+
+GEN to denote the class of generation algorithms. By construction SELECT ⊆ GEN . LLM-based summarization, used by Codex, Claude Code, and Gemini CLI (Section 2.4), is in GEN but not necessarily in SELECT . The Context Generation Game parallels the Context Selection Game of Definition 1. A generator plays against the adversary in place of a selector. The generator’s strategy is a condenser–interpreter pair in place of a subset. 
+
+Definition 3 (Context Generation Game). An instance of the Context Generation Game consists of an item universe X , a budget B, a token alphabet Σ, a query space Q, and a query regime. Each query q ∈ Q has a value function vq : Out → [0 , 1] over an output space Out , specifying how well a candidate output answers q.The game is played between two players, a generator, i.e., the context compaction algorithm together with the LLM that reads the compacted context, and an adversary, as in Definition 1. The game proceeds in three stages. First, the adversary fixes the item universe X . Second, the generator applies a condenser Cond that maps the item universe to a message Cond (X ) ∈ Σ≤B of length at most B,and commits an interpreter Int : Σ ≤B × Q → Out . Third, a query q ∈ Q is chosen according to the query regime. The generator is then awarded a score val(ˆ a, q ) := vq (ˆ a), where ˆa = Int (Cond (X ), q )
+
+is the interpreter’s output. ⋄
+
+In the case of LLM-based summarization, the condenser is the summarization call and the interpreter is the future LLM call that reads the compacted context. The condenser takes the existing context as input and gives a compacted context or summary as output. The interpreter takes the summary and a query as input, and gives the answer to that query as output. The Context Selection Game is the special case of the Context Generation Game with the following parameters. The output space is Out = 2 X . The condenser–interpreter pair lies in SELECT , i.e., 
+
+Cond ’s output identifies a subset S ⊆ X , possibly after lossless decoding, and Int returns S. The 9Table 1: Classification of existing context compaction algorithms by class and, for SELECT , by granularity. Hybrid entries ( SELECT + GEN ) stack a SELECT layer with a GEN summarization fallback when the SELECT budget is exhausted; the listed granularity is that of the SELECT layer.                           
+
+> System Class Granularity
+> Codex [34] GEN —Gemini CLI [19] GEN —Claude Code [3] SELECT +GEN Tool result OpenCode [42] SELECT +GEN Tool result OpenAI Assistants Truncation Strategy [33] SELECT Message LangChain trim_messages [27] SELECT Message Aider repo map [18] SELECT Code symbol LLMLingua [22] SELECT Token Selective Context [29] SELECT Token
+
+value function vq scores how well the retained subset S answers q. The Context Generation Game removes these restrictions. Any condenser–interpreter pair in GEN is admissible. 
+
+3.3 Classifying Existing Context Compaction Mechanisms 
+
+Table 1 maps the production and research context compaction algorithms surveyed in Section 2.4 to the classes SELECT and GEN defined in Section 3.2, and for SELECT algorithms records the granularity at which selection operates (Section 3.1). Every algorithm in our survey lies in SELECT ∪ GEN , and the SELECT entries span granularities from individual tokens up to entire messages. Our framework therefore covers the vast majority of context compaction algorithms used in production today. 
+
+# 4 Context Compaction and Communication 
+
+In this section, we observe that the Context Generation Game of Definition 3 can be cast directly as an instance of one-way communication, with the condenser playing Alice and the interpreter playing Bob. Section 4.1 makes this correspondence formal: it defines the one-way communication problem induced by a Context Generation Game and proves the two equivalent. Section 4.2 specializes the equivalence to the SELECT subclass, identifying SELECT algorithms as one-way protocols of a restricted form. It also exhibits a family of queries on which selection needs a factor of Θ(log n)
+
+more budget than generation. Section 4.3 records two caveats about the scope of the equivalence: that it is a statement about information rather than computation, and that it is restricted to the stochastic and oblivious regimes. 
+
+4.1 The Induced Communication Problem 
+
+We make the correspondence formal by associating each Context Generation Game with a one-way communication problem, defined as follows. 
+
+Definition 4 (Generation ⇒ Communication). Let G be an instance of a Context Generation Game (Definition 3), with item universe X , budget B, token alphabet Σ, query space Q, value functions 
+
+{vq }q∈Q , and output space Out . We define the one-way communication problem induced by G, ΠG ,as follows. ΠG is the two-party task in which Alice receives the item universe X and Bob receives a query q ∈ Q . Alice then sends a single message m ∈ Σ≤B to Bob. Bob then outputs an answer 
+
+ˆa ∈ Out for the query q. The protocol’s error on input (X , q ) is defined as 1 − vq (ˆ a) where vq is the value function associated with query q. ⋄
+
+For any input distribution μ over X × Q , we define R→
+
+> μ,ϵ
+
+(Π) to be the μ-distributional one-way public-coin randomized communication complexity of Π at error ϵ. In other words, it is the minimum message length in bits of a protocol whose expected error under μ is at most ϵ. We define R→ 
+
+> ϵ
+
+(Π) to be the minimum message length of a public-coin randomized protocol whose expected error, over its public coins, is at most ϵ on every input (X , q ). Note that in this section we measure the budget for the Context Generation Game in bits and identify the token alphabet Σ = {0, 1}. For |Σ| > 1, B
+
+symbols are equivalent to B log |Σ| bits. 10 We are now ready to formalize the equivalence between generation and one-way communication. 
+
+Theorem 1 (Generation ≡ one-way communication) . Let G be a Context Generation Game and ΠG
+
+be the one-way communication problem induced by G as in Definition 4. The following properties hold. 
+
+Property 1. For any input distribution μ over pairs (X , q ), the minimum budget at which some (possibly randomized) GEN algorithm achieves expected error ≤ ϵ with the input drawn from μ
+
+equals R→
+
+> μ,ϵ
+
+(Π G ). The expectation is over both the algorithm’s internal randomness and the input 
+
+(X , q ) ∼ μ. Note that this is the stochastic query regime, with the conversation and the query drawn jointly from μ.
+
+Property 2. In the oblivious adversary query regime, the minimum budget at which some (possibly randomized) GEN algorithm achieves expected error ≤ ϵ on every input (X , q ) equals R→ 
+
+> ϵ
+
+(Π G ). The expectation is over the algorithm’s internal randomness, and the bound is required on every input, so the controlled quantity is the worst case over inputs of the expected error. Proof. The proof rests on the observation that a GEN algorithm G for a Context Generation Game G
+
+and a one-way communication protocol π for the induced one-way communication problem ΠG are described by the same pair of functions. The functions are 1) a condenser Cond , which Alice runs to turn the item universe into a message, and 2) an interpreter Int , which Bob runs to turn a message and query into an answer. A deterministic GEN algorithm G is a condenser Cond and an interpreter Int . The condenser turns the item universe X into a message Cond (X ) of at most B bits, and the interpreter turns that message and a query q into an answer. This is identical to a one-way communication protocol π. In π, Alice is the condenser. Alice holds X and sends the message Cond (X ). Bob is the interpreter. Bob holds 
+
+q, receives the message m, and outputs Int (m, q ). The answer Int (Cond (X ), q ) is identical in both 
+
+G and π. Therefore, the error 1 − vq on each input (X , q ) is equal. So every GEN algorithm G of budget B has a corresponding one-way communication protocol π of message length B with the same error on every input (X , q ), namely the protocol in which Alice runs the condenser Cond and Bob runs the interpreter Int . Conversely, every one-way communication protocol π of message length 
+
+B has a corresponding GEN algorithm G of budget B with the same error on every input, obtained by taking the condenser to be Alice’s strategy and the interpreter to be Bob’s. A randomized GEN algorithm Gr is a distribution over deterministic pairs (Cond ρ, Int ρ), indexed by its internal coins ρ, since fixing the coins makes the condenser and interpreter deterministic. Likewise a public-coin one-way communication protocol πr is, by definition, a deterministic protocol for each setting of its shared public coins. We identify Gr and πr by drawing both from the same coins ρ. For each outcome ρ, the pair (Cond ρ, Int ρ) is, by the deterministic case above, at once a GEN algorithm of budget B and a one-way protocol of message length B that make the same error on every input. Averaging over ρ, Gr and πr then have the same expected error on every input. So every randomized 
+
+GEN algorithm Gr of budget B has a public-coin protocol πr of message length B with the same expected error on every input, and conversely. Both properties now follow by reading this correspondence under two different error measures, with no further work. For property 1, the error is the expected error under μ. As shown above, Gr and πr
+
+have the same expected error on every input, so the same expected error under μ. Hence Gr achieves expected error ≤ ϵ at budget B if and only if πr does at message length B, and the smallest GEN 
+
+budget equals R→
+
+> μ,ϵ
+
+(Π G ). For property 2, the error is instead the worst case over inputs of the expected error. Since Gr and πr have the same expected error on every input, they have the same worst case over inputs, so the smallest GEN budget for worst-case error ≤ ϵ equals R→ 
+
+> ϵ
+
+(Π G ).
+
+4.2 Selection as Restricted Communication 
+
+The equivalence of Theorem 1 is for the unrestricted class GEN . Since SELECT is a subclass of 
+
+GEN , the equivalence specializes to a restricted family of one-way protocols. The following corollary makes the restriction explicit and identifies any gap between SELECT and GEN as a gap within the protocol class. 
+
+Corollary 2. Let X be an item universe of size N , B be a budget in bits, and s(xi) be the size function for item xi ∈ X . SELECT algorithms correspond exactly to one-way protocols in which Alice’s message identifies a subset S ⊆ [N ] such that P 
+
+> i∈S
+
+s(xi) ≤ B, and Bob’s output is a 
+
+11 function only of S, the set {xi : i ∈ S}, q, and the public coins. In particular, every gap between 
+
+SELECT and GEN on a set of queries Q is a gap between subset-encoding protocols and unrestricted one-way protocols on ΠGQ .Proof. We first show that any SELECT algorithm with budget B corresponds to a one-way commu-nication protocol of the restricted form described in the corollary. Suppose (Cond , Int ) is a SELECT 
+
+algorithm with budget B. By the definition of SELECT in Section 3.2, the condenser Cond produces an output that, after lossless decoding, identifies a subset S ⊆ [N ] satisfying P 
+
+> i∈S
+
+s(xi) ≤ B.The interpreter Int produces an answer that is a function only of S, {xi : i ∈ S}, and the query 
+
+q. Following the construction in the proof of Theorem 1, we define a one-way communication protocol in which Alice, on input X , sends Cond (X ) to Bob, and Bob, on input q and message m,outputs Int (m, q ). By construction, Alice’s message identifies the subset S chosen by Cond (X ),and Bob’s output is a function only of S, {xi : i ∈ S}, and q. Conversely, suppose π is a one-way communication protocol whose message identifies a subset S ⊆ [N ] with P 
+
+> i∈S
+
+s(xi) ≤ B, and whose interpreter output is a function only of S, {xi : i ∈ S}, q, and the public coins. We set Cond 
+
+to be Alice’s strategy and Int to be Bob’s strategy. The condenser Cond ’s output identifies a subset of 
+
+X within the budget, and the interpreter Int is a function only of that subset and the query. Therefore, the condenser–interpreter pair (Cond , Int ) is a SELECT algorithm with budget B.The gap claim follows by applying Theorem 1 to both classes. The minimum SELECT budget achieving error ≤ ϵ equals the minimum length of a subset-encoding one-way communication protocol at error ≤ ϵ. Similarly, the minimum GEN budget at error ≤ ϵ equals the minimum length of an unrestricted one-way communication protocol at error ≤ ϵ. Any gap between the two minima is therefore a gap between subset-encoding protocols and unrestricted one-way communication protocols on ΠGQ .We now exhibit a query on which SELECT algorithms need strictly more budget than GEN algorithms. 
+
+Theorem 3 (Selection ⊊ Generation) . Let n = 2 k for an integer k ≥ 2. There is a set Y of n items and a single query q on Y with the following property: some GEN algorithm answers q with zero error using a budget of n bits, while every SELECT algorithm that answers q with zero error requires a budget of at least nk = n log 2 n > n bits. 
+
+Note we choose n a power of two for notational convenience. 
+
+Proof. Let each item of Y have size s(x) = log 2 n bits. The adversary fixes the item universe X to be an arbitrary, possibly empty, subset of Y . The query q asks for X : an answer is correct if and only if it equals X .For the upper bound, the condenser sends the n-bit indicator vector of X over Y . The interpreter returns the set that the vector indicates. This GEN algorithm has zero error with a budget of n bits. The intuition for the lower bound is that the full set of items Y does not fit within a budget below 
+
+n log 2 n. Therefore, the set of choices a SELECT algorithm can make will not span all subsets of 
+
+Y . Thus, a SELECT algorithm cannot perfectly encode an arbitrary subset of Y within the budget. More formally, let AS be a deterministic SELECT algorithm with zero error and budget B. By Corollary 2, on input X , AS retains a subset S(X ) ⊆ X of total size at most B. Since the query is fixed, the answer of AS is f (S(X )) for a fixed function f . The zero error assumption ensures 
+
+f (S(X )) = X for every X ⊆ Y . The map X 7 → S(X ) is therefore an injection of the power set of 
+
+Y into itself, hence a bijection. In particular, S(X ⋆) = Y for some X ⋆. Since S(X ⋆) ⊆ X ⋆, we have X ⋆ = Y . On input Y , AS retains all n items at a cost of n log 2 n bits. Hence B ≥ n log 2 n. If 
+
+AS is a randomized algorithm, the error must be zero for every value of its public random coins, so the bound still holds for randomized SELECT algorithms. 
+
+4.3 Computation Caveats 
+
+In this section, we note two caveats regarding the scope of Theorem 1. The first caveat concerns the distinction between information and computation. The second caveat identifies the query regimes for which the equivalence in Theorem 1 holds. The first caveat is that the equivalence of Theorem 1 is information-theoretic. Our bounds are on the context compaction budget, i.e., the number of bits the compacted context must use to answer a set of 12 queries within error ϵ. Our bounds concern the information needed for the context compaction but do not address the computation a context compaction algorithm must perform to attain it. An upper bound on the context compaction budget exhibits some GEN algorithm that meets it, but does not guarantee that a particular context compaction algorithm, such as a summarizer whose interpreter is an LLM call, can compute it. A lower bound on the context compaction budget does not have this caveat. The lower bound says the compacted context must carry at least a given number of bits, which no interpreter, however it is computed, can reduce. By Theorem 1, the minimum GEN budget equals the minimum one-way protocol budget for the induced problem ΠG , so a lower bound for ΠG
+
+bounds every GEN algorithm, regardless of how its interpreter is computed. The second caveat is that the equivalence of Theorem 1 is also restricted to the stochastic and oblivious query regimes of Definition 2. Under an adaptive adversary, which observes the condenser’s output before choosing q, Theorem 1 does not apply. We leave characterizing the adaptive case as an open problem in Section 5. 
+
+# 5 Discussion and Open Problems 
+
+Theorem 1 helps an agent designer calculate the minimum context compaction budget required for a given set of possible future queries or a distribution over future queries that a user might ask. The minimum context compaction budget for answering these queries within a target error is equal to the one-way communication complexity of the induced communication problem at the same error. Prior work in the field of communication complexity has computed the one-way communication complexity for many types of queries such as set membership queries (see Appendix A) and equality queries [26]. The theorem also helps agent designers understand the fundamental limitations of context compaction. For example, consider an agent that scans a repository and records the set of third-party dependencies it uses. Assume the agent must answer the following query. 
+
+> > Do any of these dependencies appear in this list of packages with known Common Vulnerabilities and Exposures (CVEs)?
+
+This is a set disjointness query, where S is the set of dependencies and T is the set of packages with known CVEs, and the user is asking whether S ∩ T = ∅. Set disjointness is a canonical hard problem in communication complexity [37]. Suppose each package is identified by an m-bit string, so there are |U | = 2 m possible packages, and let N = |S| be the number of dependencies. Note that this set disjointness query contains set membership as a special case. For a single package T = {x},answering S ∩ T = ∅ is the same as answering x ∈ S. Since the compacted context is fixed before the query arrives, the LLM must be able to answer this membership query for any package x ∈ U .Therefore, to answer every such query correctly, the compacted context must determine S exactly. Representing an N -element subset of U requires log 2
+
+ |U |
+
+> N
+
+ ≥ N log 2(|U |/N ) bits [14]. The number of dependencies is far smaller than the number of possible packages, so this is Ω( N m ) bits. By Theorem 1, every strategy for the Context Generation Game that answers this query correctly on all inputs must use a context compaction budget of Ω( N m ) bits. This is no better than storing the dependencies uncompressed, which may be infeasible for large repositories. One might hope to sidestep this by answering the query with approximate membership queries, e.g., using a Bloom filter. We could query each of the packages in T for membership in S and report an intersection if any query succeeds. This approach does not help significantly. A Bloom filter over the N recorded dependencies with false positive rate ϵ uses about 1.44 N log 2(1 /ϵ ) bits. When 
+
+S and T are disjoint, every package in T is a true non-member, so the query reports a spurious intersection unless all |T | membership queries answer in the negative. For an idealized Bloom filter, false positives on distinct items occur independently. All membership queries are therefore negative with probability (1 − ϵ)|T |, and the set disjointness query errs with probability 1 − (1 − ϵ)|T |. Keeping this error below a target δ requires (1 − ϵ)|T | ≥ 1 − δ, and since (1 − ϵ)|T | ≤ e−ϵ|T |, this forces 
+
+ϵ |T | ≤ ln 11−δ = O(δ). Hence ϵ = O(δ/ |T |), and the filter must use Ω( N log 2(|T |/δ )) bits. Since the query may name any package, |T | can be as large as |U | = 2 m, so this is again Ω( N m ) bits, the same as storing the dependencies outright. This holds even when the target error δ is a constant. This 13 example illustrates how Theorem 1 can inform the design and limitations of context compaction in practice. Our work also raises open problems. We state four of them below. 
+
+Adaptive adversaries. Theorem 1 covers the stochastic and oblivious query regimes of Definition 2. An adaptive adversary observes the condenser’s output before choosing its query. Theorem 1 does not apply in this regime. We leave finding a communication model whose complexity equals the minimum context compaction budget under an adaptive adversary as an open problem. 
+
+Separating selection from generation. A set of queries admits a gap between SELECT and GEN 
+
+when the minimum SELECT budget at a given error exceeds the minimum GEN budget at the same error. Corollary 2 shows that any such gap is a gap between subset-encoding protocols and unrestricted one-way protocols. Theorem 3 exhibits one such gap, of size Θ(log n). Characterizing which sets of queries admit a gap, and how large the gap can grow in general, remains open. Such a characterization would tell agent designers when generation-based context compaction can outperform selection-based context compaction. 
+
+Repeated context compaction. Our model captures a single invocation of context compaction. Agents do context compaction many times over a long session. In deployed agents, the compacted summary typically replaces the conversation history that the agent loop uses, so a later context com-paction acts on a state that contains the summaries produced by earlier context compactions. Codex warns its users that repeated context compaction degrades quality, as we discussed in Section 2.4. We leave extending our model to a sequence of context compactions as an open problem. The goal is to characterize how the error on a fixed set of queries grows with the number of context compactions. 
+
+Computationally efficient context compaction. Our bounds are information-theoretic, as we discussed in Section 4.3. A budget that is attainable in principle may not be attainable by a realistic context compaction algorithm such as an LLM-based summarizer. Determining which optimal budgets remain attainable when the condenser and the interpreter must run in polynomial time, or when the interpreter is an LLM call, is an open problem. A concrete first question is whether an LLM can reliably simulate the decoding procedure of a sketch [15] placed in its context, as we discuss in Appendix A. 
+
+# Generative AI Disclosure 
+
+The vast majority of the content of this paper is human written. Generative AI was used as an assistant for the following three purposes. The first purpose was to help the authors review and make targeted corrections to the text that improve grammar, spelling, mathematical notation, correctness of the proofs, L ATEX code, and clarity. The second purpose was to help the authors write the code for the empirical case study in Appendix A, which was then reviewed and corrected by the authors. The final purpose was to help the authors search for related work, which was then read and verified by the authors. Note that all of the content of this paper has been human reviewed and verified for correctness prior to being declared ready for the purposes of a preprint. The following LLMs were used for the above discussed purposes: Anthropic’s Claude Opus 4.8 and Claude Fable 5, DeepSeek’s DeepSeek R1, and Google’s Gemma 4 31B Thinking. 
+
+# References 
+
+[1] Ghada Almashaqbeh, Allison Bishop, and Hayder Tirmazi. Adversary resilient learned bloom filters. In International Conference on the Theory and Application of Cryptology and Information Security , pages 171–202. Springer, 2025. [2] Amazon Web Services. Aws bedrock. https://aws.amazon.com/bedrock/ , 2026. Ac-cessed: 2026-06-23. [3] Anthropic. Claude Code. https://code.claude.com/docs , 2025. Accessed: 2026-04-13. [4] Anthropic. Automatic context compaction. https://platform.claude.com/cookbook/ tool-use-automatic-context-compaction , 2025. Accessed: 2026-04-13. 14 [5] Anthropic. How we built our multi-agent research system. https://www.anthropic.com/ engineering/multi-agent-research-system , 2025. Accessed: 2026-04-13. [6] Anthropic. Pricing. https://platform.claude.com/docs/en/about-claude/pricing ,2026. Accessed 2026-07-20. [7] Anthropic. Prompt caching. https://platform.claude.com/docs/en/ build-with-claude/prompt-caching , 2026. Accessed 2026-07-20. [8] Anthropic. Compaction. https://platform.claude.com/docs/en/ build-with-claude/compaction , 2026. [9] Anysphere. Cursor: The AI code editor. https://cursor.com , 2024. Accessed: 2026-04-13. [10] Artificial Analysis. Claude fable 5: Intelligence, performance and price analysis. https: //artificialanalysis.ai/models/claude-fable-5 , 2026. Accessed 2026-07-20. [11] Block. Goose: An open-source, extensible ai agent. https://github.com/aaif-goose/ goose , 2025. Accessed: 2026-04-25. [12] Burton H Bloom. Space/time trade-offs in hash coding with allowable errors. Communications of the ACM , 13(7):422–426, 1970. [13] Andrei Broder and Michael Mitzenmacher. Network applications of Bloom filters: A survey. 
+
+Internet Mathematics , 1(4):485–509, 2004. [14] Larry Carter, Robert Floyd, John Gill, George Markowsky, and Mark Wegman. Exact and approximate membership testers. In Proceedings of the Tenth Annual ACM Symposium on Theory of Computing (STOC) , pages 59–65, 1978. [15] Graham Cormode and S. Muthukrishnan. An improved data stream summary: the count-min sketch and its applications. Journal of Algorithms , 55(1):58–75, 2005. [16] Zhenwei Dai and Anshumali Shrivastava. Adaptive learned bloom filter (ada-bf): Efficient utilization of the classifier with application to real-time information filtering on the web. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2020. [17] Dave Bergmann. React agent. https://www.ibm.com/think/topics/react-agent , 2026. [18] Paul Gauthier. Aider: AI pair programming in your terminal. https://aider.chat/docs/ repomap.html , 2026. Accessed: 2026-04-26. [19] Google. Gemini CLI. https://github.com/google-gemini/gemini-cli , 2025. Ac-cessed: 2026-04-13. [20] Anxin Guo and Jingwei Li. Hallucination is a consequence of space-optimality: A rate-distortion theorem for membership testing. arXiv preprint arXiv:2602.00906 , 2026. [21] Lea Hergert, Gábor Berend, Mario Szegedy, György Turán, and Márk Jelasity. On the brittleness of LLMs: A journey around set membership. arXiv preprint arXiv:2511.12728 , 2025. [22] Huiqiang Jiang, Qianhui Wu, Chin-Yew Lin, Yuqing Yang, and Lili Qiu. LLMLingua: Com-pressing prompts for accelerated inference of large language models. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing , 2023. [23] Huiqiang Jiang, Qianhui Wu, et al. LLMLingua-2: Data distillation for efficient and faithful task-agnostic prompt compression. In Findings of the Association for Computational Linguistics: ACL 2024 , pages 963–981, 2024. [24] Minki Kang, Wei-Ning Chen, Dongge Han, Huseyin A Inan, Lukas Wutschitz, Yanzhi Chen, Robert Sim, and Saravan Rajmohan. Acon: Optimizing context compression for long-horizon llm agents. arXiv preprint arXiv:2510.00615 , 2025. [25] Tim Kraska, Alex Beutel, Ed H Chi, Jeffrey Dean, and Neoklis Polyzotis. The case for learned index structures. In Proceedings of the 2018 International Conference on Management of Data ,pages 489–504, 2018. 15 [26] Eyal Kushilevitz and Noam Nisan. Communication Complexity . Cambridge University Press, 1997. [27] LangChain. Trim messages. https://reference.langchain.com/python/ langchain-core/messages/utils/trim_messages , 2024. Accessed: 2026-04-26. [28] LangChain. Langgraph. https://www.langchain.com/langgraph , 2026. [29] Yucheng Li, Bo Dong, Frank Guerin, and Chenghua Lin. Compressing context to enhance inference efficiency of large language models. In Conference on Empirical Methods in Natural Language Processing (EMNLP) , 2023. [30] Zeju Li, Yizhou Zhou, and Qiang Xu. Latent context compilation: Distilling long context into compact portable memory. arXiv preprint arXiv:2602.21221 , 2026. [31] Nelson F Liu, Kevin Lin, John Hewitt, Ashwin Paranjape, Michele Bevilacqua, Fabio Petroni, and Percy Liang. Lost in the middle: How language models use long contexts. Transactions of the Association for Computational Linguistics , 12:157–173, 2024. [32] Michael Mitzenmacher. A model for learned Bloom filters and optimizing by sandwiching. In 
+
+Advances in Neural Information Processing Systems , volume 31, 2018. [33] OpenAI. Assistants API: Truncation strategy. https://developers.openai.com/api/ docs/assistants/deep-dive , 2024. Accessed: 2026-04-26. [34] OpenAI. Codex CLI: Lightweight coding agent that runs in your terminal. https://github. com/openai/codex , 2025. Accessed: 2026-04-25. [35] Rasmus Pagh, Gil Segev, and Udi Wieder. How to approximate a set without knowing its size in advance. In Proceedings of the 54th Annual IEEE Symposium on Foundations of Computer Science (FOCS) , pages 80–89, 2013. [36] Jack W Rae, Sergey Bartunov, and Timothy P Lillicrap. Meta-learning neural bloom filters. In 
+
+Proceedings of the 36th International Conference on Machine Learning (ICML) , 2019. [37] Tim Roughgarden. Communication complexity (for algorithm designers). Foundations and Trends in Theoretical Computer Science , 11(3-4):217–404, 2016. [38] Atsuki Sato and Yusuke Matsui. Fast partitioned learned bloom filter. In International Confer-ence on Neural Information Processing Systems (NeurIPS) , 2023. [39] Samuel Schmidgall, Yusheng Su, Ze Wang, Ximeng Sun, Jialian Wu, Xiaodong Yu, Jiang Liu, Michael Moor, Zicheng Liu, and Emad Barsoum. Agent laboratory: Using llm agents as research assistants. Findings of the Association for Computational Linguistics: EMNLP 2025 ,pages 5977–6043, 2025. [40] Rana Shahout, Hayder Tirmazi, Minlan Yu, and Michael Mitzenmacher. Orla: A library for serving llm-based multi-agent systems, 2026. URL https://arxiv.org/abs/2603.13605 .[41] Manu Siddhartha. Malicious URLs dataset. https://www.kaggle.com/datasets/ sid321axn/malicious-urls-dataset , 2021. [42] SST. OpenCode: The open source ai coding agent. https://github.com/sst/opencode ,2026. Accessed: 2026-04-25. [43] Stripe. Minions: Stripe’s one-shot, end-to-end coding agents. https://stripe.dev/blog/ minions-stripes-one-shot-end-to-end-coding-agents , 2026. Accessed: 2026-04-13. [44] Kapil Vaidya, Eric Knorr, Michael Mitzenmacher, and Tim Kraska. Partitioned learned bloom filters. In International Conference on Learning Representations , 2021. [45] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks. In International Conference on Learning Representations (ICLR) , 2024. 16 [46] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. React: Synergizing reasoning and acting in language models. In International Conference on Learning Representations (ICLR) , 2023. [47] Alex L Zhang, Tim Kraska, and Omar Khattab. Recursive language models. arXiv preprint arXiv:2512.24601 , 2025. [48] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. H2O: Heavy-hitter oracle for efficient generative inference of large language models. In Advances in Neural Information Processing Systems (NeurIPS) , 2023. [49] Dawei Zhu, Rui Meng, Yale Song, Xiyu Wei, Sujian Li, Tomas Pfister, and Jinsung Yoon. Pa-perbanana: Automating academic illustration for ai scientists. arXiv preprint arXiv:2601.23265 ,2026. 
+
+# A Context Compaction in the Wild 
+
+We test how close a deployed context compaction endpoint comes to the optimal context compaction budget for set membership queries. A membership query asks whether an item appears in the set of items an agent has recorded. For example, a user may ask an agent whether a codebase references a deprecated API. Set membership is a natural benchmark because its optimal context compaction budget is known. For an arbitrary set of N items, any approximate membership tester with no false negatives and false positive rate at most ϵ requires at least N log 2(1 /ϵ ) bits in the worst case [14, 35]. A Bloom filter [12] attains this bound within a factor of log 2 e ≈ 1.44 [13]. We use the context compaction endpoint of Anthropic’s Claude API [8] with Opus 4.8 as the LLM. Following prior empirical work on set membership [16, 38, 44], we use the Malicious URLs dataset [41] as the recorded set for our case study. URLs share structure such as common domains and path patterns. A context compaction algorithm can exploit this structure to represent the set in fewer bits. The dataset is therefore a favorable case for the endpoint compared to a set of uniformly random strings. Learned Bloom filters [32] exploit the same structure and perform well on this dataset [1, 44]. We uniformly sample 15 ,000 URLs from the dataset. Anthropic’s context compaction endpoint runs only once the conversation grows past a token threshold. We set this threshold to 50 ,000 tokens. Our 
+
+15 ,000 URLs take up about 500 ,000 tokens and therefore trigger context compaction. We record the URLs in the LLM’s context and do context compaction on them using the prompts reproduced below. The context compaction prompt states that the result will only be used for membership queries. The endpoint therefore knows its workload in advance. This is analogous to how a Bloom filter is built for a known workload. After context compaction, we ask 200 membership queries. Half of the queries are on items sampled uniformly at random from the recorded set. These queries probe false negatives. The other half are on items sampled uniformly at random from the dataset URLs that were not recorded. These queries probe false positives. We send each query in a separate request that contains only the compacted context. The LLM answers each query with a structured JSON output of yes or no. We repeat the experiment on 3 random seeds that control the choice of the set and the queries. The context compaction budget of a run is the size in bits of the natural language summary the endpoint returns. Anthropic provides this summary unencrypted. Our code is available at github.com/jadidbourbaki/context-compaction-experiments.       
+
+> Prompt for the Context Compaction Endpoint User: You have recorded a set of strings. List every string in the set, one per line. Assistant: [the 15,000 URLs, one per line] User: The set is complete. Later in this conversation you will be asked whether a given string was or was not in the set. Reply with OK.
+
+17 0 2 4 6 8 10 12 14 16 
+
+Compaction Budget (Kbits) 
+
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Error Rate
+> Worse Than Random Guess Better Than Bloom Filter
+> Bloom Filter Lower Bound Random Guess Opus 4.8
+
+Figure 2: Membership error rate against the context compaction budget for Anthropic’s context compaction endpoint using Opus 4.8 on the Malicious URLs dataset. The budget B is the size in bits of the natural-language summary the endpoint returns, namely its character count times eight. The solid curve is the error rate of a Bloom filter that uses the same number of bits, 12 e−(ln 2) 2B/N . The dashed green curve is the information-theoretic lower bound 12 2−B/N for approximate membership queries. The dotted red line is the error rate of a random guess, and N = 15 ,000 is the number of entries in the original set. 
+
+Compaction Prompt You are compacting this conversation. Afterward the original messages are discarded, and you must answer set membership queries using only your compacted summary: for a given string, whether it was among the strings listed above. Compact the conversation so as to minimize the number of membership queries you answer incorrectly. Use whatever representation best achieves this. Membership Query Prompt Earlier in this conversation you listed a set of strings. Was the following string in the set? String: [the queried URL] 
+
+Opus 4.8 does context compaction on the 15 ,000 URLs, producing a summary of about 14 kilobits. It answers the membership queries with error rates 0.505 , 0.535 , and 0.555 across the three seeds. The error rate counts both false positives and false negatives. This ensures that a context compaction algorithm that forgets every item and always answers no has an error rate of 0.5. Every run lands on the random guess line in Figure 2. A Bloom filter of the same size errs on about a third of the queries. Half of our queries are non-members. The error rate of a Bloom filter with budget B is therefore  
+
+> 12
+
+e−(ln 2) 2B/N . The information-theoretic lower bound is 12 2−B/N [14, 35]. Table 2 breaks each run into false positive and false negative rates. The total error rate stays close to that of a random guess across the seeds. The split between false positive and false negative errors varies from seed to seed. This behavior is consistent with a context compaction algorithm that retains no membership information. As a control, we keep all 15 ,000 URLs in the context with no context compaction and ask the same queries. Opus 4.8 then answers with an error rate of only 0.02 . The final row of Table 2 shows the control run. Information lost during context compaction therefore causes the error in the main experiment. The compacted summaries are reproduced verbatim at the end of this appendix. In these summaries, the LLM states that it cannot losslessly store the set. It falls back to a description of the set’s general character. 18 Table 2: Per-run false positive and false negative rates for Opus 4.8 behind the error rates in Figure 2. Under context compaction the total error rate stays close to that of a random guess. The split between false positive and false negative errors varies from seed to seed. The final row shows results for the case where no context compaction is done and the full set is kept in context. Run Budget (Kbits) False Positive Rate False Negative Rate Seed 42 14.3 0.04 0.97 Seed 43 13.6 0.28 0.79 Seed 44 14.8 0.48 0.63 No Context Compaction 7280 0.00 0.04 This experiment does not demonstrate that context compaction algorithms for set membership query workloads necessarily perform significantly worse than a Bloom filter in real-world use cases. This experiment merely captures a snapshot of one deployed endpoint, i.e., Anthropic’s server-side context compaction endpoint with Claude Opus 4.8, on one workload, namely set membership on the Malicious URLs dataset, at the time of writing. We note that 1) other context compaction endpoints, 2) future versions of Anthropic’s context compaction endpoint, and 3) Anthropic’s context compaction endpoint tested with either a different LLM or a different prompt, may perform differently. The goal of our experiment is to demonstrate how Theorem 1 enables such a measurement of context compaction algorithms in the first place. The theorem gives the optimal context compaction budget for set membership queries. This lets us state precisely how far a given context compaction algorithm is from the optimum. In our experiment, we find that the endpoint retains essentially no membership information. This holds even though the endpoint is told in advance that its workload will be set membership queries and is provided a set that compresses well. The experiment also raises open questions. We can repeat the same measurement on future endpoints to track whether the gap closes. Closing the gap may require context compaction that produces sketch-like representations. One path is a tool that maintains a sketch outside the LLM’s context. Another path is placing a sketch’s raw state in the context together with decoding instructions. Whether an LLM can execute such decoding reliably is an open question. How deployed context compaction fares on other types of queries, such as the equality and set disjointness queries discussed in Section 5, is also an open question. 
+
+> Opus 4.8 context compaction output, seed 42 (14.3 Kbits, error 0.505) OK I need to be honest about a fundamental limitation: the set contained on the order of 10,000+ URLs/strings. It is impossible to losslessly compress that into a summary that fits in a reasonable space. Any lossy summary will produce errors on membership queries. Let me record what's most useful. **Summary of the set:** The set was a very large collection (~10,000+ entries) of URLs, domain names, and web addresses, apparently scraped/aggregated. Characteristics: - Mix of legitimate sites (wikipedia.org, youtube.com, amazon.com, facebook.com , linkedin.com, imdb.com, espn.go.com, twitter.com, mylife.com, manta.com, etc .) and many phishing/malware URLs (fake paypal, battle.net, bank login pages, IP-address-based malware droppers like http://X.X.X.X/Mozi.m, /SBIDIOT/, /bins /, etc.). - Heavy presence of: paypal phishing variants, runescape/battle.net phishing, Mozi botnet IPs, foreign-language CMS URLs (Joomla com_content patterns), genealogy sites (rootsweb, familytreemaker), sports stats sites, obituary/ legacy.com pages, local business directories. - Many entries about Montreal/Quebec, Canadian topics, hockey, French-Canadian names. - Many URL-encoded (%XX) and percent-escaped strings, some with backslash-escaped special chars.
+
+19 **For membership queries, my honest strategy given I cannot store all entries :** Since I cannot reliably reconstruct exact membership, I will have to guess based on whether a string "looks like" it belongs to this kind of aggregated set. Given the set is enormous and diverse, a query string drawn from typical web URLs has a meaningful chance of being present, but I cannot verify exact matches. I acknowledge I will answer many membership queries incorrectly because lossless retention was not feasible within the context compaction constraints. Opus 4.8 context compaction output, seed 43 (13.6 Kbits, error 0.535) OK. I've recorded the set, but I must be honest about a critical limitation: the set contained on the order of 8,000+ unique URL/domain strings, far too many to store verbatim or even hash-compress within any summary I can write here. Any lossy summary I produce will cause many membership errors. Given this constraint, here is my best-effort compacted representation capturing the dominant characteristics of the set, which I'll use to make educated membership judgments: **Character of the set:** A large collection of raw URLs, domains, and web addresses -- heavily skewed toward: - Phishing/scam URLs (PayPal, eBay, banking impersonation, Apple ID, battle.net , runescape spoofs, with long obfuscated paths, base64 tokens, hex strings) - Mainstream sites: wikipedia.org, youtube.com, facebook.com, imdb.com, amazon. com, linkedin.com, myspace.com, twitter.com, flickr.com - Many Canadian/Quebec topics (Montreal, hockey, CFL, French-Canadian names) - Sports references (baseball, hockey, NFL, soccer), music/band pages, genealogy sites - Malware payload URLs (raw IPs with paths like /bins/, /SBIDIOT/, .exe, .arm7, Mozi.m) - Many obscure small business/personal/foreign-language domains - Mix of http://, https://, and bare-domain entries **My answering strategy:** For queries, I'll judge plausibility based on whether a string matches these patterns. I will lean toward "not in set" for clean, generic, well-known URLs that don't appear distinctive, and toward "in set" for strings matching the phishing/malware/obscure-domain/Canadian-topic patterns -- while acknowledging I cannot reliably distinguish specific members. I acknowledge my accuracy on specific membership queries will be limited. Opus 4.8 context compaction output, seed 44 (14.8 Kbits, error 0.555) OK. I need to be honest about a fundamental limitation: the set contained tens of thousands of URLs, and I cannot losslessly compress them into a summary that fits in my context. No compact representation can perfectly recall membership of such a large, arbitrary set. Here is my best compacted summary to maximize correct answers: ## Compacted Summary 
+
+20 The set was a very large collection (roughly 10,000+ entries) of URLs and domain strings. Key characteristics observed: **Dominant patterns (likely IN set):** - Phishing/scam URLs mimicking: PayPal, Battle.net/Blizzard, Apple/iCloud, Bank of America, Wells Fargo, Chase, Bradesco, Santander, Itau, Correios, DHL - Long obfuscated URLs with hex strings, base64 fragments, random subdomains - IP-address-based malware URLs ending in: .arm, .arm5, .arm6, .arm7, .m68k, . mips, .mipsl, .ppc, .sh4, .spc, .x86, .i686, .i586 (Mozi, SBIDIOT, beastmode, Hilix botnet binaries) - Mainstream sites: youtube.com/watch, facebook.com/pages, en.wikipedia.org/ wiki, imdb.com, amazon.com, linkedin.com, manta.com, mylife.com, pipl.com, freebase.com, rottentomatoes.com, spoke.com, 123people - Genealogy: rootsweb.ancestry.com, familytreemaker, freepages.genealogy - Montreal/Quebec/Canada themed content (hockey, Canadiens, Expos) - Heavy long-tail of obscure business/personal/regional sites - mitsui-jyuku.mixh.jp/uploads/*.exe, apbfiber.com/openme/*.exe, toulousa.com/ omg/*.exe (malware) **Strategy:** Given I cannot distinguish reliably, when asked about a specific string, I will lean toward "IN the set" for strings matching the above patterns (especially phishing URLs, botnet binaries, mainstream content URLs, and obscure long-tail web pages), and lean "NOT in set" for clean, simple, well-known canonical URLs that look too generic. I acknowledge my accuracy on individual queries will be imperfect. 
+
+21
