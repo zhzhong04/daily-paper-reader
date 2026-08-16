@@ -1,0 +1,311 @@
+Title: KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs
+
+URL Source: https://arxiv.org/pdf/2608.07954v1
+
+Published Time: Tue, 11 Aug 2026 00:28:12 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+Uros Stanic, Changcheng Yuan, Sabuj Laskar, and Ariful Azad 
+
+Texas A&M University College Station, TX, USA 
+
+stanic@tamu.edu , ericycc@tamu.edu , sabuj.laskar@tamu.edu , ariful@tamu.edu 
+
+## Abstract 
+
+Large language models can answer knowledge-intensive questions more reliably when they are grounded with knowledge graphs, but systems such as Think-on-Graph and Reasoning-on-Graph repeatedly query the same graph neighborhoods across different questions. In this work, we study this repeated retrieval in Knowl-edge Graph Question Answering (KGQA) workloads and propose KGCache, an in-memory cache for one-hop knowledge graph neighborhoods. KGCache is designed to be compatible with both iterative traversal (ToG) and one shot plan-ning (RoG) KGQA paradigms. KGCache is placed between the KGQA engine and the backend serving the KG, so repeated entity requests can be served from cache instead of issuing new KG queries. We evaluate KGCache on WebQSP and CWQ using LRU, LFU, and a trace-aware Oracle policy. Our analysis shows that both datasets contain substantial entity reuse among starting entities and entities reached during traversal. We also explore semantic caching for similar queries, which shows additional hit-rate gains on WebQSP and needs further ac-curacy testing on CWQ. Entity caching accelerates KG retrieval by up to 1.91 ×,while semantic-context caching achieves up to 1.06 × full-system speedup in the evaluated WebQSP configurations, with each hit being up to 3.73 × faster. 
+
+## 1 Introduction 
+
+Large language models (LLMs) have remarkable capabilities across a broad range of natural language understanding and generation tasks, yet they remain fundamentally constrained by their reliance on static parametric knowledge acquired during pretraining [1]. This limitation manifests most acutely in knowledge-intensive question answering, where models are prone to hallucination, generating fluent but factually incorrect responses, particularly when questions require up-to-date or multi-hop reasoning over structured knowledge [2]. Knowledge graphs (KGs) offer an elegant solution to this challenge. By encoding facts as structured (subject, relation, object) triples over large entity sets, KGs provide a verifiable, traversable, and updatable external memory that can ground LLM reasoning in factual evidence [2]. Recent work combines LLMs with KGs through Knowledge Graph Question Answering (KGQA) [3]. In this setting, an LLM-guided system retrieves KG evidence and uses it to answer a question. Think-on-Graph (ToG) [3] performs this process iteratively, leveraging the LLM at each hop to choose relations and entities that expand the search frontier. ToG and its successors show that such KG retrieval can improve answer grounding on standard benchmarks [4, 5]. This design, however, invokes the LLM and queries the KG several times per question. Reasoning-on-Graph (RoG) instead generates a relation-path plan before KG execution, reducing planning-stage LLM invocations while maintaining competitive answer quality [6]. RoG still executes structured KG queries, and different questions can revisit the same graph regions. A source of avoidable work in this pipeline is redundant subgraph retrieval . KGQA benchmark workloads can repeatedly access the same entities, such as people, countries, and institutions. For ex-ample, 75.9% and 44.7% of entities recur across CWQ [7] and WebQSP [8] benchmarks, respectively, indicating that accesses are highly concentrated among a small subset of entities. Redundant lookups 
+
+Preprint. Preliminary work. arXiv:2608.07954v1 [cs.AI] 8 Aug 2026 KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+in the backend KG store incur significant overhead, as each neighborhood query involves structured query execution ( e.g., SPARQL), data transfer, and result serialization [2]. Prior GraphRAG research has emphasized retrieval quality , including subgraph selection, relation selection, and evidence con-struction [9, 10], but cross-query amortization of KG access has received comparatively less attention. The opportunity is most direct in ToG-style workloads because they issue multiple neighborhood requests per question, although RoG path execution can also revisit entities across questions. We present KGCache , an entity-level caching layer for KG-augmented LLM reasoning that amor-tizes repeated subgraph retrieval. KGCache is placed between the reasoning engine and the KG backend and maps entity identifiers to one-hop neighborhoods. For a fixed KG snapshot, a repeated request can be served from memory without querying the backend. This entity-level caching acceler-ates KG lookups but leaves the LLM call sequence unchanged, since each traversal step still invokes the reasoning engine. To also reduce LLM calls, we develop a complementary semantic-context cache that operates one level above entity caching. When an incoming query is sufficiently similar to a previously seen query, measured by embedding similarity, the semantic cache returns the associated KG context directly, skipping both backend invocation and the KG traversal steps. We evaluate several cache management policies, including Least Recently Used (LRU), Least Frequently Used (LFU), and a trace-aware Oracle. We integrate this caching system with multiple KG backends and LLM frontends and show that it substantially reduces both KG traversals and LLM calls across two KGQA benchmarks. In particular, entity-level caching reduces backend queries by up to 38% , yielding a 1.9× speedup in KG retrieval steps. The main contributions of this paper are as follows: • Workload Characterization: We quantified the entity and semantic reuse rates in KGQA workloads, motivating caching as a first-class optimization for KG-augmented LLM systems. • KGCache Design: We developed a comprehensive KG caching framework that supports iterative ToG [3] and one-shot RoG-style execution [6]. KGCache works seamlessly with multiple KG backends and any frontend LLM. • Evaluation: We evaluated KGCache with three caching policies, two LLMS, two KG backends, and two KGQA benchmarks, and show that KGCache achieves up to 1.9× speedup in KG retrieval steps. 
+
+## 2 Background and Motivation 
+
+2.1 KGQA Task and Execution Paradigms 
+
+A knowledge graph is G = ( E, R, T ), where T ⊆ E × R × E is a set of (subject, relation, object) triples over entity set E and relation set R. Given a question q with topic entities Eq ⊂ E , a KGQA system retrieves a context Cq , a verbalized subset of T relevant to q, and generates an answer 
+
+aq = LLM( q, C q ). Retrieving Cq requires one or more accesses to the KG backend. While there are several approaches for KGQA systems, we study two popular paradigms. RoG is a planning-retrieval-reasoning framework [6]. The LLM first generates a relation-path plan Pq
+
+grounded in R, without accessing the KG. The plan is then executed against the KG in a single pass to retrieve Cq , and the LLM reasons over Cq to produce the answer. ToG instead retrieves Cq
+
+iteratively [3]. Starting from a frontier F0 ⊂ E , at each hop t the system queries the backend for the neighborhoods of Ft−1, and the LLM prunes the result to a smaller frontier Ft. This repeats up to a fixed depth, and Cq is formed from the triples visited along the way. Because each pruning step is explicit, ToG offers knowledge traceability and correctability that one-shot planning does not. Both paradigms access KG by requesting the one-hop neighborhood of an entity, issued repeatedly across hops (ToG) or path executions (RoG). If the same entity is requested more than once, or if different questions retrieve overlapping context, this access is redundant and can potentially be served from a cache instead of the backend. This offers two optimization opportunities: • Entity Reuse: How often do entity-level KG requests repeat, within and across questions? • Semantic Reuse: Do semantically similar queries retrieve overlapping KG contexts? 
+
+> 2
+
+KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs WebQSP CWQ 0% 20% 40% 60% 80% 100%           
+
+> Entity mentions (%)
+> 55.3% 44.7% 24.1% 75.9%
+> Initial Query
+> WebQSP CWQ
+> 38.0% 62.0% 33.0% 67.0%
+> Iterative Traversal
+> Top-10 Top-50 Top-100 0% 10% 20% 30% 40% 50%
+> Coverage (%)
+> 7.2 20.3 28.7 9.5 19.1 25.7
+> Initial Query
+> Top-10 Top-50 Top-100
+> 5.4 17.7 28.6 11.6 30.4 43.8
+> Iterative Traversal
+> (a) Entity composition (b) Top-k coverage
+> Unique Reused WebQSP CWQ
+
+Figure 1: Entity reuse and frequent-entity coverage in KGQA workloads: (a) Unique vs. reused entities in initial/iterative ToG traversal. (b) Coverage of top-K most accessed entities. 
+
+2.2 Evidence for Entity-Level Reuse 
+
+Figure 1a characterizes entity reuse at two levels: initial query entities and traversal-level entities. We label an occurrence as reused when its entity identifier appears more than once in the corresponding analyzed trace. This aggregate metric does not distinguish within-question from cross-question recurrence. All other occurrences are labeled unique . The first plot considers only the initial entities extracted from each question. In WebQSP, 44 .7% of initial-entity occurrences correspond to reused entities, while in CWQ this fraction is 75 .9% . The second plot extends the analysis to all entities reached during iterative ToG traversal. For WebQSP, reused entities account for 62 .0% of traversal-level entity occurrences, while for CWQ they account for 67 .0% . These results show that reuse remains strong both for the initial entities explicitly mentioned in the question and for the entities explored along the reasoning path. Such reuse creates a natural opportunity for caching, since the one-hop neighborhoods retrieved for these entities are likely to be requested again. Figure 1b further examines whether entity reuse is concentrated among a small set of frequently accessed entities. The first plot considers only the initial entities extracted from each question. For WebQSP, the top-10, top-50, and top-100 initial entities cover 7.2% , 20 .3% , and 28 .7% of all starting entity occurrences, respectively. The second plot extends this analysis to all entities reached during iterative ToG traversal. For WebQSP, the top-10, top-50, and top-100 traversal entities cover 5.4% ,
+
+17 .7% , and 28 .6% of all iterative entity occurrences, respectively. CWQ also shows similar trends. These results show that entity access is skewed toward a relatively small set of entities rather than being uniformly distributed across the workload. 
+
+2.3 Evidence for Semantic-Level Reuse 
+
+In this section, we analyze queries judged similar by their embedding score to determine whether they can reuse KG context and how closely the reused and normally retrieved contexts overlap at the entity level. Embedding similarity is only a retrieval signal and does not by itself establish that two questions have identical intent. Unlike the approach of Dominic et al. [11], we cache the KG context provided to the LLM rather than the LLM’s full response. For an incoming query, the cache selects an existing element with the highest cosine similarity. A semantic hit occurs if this score meets the threshold τ ∈ [0 , 1] . Semantic caching can increase hit rates by allowing similar, rather than only identical, queries to reuse cached contexts, but it adds embedding metadata and similarity-search overhead. Lowering τ admits more hits but increases the risk that the reused context differs from the context produced by normal retrieval. For each semantic hit, we compare the entity identifiers in the cached context with those in the normal context for the incoming query and average the resulting overlap score over hits. Figure 2a shows the average overlap for each cache size and threshold. For WebQSP, overlap below 
+
+100% first appears at τ = 0 .90 among configurations with hits, whereas CWQ exhibits incomplete overlap at every evaluated threshold. Figure 2b shows the percentage-point gain compared to exact matches for the same cache size. At τ = 0 .90 , WebQSP’s gain is 4% on a 500-entry cache. However, this does not establish that τ = 0 .90 is F1-neutral. Because CWQ exhibits incomplete overlap at every evaluated threshold with semantic hits, it requires separate F1 validation. 
+
+3KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 10 100 200 500 025 50 75 100                    
+
+> Average Entity Overlap (%)  WebQSP
+> 10 100 200 500
+> CWQ
+> 0.99 0.95 0.90 0.85 0.80 02468
+> Hit-rate Gain (%)
+> WebQSP
+> 0.99 0.95 0.90 0.85 0.80
+> CWQ
+> Cache size Similarity threshold
+> (a) Semantic-hit entity overlap (b) Hit-rate improvement
+> Threshold
+> 0.99 0.95 0.90 0.85 0.80
+> Cache size
+> 10 50 100 200 500
+
+Figure 2: Effectiveness of semantic caching in KGQA workloads. (a) Average entity-set overlap for hits; 0% indicates configurations with no semantic hits. (b) Hit-rate gain over exact query matching. 
+
+## 3 Methods 
+
+3.1 Cache Design 
+
+To minimize redundant graph traversals, we position an in-memory cache between the KGQA engine and KG backend. The cache stores one-hop KG neighborhoods at entity granularity under the assumption of a static KG snapshot. We implement the cache as a hash map keyed by entity identifier 
+
+e. Its value N (e) holds the complete, unpruned one-hop neighborhood, including all incoming and outgoing (subject , relation , object ) triples required for traversal. Because N (e) is cached before question-specific LLM pruning, repeated requests for e reuse the same cached graph structure. 
+
+Access Policy & Operations. When the KGQA engine requests N (e), the cache executes the following policy: 1. Lookup & Hit: The system queries the hash map for key e. On a hit, it returns the one-hop neighbors N (e) immediately, bypassing the KG backend. 2. Miss & Insertion: On a miss, the system fetches N (e) from the backend (e.g., a graph database), materializes the neighborhood object, and inserts (e, N (e)) into the hash according to the replacement policy discussed next. 3. Eviction: If the cache exceeds its capacity of C entity entries, an eviction policy selects and removes an entry based on the replacement policy. 
+
+Complexity & Overhead. Let C be the number of cached entities and |N (e)| the number of triples in an entry. Key lookup and insertion take O(1) average time. Returning a cached reference takes 
+
+O(1) time, while copying or serializing a neighborhood requires O(|N (e)|) time. A miss additionally incurs backend query latency. Metadata and keys require O(C) memory, while payload storage consumes O(P 
+
+> e∈cache
+
+|N (e)|) space. In our experiments, the capacity is bounded by the entity count C (counting each neighborhood as one entry) to isolate the dynamics of reuse at the entity-level, although the byte sizes vary with |N (e)|.
+
+3.2 Cache Management Policies 
+
+The following policies determine which entry is evicted when a miss occurs and the cache is full. Figure 3 illustrates the lookup and replacement process. We evaluate three cache-management policies. The first policy is Least Recently Used (LRU), which exploits temporal locality. A standard hash table with a recency list allows a hit to move its entry to the most-recent position and a full-cache miss to evict the least-recent entry in O(1) average time. The second policy is Least Frequently Used (LFU), which exploits frequency locality. LFU maintains an access counter for each cached entity, increments it on a hit, and evicts an entry with the minimum count when a miss requires space. Here, counter updates take O(1) average time, while selecting a victim by a direct scan takes O(C) time. Finally, we evaluate a trace-aware static-frequency reference policy, labeled Oracle in the results for brevity. Given the complete request trace offline, it pre-populates the cache with the C most frequently 
+
+4KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs Cache Design for Knowledge Graph    
+
+> Cache Hit
+> Least Recently Used (LRU)
+> New Request Move to Front
+> Least Frequently Used (LFU)
+> 47536+1 8
+> New Request
+> 475368
+> New Request Evict Pop New Request TRACE Inside Cache ?Hit / Miss Populate Cache
+> Oracle
+> Cache Miss Cache Hit Cache Miss
+
+Figure 3: Overview of KG neighborhood cache policies: LRU uses temporal locality, moving hits to the front and evicting least-recently-used entries. LFU uses frequency locality, incrementing access counts on hits and evicting least-frequently-used entries. Trace-aware static-frequency leverages the full request trace for global popularity but isn’t a theoretical upper bound. requested entities and does not update entries during evaluation. This policy assumes global-frequency knowledge and is therefore used for hit-rate comparison rather than the runtime experiments. It is not a theoretical upper bound since LRU can outperform it when reuse is concentrated in short temporal windows (Section 5.3). 
+
+3.3 Semantic Caching Management 
+
+Semantic caching extends the entity-level framework to the query-context level, operating in four steps. 1. Encoding: Each cache entry stores a query embedding together with the verbalized KG con-text constructed for that query. Embeddings are computed with all-MiniLM-L6-v2 and L2-normalized, so cosine similarity reduces to a dot product: sim (di, d j ) = u · v =
+
+> 384
+
+X
+
+> k=1
+
+ukvk (1) 2. Retrieval: For an incoming query, the cache computes its embedding and searches all C
+
+stored embeddings of dimension d = 384 for the maximum similarity score. This exhaustive comparison costs O(Cd ) time, excluding computation of the query embedding itself. 3. Hit/miss decision: A semantic hit is triggered when the maximum score meets a tunable threshold 
+
+τ ∈ [0 , 1] . On a hit, the cache reuses the associated context, skipping KG traversal and its intermediate context-construction steps. The answer-generation LLM is still invoked for the incoming query. On a miss, the configured KGQA pipeline runs in full. 4. Insertion and eviction: A miss inserts the query embedding and resulting context as a new cache entry. Under the online policies, LRU and LFU operate on these query-context entries as described in Section 3.2. Semantic caching is complementary to entity-neighborhood caching. While entity caching reduces backend work at each reasoning hop, semantic caching reuses a previously constructed context across similar queries. On a semantic miss, entity caching can still reduce KG retrieval during traversal. 
+
+## 4 Implementation 
+
+We integrate the entity-neighborhood cache with ToG and use a RoG-style plan-then-execute baseline in the semantic-cache experiments. Virtuoso [12] and Oxigraph [13] serve as interchangeable KG backends. Before loading Freebase [14], we retain entity-to-entity triples, English textual triples, and typed literal triples while removing non-English textual triples. For each dataset, we then collect the Freebase entity identifiers associated with its questions and retain every triple whose subject or object references one of those identifiers. The result is a dataset-specific collection of incident triples rather than a vertex-induced subgraph or the full Freebase graph. This construction reduces loading and query cost, so the reported KG latency should be interpreted for these evaluation-specific subgraphs. The reported experiments use Gemini 3.1 flash-lite and Claude Haiku 4.5 . A ToG query may trigger multiple calls because each traversed hop can include relation pruning, entity pruning, 
+
+5KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+and an answer-sufficiency check, followed by answer generation. The exact count is path-dependent, but evaluated queries required five to seven calls in our experiments. We use WebQSP and CWQ because the workload characterization in Section 2 shows different reuse concentration across their initial and traversal-level entity accesses. We evaluate LRU, LFU, and the trace-aware static-frequency reference labeled Oracle. For the exact entity-cache hit-rate experiments, we vary cache capacity and report both the original question order and a randomized order for each policy. Separate runtime experiments execute the configured pipeline with and without caching, while the semantic answer-quality experiment uses the full WebQSP test set as described in Section 5.5. 
+
+## 5 Results 
+
+5.1 Experimental Setup Datasets We use the dataset-specific Freebase collections described in Section 4. Entity-cache hit-rate and runtime experiments use WebQSP and CWQ, while engine quality and semantic-cache answer quality are evaluated on the WebQSP test set. 
+
+LLMs The LLMs used for these experiments are Gemini 3.1 flash-lite and Claude Haiku 4.5 , accessed through a university-provided API platform. The LLMs are instructed to answer only from information obtained from the KG and not to fall back on parametric knowledge. Otherwise, a model could mask degradation in cached KG context by answering from parametric knowledge. External grounding is disabled for the same reason. 
+
+Performance Metrics The primary performance metric for entity caching is KG retrieval speedup, defined as no-cache KG time divided by cached KG time. We also report cache hit rate and KGQA answer quality. For semantic-context caching, which can skip intermediate LLM calls, we report full-system speedup. KGQA metrics are calculated using the scripts provided by the dataset authors [8]. 
+
+5.2 Accuracy Results 
+
+We first evaluate our Think-on-Graph and Reasoning-on-Graph implementations. Table 1 reports Exact Match, precision, recall, F1, and Hits@1 on WebQSP. The best Exact Match score is 71 .51% 
+
+using ToG and 79 .04% using RoG. We note that our focus is primarily on reducing graph traversal overhead via caching rather than improving the accuracy of KGQA. These results simply establish the answer quality of the evaluated engines. 
+
+Table 1: Engine Evaluation Results. EM: exact match, P: precision, R: recall, F1: F1-score, H@1: Hits@1, vir: Virtuoso, oxi: Oxigraph, gem: Gemini 3.1 flash-lite, hu: Haiku 4.5                                                   
+
+> RoG
+> Config EM PRF1 H@1 hu-oxi 69.41 56.41 49.33 49.52 62.90 hu-vir 69.66 56.55 49.70 49.73 63.08 gem-oxi 78.86 68.70 59.10 59.91 75.59 gem-vir 79.04 69.69 59.48 60.66 76.04
+> ToG
+> Config EM PRF1 H@1 gem-oxi 71.14 60.92 44.76 47.89 62.54 gem-vir 71.51 61.49 46.12 48.84 64.19 hu-oxi 60.77 23.76 33.14 23.30 46.55 hu-vir 60.28 24.80 34.04 24.06 47.22
+
+5.3 Cache Hit Rate 
+
+Figures 4a and 4b show the cache hit rate of ToG on WebQSP and CWQ, respectively. The x-axis shows the cache size, measured as the number of entity neighborhoods that can be stored in the cache. The y-axis shows the cache hit rate, defined as the fraction of KG neighborhood requests served directly from the cache. We evaluate three cache policies: LRU, LFU, and the trace-aware static Oracle. We report results under both sequential access, where questions are processed in their original dataset order, and shuffled access, where the question order is randomized. Figure 4a shows that WebQSP exhibits meaningful reuse even with small cache sizes. Under sequential access, LRU achieves a 16 .6% hit rate with only 10 cached entities and improves to 30 .7% 
+
+with 50 cached entities. Increasing the cache beyond 50 entities provides smaller gains for LRU, which reaches 31 .0% , 32 .9% , and 34 .6% at cache sizes 100, 500, and 1000, respectively. LFU is less 
+
+> 6
+
+KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+effective at small cache sizes, achieving only 7.3% , 10 .4% , and 14 .1% hit rate at cache sizes 10, 50, and 100. This indicates that small-cache performance in WebQSP is driven more by temporal locality than by long-term frequency alone. The Oracle performs poorly at small cache sizes on WebQSP, with only 2.9% hitrate at size 10 and 14 .8% at cache size 100. However, as cache capacity increases, Oracle improves substantially, reaching 37 .4% at 500 and 54 .4% at 1000, showing that globally frequent entities become useful only when the cache is large enough. At small cache sizes, LRU outperforms Oracle because it does not adapt to short-term bursts of reuse. Shuffled-access results follow the same trend as sequential access, showing that reuse in WebQSP is not only an artifact of the original question ordering. Figure 4b shows that CWQ follows the same overall pattern as WebQSP, but with stronger gains at larger cache sizes. Under sequential access, LRU improves from 13 .8% at cache size 10 to 37 .2% 
+
+at cache size 1000, showing that CWQ also contains substantial temporal reuse. LFU starts lower, achieving only 6.9% at cache size 10, but becomes competitive as the cache grows and slightly exceeds LRU at cache size 1000 with a 38 .6% hit rate. The trace-aware static Oracle is also weak at small cache sizes, reaching only 5.6% at cache size 10, but improves sharply to 47 .2% and 62 .3% 
+
+at cache sizes 500 and 1000, respectively. This shows that CWQ contains both short-term temporal locality and strong global frequency skew. LRU captures the former effectively at small cache sizes, while LFU and Oracle benefit more as the cache becomes large enough to retain frequently reused entities. The shuffled-access results closely match the sequential-access results across all policies, suggesting that CWQ cacheability is not an artifact of the original question order. Overall, these results show that both WebQSP and CWQ provide non-trivial opportunities for KG neighborhood caching. LRU is the strongest online policy at small cache sizes because it captures short-term temporal locality. LFU is weaker at small capacities but becomes competitive as the cache grows, especially on CWQ. The trace-aware static Oracle performs poorly at small cache sizes but improves sharply at larger capacities, showing that many repeated accesses are associated with globally frequent entities. The similarity between sequential and shuffled access further suggests that the measured cache benefits are not merely artifacts of dataset ordering. 10 50 100 500 1000 Cache Size 0% 10% 20% 30% 40% 50% 60% 70%             
+
+> Hit Rate (%) Sequential Access
+> 10 50 100 500 1000 Cache Size
+> Shu ffl ed Access
+> 10 50 100 500 1000 Cache Size
+> Sequential Access
+> 10 50 100 500 1000 Cache Size
+> Shu ffl ed Access
+> (a) WebQSP (b) CWQ
+> LRU LFU Oracle
+
+Figure 4: Cache hit rates for sequential and shuffled access orders in KGQA. (a) WebQSP. (b) CWQ. 
+
+5.4 KG Retrieval Impact of Entity Caching 
+
+We evaluate KG one-hop neighborhood caching at cache size 1000 and compare the no-cache baseline with LRU and LFU on WebQSP and CWQ. The reported times are cumulative over 400 inputs from each dataset. Oracle is excluded because it requires the complete request trace in advance. Caching reduces KG retrieval time for both datasets, but the magnitude of the speedup differs even though the cache hit rates are similar. The results are shown in Table 2. On WebQSP, LFU achieves a 
+
+34 .8% hit rate and reduces KG time from 57 .0 s to 42 .3 s , saving 14 .7 s and providing a 1.35 × KG speedup. On CWQ, LFU achieves a comparable hit rate of 38 .6% , but reduces KG time from 57 .6 s 
+
+to 30 .2 s , saving approximately 27 .5 s and providing a larger 1.91 × KG speedup. This gap shows that runtime improvement depends both on cache hit rate and the cost of the avoided KG requests. We note that entity-neighborhood caching accelerates KG lookups but does not change the LLM call sequence. Hence, we report KG-component speedups in this section. Semantic-context caching, 
+
+7KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+Table 2: KG Time and Speedup by Cache Policy (sequential access, cache capacity 1000) 
+
+Dataset Policy Hit Rate No Cache (s) Cached (s) Saved (s) KG Speedup 
+
+WebQSP LRU 34.6% 57.0 42.3 14.7 1.35 ×
+
+LFU 34.8% 57.0 42.3 14.7 1.35 ×
+
+Oracle 54.4% 57.0 27.5 29.6 2.08 ×
+
+CWQ LRU 37.2% 57.6 31.2 26.4 1.85 ×
+
+LFU 38.6% 57.6 30.2 27.5 1.91 ×
+
+Oracle 62.3% 57.6 16.1 41.5 3.57 ×
+
+evaluated next, can reuse a completed context and skip graph traversal and its intermediate LLM calls. We therefore report full-system speedup for semantic caching. 
+
+5.5 Semantic Context Cache Results 
+
+In this section, the results of Semantic Context Cache are analyzed. The results are analyzed on the same cache replacement policies mentioned in the previous section (LRU, LFU, Oracle). Unlike Dominic et al. [11], who cache complete responses on a custom dataset, we cache retrieved KG context and still invoke the answer-generation LLM on the WebQSP dataset. Table 3 reports cold-cache, first-pass hit rates on WebQSP. Exact query matching produces no hits because no question string repeats, whereas the semantic policies reach up to 13 .5% .
+
+Table 3: Cold-cache semantic-context hit rate on WebQSP(%). G/H: Gemini/Haiku; O/V: Oxi-graph/Virtuoso. 
+
+Sys Policy G(O) G(V) H(O) H(V) 
+
+RoG LRU 7.7 7.7 0.0 12.3 LFU 12.6 0.0 7.7 7.7 Oracle 9.9 6.8 9.3 12.2 
+
+Sys Policy G(O) G(V) H(O) H(V) 
+
+ToG LRU 8.2 13.5 8.2 8.2 LFU 8.2 8.2 8.2 8.2 Oracle 7.3 7.3 7.3 7.3 
+
+The KG backends run in local Virtuoso/Oxigraph containers, while the cache is an in-memory dictionary. Figure 5a reports cold-cache full-system and per-hit speedups on WebQSP for eight configurations: each combines a KGQA engine (RoG or ToG), an LLM (Gemini or Haiku), and a KG backend (Virtuoso or Oxigraph). Exact matching remains at 1.00 × because it has no hits, while the semantic policies reach up to 1.06 ×. Each cache hit is up to 3.73 × faster then a miss, but low overall speedup is a sysmptom of low cache hit rate as shown in Table 3. Oracle is an offline reference because it requires the request trace in advance. Because entity overlap is imperfect at 
+
+τ = 0 .90 , we evaluate F1 on the full WebQSP test set using Gemini 3.1 flash-lite. Figure 5b compares cache sizes 128, 512, and an unbounded cache with the no-cache baseline. The F1 scores differ from their respective baselines by at most 1.7 percentage points and show no monotonic trend with cache size. Without repeated trials, we cannot distinguish a cache effect from LLM nondeterminism [15]. These results show no large F1 degradation in this setting, but they do not establish that τ = 0 .90 is generally safe; CWQ remains untested. Sem-LFU Sem-LRU Sem-Oracle   
+
+> Cache Policy
+> 01234
+> Speedup  3.50 3.73 3.46
+> 1.04 1.04 1.04 1.04 1.04 1.04 1.05 1.05 1.04 1.04 1.05 1.04 1.06 1.06 1.05 1.06 1.11 1.05 1.06 1.06 1.05 1.06 1.06 1.05
+> RoG Gemini (Oxi) RoG Gemini (Virt) RoG Haiku (Oxi) RoG Haiku (Virt) ToG Gemini (Oxi) ToG Gemini (Virt) ToG Haiku (Oxi) ToG Haiku (Virt) Per hit Whole workload
+
+(a) Cold-cache speedup of semantic-context caching on WebQSP. ToG RoG    
+
+> System
+> 020 40 60
+> Accuracy (%)
+> 46.4 59.5 45.9 59.7 45.0 57.8 45.3 59.7
+> Cache Size 0128 512 ∞
+
+(b) WebQSP F1 at τ = 0 .90 with Gemini 3.1 flash-lite across cache sizes; size 0 is the no-cache baseline. 
+
+Figure 5: Semantic caching results 
+
+8KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs 
+
+## 6 Related Work 
+
+Iterative Traversal A prominent line of work has an LLM traverse the KG hop by hop, using beam search to control the candidate set. Think-on-Graph (ToG) [3] uses an LLM to score and prune graph traversals until an answer is reached or a depth limit is hit; its LLM calls grow with traversal depth and per-hop relation and entity pruning. Think-on-Graph 2.0 (ToG-2.0) [4] adds a pre-traversal reasoning stage intended to reduce exploration of irrelevant branches. Search-on-Graph (SoG) [16] simplifies the beam formulation to a Search() function for adaptive one-hop expansion, reducing LLM calls while remaining competitive on Freebase and Wikidata benchmarks. Plan-on-Graph 
+
+(PoG) [17] first generates a relation-oriented plan and then uses it to guide iterative beam traversal. Without explicit cross-query caching, these methods process questions independently, so questions sharing topic or intermediate entities may repeatedly retrieve the same neighborhoods. 
+
+One-Shot Planning A second family avoids iterative planning calls by having the LLM generate a relation-path plan before KG execution. Reasoning on Graphs (RoG) [6] fine-tunes an LLM to generate relation paths, retrieves valid paths from the KG, and verbalizes them for a separate reader LLM to produce the final answer. KARPA [18] removes this fine-tuning requirement by using a training-free LLM for global path planning over relation embeddings and matching generated paths to KG structure through embedding similarity rather than exact string matching. One-shot planning reduces planning-stage LLM calls, but KG execution can still revisit entities or relation paths across questions unless results are cached. 
+
+Subgraph Retrieval A third paradigm separates KG access from downstream LLM reasoning: a retriever extracts a subgraph around the question’s topic entities, and the LLM reads its verbalization without further KG access. Subgraph Retrieval Enhanced Model (SR) [19] introduced a trainable dual-encoder retriever decoupled from the downstream reasoner, with weakly supervised pre-training on shortest paths between topic and answer entities. ReasoningLM [20] adapts a PLM to perform GNN-style subgraph reasoning through structural self-attention, tuned on synthesized subgraph– question pairs. SubgraphRAG [21] uses a lightweight parallel MLP triple scorer to produce flexibly sized subgraphs for an unmodified LLM reader. Questions sharing topic entities or relation chains may retrieve overlapping subgraphs. Existing KG-RAG work emphasizes subgraph selection, whereas our work studies application-level reuse of already retrieved entity neighborhoods. 
+
+Semantic and KG-Augmented Caching A complementary line of work caches LLM responses rather than underlying KG retrieval. The KG-Enhanced Semantic Cache embeds queries, reuses responses for sufficiently similar queries, and organizes them using KG structure [11]. KGCache instead primarily caches exact entity neighborhoods at the KG backend boundary; its semantic cache reuses retrieved KG context while retaining per-query answer generation. 
+
+## 7 Conclusion 
+
+In this work, we show that KGQA workloads exhibit substantial and skewed entity reuse during iterative Think-on-Graph traversal. Motivated by this reuse, we implement entity-neighborhood caching with LRU, LFU, and a trace-aware static Oracle policy. We proposed 2 approaches: caching of one-hop neighbourhood, and semantic-context cache. We proved that both work on both iterative and one-shot planning approaches. Our study leaves several opportunities for future work. First, our cache is implemented as an in-memory dictionary and stores one-hop neighborhoods at entity granularity. This design is useful for isolating reuse behavior, but it does not model the full complexity of a production cache. Second, we evaluate only simple online policies, LRU and LFU. More adaptive policies may capture both short-term temporal locality and long-term frequency skew more effectively. Finally, because our KG backend is already fast due to indexed access, KG retrieval accounts for only a small fraction of total runtime. As a result, even large KG-side speedups translate to limited end-to-end gains. Building on these observations, one promising extension is to cache multi-hop neighborhoods rather than only one-hop neighborhoods. However, this introduces a pruning challenge: different questions starting from the same entity may require different paths beyond the first hop, so the cache must preserve reusable structure without materializing irrelevant graph context. Future systems should also consider hybrid KG and text-based RAG pipelines, which are becoming increasingly common. In such settings, caching could span both structured graph neighborhoods and unstructured retrieved passages, enabling broader reuse across LLM-driven external-memory reasoning. 
+
+> 9KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs
+
+## References 
+
+[1] Haochen Liu, Song Wang, and Jundong Li. Knowledge graph retrieval-augmented generation via gnn-guided prompting. In Second Conference on Language Modeling , 2025. 1 [2] Chuangtao Ma, Yongrui Chen, Tianxing Wu, Arijit Khan, and Haofen Wang. Large language models meet knowledge graphs for question answering: Synthesis and opportunities. In 
+
+Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing ,pages 24589–24608, 2025. 1, 2 [3] Jiashuo Sun, Chengjin Xu, Lumingyuan Tang, Saizhuo Wang, Chen Lin, Yeyun Gong, Lionel M Ni, Heung-Yeung Shum, and Jian Guo. Think-on-graph: Deep and responsible reasoning of large language model on knowledge graph. arXiv preprint arXiv:2307.07697 , 2023. 1, 2, 9 [4] Shengjie Ma, Chengjin Xu, Xuhui Jiang, Muzhi Li, Huaren Qu, Cehao Yang, Jiaxin Mao, and Jian Guo. Think-on-graph 2.0: Deep and faithful large language model reasoning with knowledge-guided retrieval augmented generation. arXiv preprint arXiv:2407.10805 , 2024. 1, 9[5] Xiaojun Wu, Cehao Yang, Xueyuan Lin, Chengjin Xu, Xuhui Jiang, Yuanliang Sun, Hui Xiong, Jia Li, and Jian Guo. Think-on-graph 3.0: Efficient and adaptive llm reasoning on heterogeneous graphs via multi-agent dual-evolving context retrieval. arXiv preprint arXiv:2509.21710 , 2025. 1[6] Linhao Luo, Yuan-Fang Li, Reza Haffari, and Shirui Pan. Reasoning on graphs: Faithful and interpretable large language model reasoning. In International Conference on Learning Representations , volume 2024, pages 14400–14423, 2024. 1, 2, 9 [7] Alon Talmor and Jonathan Berant. The web as a knowledge-base for answering complex questions. In Proceedings of the 2018 Conference of the North American Chapter of the Association for Computational Linguistics: Human Language Technologies, Volume 1 (Long Papers) , pages 641–651, 2018. 1 [8] Wen-tau Yih, Matthew Richardson, Christopher Meek, Ming-Wei Chang, and Jina Suh. The value of semantic parse labeling for knowledge base question answering. In Proceedings of the 54th Annual Meeting of the Association for Computational Linguistics (Volume 2: Short Papers) , pages 201–206, 2016. 1, 6 [9] Vibhor Agrawal, Fay Wang, and Rishi Puri. Query-aware graph neural networks for enhanced retrieval-augmented generation. arXiv preprint arXiv:2508.05647 , 2025. 2 [10] Yuzheng Cai, Zhenyue Guo, Yiwen Pei, Wanrui Bian, and Weiguo Zheng. Simgrag: Leveraging similar subgraphs for knowledge graphs driven retrieval-augmented generation. In Findings of the Association for Computational Linguistics: ACL 2025 , pages 3139–3158, 2025. 2 [11] Nicholas Dominic and Bens Pardamean. Knowledge graph-enhanced semantic cache for low-latency and cost-effective inference in large language models. In 2024 International Conference on Information Management and Technology (ICIMTech) , pages 340–344, 2024. doi: 10.1109/ICIMTech63123.2024.10780864. 3, 8, 9 [12] OpenLink Software. Virtuoso universal server. https://virtuoso.openlinksw.com . Multi-model RDBMS and graph database, accessed August 2026. 5 [13] Oxigraph developers. Oxigraph. https://github.com/oxigraph/oxigraph , 2023. SPARQL graph database implemented in Rust. 5 [14] Kurt Bollacker, Colin Evans, Praveen Paritosh, Tim Sturge, and Jamie Taylor. Freebase: a collaboratively created graph database for structuring human knowledge. In Proceedings of the 2008 ACM SIGMOD international conference on Management of data , pages 1247–1250, 2008. 5[15] Berk Atil, Sarp Aykent, Alexa Chittams, Lisheng Fu, Rebecca J Passonneau, Evan Radcliffe, Guru Rajan Rajagopal, Adam Sloan, Tomasz Tudrej, Ferhan Ture, et al. Non-determinism of" deterministic" llm settings. arXiv preprint arXiv:2408.04667 , 2024. 8 [16] Jia Ao Sun, Hao Yu, Fabrizio Gotti, Fengran Mo, Yihong Wu, Yuchen Hui, and Jian-Yun Nie. Search-on-graph: Iterative informed navigation for large language model reasoning on knowledge graphs, 2025. URL https://arxiv.org/abs/2510.08825 . 9 
+
+> 10 KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs
+
+[17] Liyi Chen, Panrong Tong, Zhongming Jin, Ying Sun, Jieping Ye, and Hui Xiong. Plan-on-graph: Self-correcting adaptive planning of large language model on knowledge graphs, 2024. URL 
+
+https://arxiv.org/abs/2410.23875 . 9 [18] Siyuan Fang, Kaijing Ma, Tianyu Zheng, Xinrun Du, Ningxuan Lu, Ge Zhang, and Qingkun Tang. Karpa: A training-free method of adapting knowledge graph as references for large language model’s reasoning path aggregation, 2024. URL https://arxiv.org/abs/2412. 20995 . 9 [19] Jing Zhang, Xiaokang Zhang, Jifan Yu, Jian Tang, Jie Tang, Cuiping Li, and Hong Chen. Subgraph retrieval enhanced model for multi-hop knowledge base question answering. In 
+
+Proceedings of the 60th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , page 5773–5784. Association for Computational Linguistics, 2022. doi: 10.18653/v1/2022.acl-long.396. URL http://dx.doi.org/10.18653/v1/2022. acl-long.396 . 9 [20] Jinhao Jiang, Kun Zhou, Wayne Xin Zhao, Yaliang Li, and Ji-Rong Wen. Reasoninglm: Enabling structural subgraph reasoning in pre-trained language models for question answering over knowledge graph, 2023. URL https://arxiv.org/abs/2401.00158 . 9 [21] Mufei Li, Siqi Miao, and Pan Li. Simple is effective: The roles of graphs and large language models in knowledge-graph-based retrieval-augmented generation, 2025. URL https:// arxiv.org/abs/2410.20724 . 9 
+
+## 8 Appendix 
+
+8.1 AI disclosure 
+
+In this work, we used generative AI tools for spell checking, grammar correction, vocabulary correction, language editing, and basic coding assistance such as style alignment of plots and comments/readme files. LLM-generated code was verified and tested for correctness by the authors. We take responsibility for the final content of this work, including text, claims, or artifacts produced with the aid of generative AI. 
+
+8.2 Result Reproduction 
+
+The code is available in an anonymous Github repository. The repository has readme files that explain most of functionalities. In order to run the experiments, the user needs to provide their own API Key to some LLM endpoint. Current system is using OpenAI API compatible endpoints. Minor changes might be needed to use some vendor not supported by this project. Current publicly available vendors are Google and OpenAI. After the results are run, the readme files provide instructions on how to reproduce charts and their output locations. Certain discrepancies between the presented results and reproduced results are expected, especially if the dataset is run partially, or a different LLM than the ones mentioned in the paper is used.

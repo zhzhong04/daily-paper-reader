@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-16</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 12 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-10 21:20:15 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-16 20:48:25 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日阅读12篇论文，精读5篇、速读7篇，聚焦LLM推理基础设施与KV缓存优化。最值得关注的是满分论文《An Internet for the KV Cache》，提出重构LLM推理时代的经典基础设施边界；另有高分《Blast Radius》值得精读。建议优先研读这两篇，后续可跟进速读列表中的KV缓存恢复与Agentic工作流相关研究。</p>
+<p>今日精读聚焦多轮智能体KV缓存压缩与调度优化，速读覆盖缓存检索、蒸馏与安全；最值得关注的是《CommitKV》提出的生命周期感知压缩（9.0分）和《TideRL》的就绪感知调度（8.0分）；建议读者优先跟进KV缓存效率与多租户安全方向，后续可关注实际部署效果。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="An Internet for the KV Cache: Rethinking Classical Infrastructure Boundaries in the LLM Inference Age">An Internet for the KV Cache: Rethinking Classical Infrastructure Boundaries in the LLM Inference Age</span></li><li><span class="dpr-home-dashboard-paper-title" title="Blast Radius">Blast Radius</span></li><li><span class="dpr-home-dashboard-paper-title" title="Context Compaction Theory">Context Compaction Theory</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CommitKV: Lifecycle-Aware KV Cache Compression via Commit Transitions for Multi-Turn Agents">CommitKV: Lifecycle-Aware KV Cache Compression via Commit Transitions for Multi-Turn Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="TideRL: Boosting Agentic RL Goodput with Readiness-Aware Scheduling">TideRL: Boosting Agentic RL Goodput with Readiness-Aware Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="ImpactHO: Importance-Aware KV Cache Transfer for Multi-User Edge LLM Handover">ImpactHO: Importance-Aware KV Cache Transfer for Multi-User Edge LLM Handover</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">7 篇</strong>
+    <strong class="dpr-home-dashboard-count">8 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="RestoreKV: Recovering Full-Cache Behavior Under Aggressive Query-Agnostic KV Cache Eviction">RestoreKV: Recovering Full-Cache Behavior Under Aggressive Query-Agnostic KV Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="Architectural Implications of Agentic AI Workflows">Architectural Implications of Agentic AI Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="Shared Prefixes, Better Credit: Adaptive Routing for Multi-Agent Reasoning">Shared Prefixes, Better Credit: Adaptive Routing for Multi-Agent Reasoning</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs">KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="DistillCache: KL-Guided Adaptive KV-Cache Eviction for Memory-Efficient LLM Inference">DistillCache: KL-Guided Adaptive KV-Cache Eviction for Memory-Efficient LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Governing the KV Cache: Preventing Timing Side-Channel Leakage in Multi-Tenant LLM Inference">Governing the KV Cache: Preventing Timing Side-Channel Leakage in Multi-Tenant LLM Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>6</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
 </section>
 </div>
 
