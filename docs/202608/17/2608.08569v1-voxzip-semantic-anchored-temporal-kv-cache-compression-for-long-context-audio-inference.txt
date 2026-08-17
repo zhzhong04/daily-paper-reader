@@ -1,0 +1,610 @@
+Title: VoxZip: Semantic-Anchored Temporal KV Cache Compression for Long-Context Audio Inference
+
+URL Source: https://arxiv.org/pdf/2608.08569v1
+
+Published Time: Tue, 11 Aug 2026 01:11:30 GMT
+
+Number of Pages: 10
+
+Markdown Content:
+# VoxZip: Semantic-Anchored Temporal KV Cache Compression for Long-Context Audio Inference 
+
+# Wenxu Jia ∗
+
+jiawenxu@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+> 2
+
+Meituan Shanghai, China 
+
+# Dongjie Fu ∗
+
+fudongjie@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+# Xize Cheng ∗
+
+chengxize@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+# Fangming Feng ∗
+
+fangmingfeng@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+# Linjun Li 
+
+lilinjun05@meituan.com 
+
+> 2
+
+Meituan Shanghai, China 
+
+# Wenshi Chen 
+
+wenshi.chen@meituan.com 
+
+> 2
+
+Meituan Shanghai, China 
+
+# Yingming Li 
+
+yingming@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+# Zhou Zhao 
+
+zhaozhou@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+# Tao Jin †
+
+jint_zju@zju.edu.cn 
+
+> 1
+
+Zhejiang University Hangzhou, China 
+
+## Abstract 
+
+Recent advancements in Speech Large Language Models have demonstrated remarkable capabilities in understanding complex audio tasks. Despite this progress, their long-context inference remains severely bottlenecked by prohibitive KV cache memory demands. Existing text-centric compression methods struggle here, often disrupting speech continuity or discarding crucial semantic cues. To address this, we propose VoxZip, a train-free, two-stage semantic-anchored KV cache compression framework. The first stage uses automatic speech recognition (ASR) transcriptions as explicit semantic anchors to temporally align, compress, and fuse audio tokens, significantly reducing the initial KV cache while elevating token information density. To further improve the compression ratio, the second stage employs a dynamic filtering strategy based on temporally decayed accumulated attention to evict non-essential tokens while mitigating early-token bias. Comprehensive evaluations on Qwen3-Omni across six diverse audio benchmarks demonstrate the superiority of our approach. VoxZip excels in long-audio reasoning and consistently maintains high-fidelity perception on short-form tasks. Notably, it sustains over 90% of the uncompressed baseline performance even under an aggressive 20x KV cache compression in long-context scenarios. Furthermore, at a 4x compression ratio, VoxZip yields a 1.9x increase in inference throughput alongside a 3.3x reduction in peak memory overhead. Code and models will be available at https://github.com/MM-Speech/VoxZip. 
+
+> ∗The first four authors contributed equally to this work.
+> †Corresponding author: Tao Jin (jint_zju@zju.edu.cn).
+> This work is licensed under a Creative Commons Attribution 4.0 International License.
+> MM ’26, Rio de Janeiro, Brazil
+> © 2026 Copyright held by the owner/author(s). ACM ISBN 979-8-4007-2213-4/2026/11 https://doi.org/10.1145/3767308.3835719
+
+## CCS Concepts 
+
+• Computing methodologies → Artificial intelligence ; Natu-ral language processing .
+
+## Keywords 
+
+KV Cache Compression, Speech Large Language Models, Semantic Anchor, Efficient Inference 
+
+ACM Reference Format: 
+
+Wenxu Jia, Dongjie Fu, Xize Cheng, Fangming Feng, Linjun Li, Wenshi Chen, Yingming Li, Zhou Zhao, and Tao Jin. 2026. VoxZip: Semantic-Anchored Temporal KV Cache Compression for Long-Context Audio Inference. In 
+
+Proceedings of the 34th ACM International Conference on Multimedia (MM ’26), November 10–14, 2026, Rio de Janeiro, Brazil. ACM, New York, NY, USA, 10 pages. https://doi.org/10.1145/3767308.3835719 
+
+## 1 Introduction 
+
+Speech Large Language Models (SLLMs) have advanced rapidly [12, 21]. The shift from cascade pipelines to unified end-to-end ar-chitectures strengthens the perception of multi-dimensional audio information, including linguistic content, acoustics, and paralin-guistic cues [9, 31, 32], enabling applications such as intelligent customer service [7] and long-form meeting abstraction. However, long-context SLLM inference remains severely bottlenecked by computational and memory costs [22]. Beyond model size and at-tention complexity, the KV cache accumulated during prefilling and generation incurs prohibitive memory overhead [14, 16, 34], making aggressive KV cache compression without compromising holistic understanding a critical open challenge. KV cache compression has shown strong potential in text and vision, with mainstream eviction strategies relying on accumulated attention scores or fixed windows for token selection [4, 15, 25– 27, 29]. Yet directly applying them to Speech LLMs is difficult due to the temporal redundancy and low information density of acous-tic signals. As shown in Figure 1, attention distributions exhibit arXiv:2608.08569v1 [cs.AI] 9 Aug 2026 MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Wenxu Jia et al. 
+
+pronounced modal heterogeneity, with textual regions yielding highly salient attention matrices, whereas raw audio tokens suffer severe attention dilution and distribution diffusion. This lack of distinctiveness makes attention-score-only KV compression unreli-able for pinpointing critical semantic anchors in long-form audio, frequently causing semantic drift or hallucinations. 
+
+Figure 1: Attention score distributions in Qwen3-Omni-Instruct-30B. Left: the uncompressed baseline shows highly sparse attention over raw audio and text tokens. Right: semantic-anchored compression densifies and focuses the attention. 
+
+To address these challenges, we propose VoxZip, a train-free, two-stage compression framework that reshapes information den-sity via semantic anchoring. In the first stage, VoxZip treats ASR-transcribed text as explicit semantic anchors and leverages their timestamps to temporally align and extract the corresponding acoustic intervals; fusing these raw audio representations with anchor embeddings condenses redundant speech into high-density semantic segments. In the second stage, a time-decayed accumu-lated attention score metric dynamically prunes cached tokens, mitigating the accumulation bias of early tokens to selectively safe-guard essential semantic and acoustic cues. Consequently, VoxZip sustains robust linguistic comprehension and paralinguistic percep-tion under a minimal memory footprint. We evaluate VoxZip extensively across long-audio reasoning benchmarks (Vox-Infinity [5], AudioMarathon [11], SPIRAL [17]) and general audio-language benchmarks (MMSU [28], MMAU [24], MMAR [20]). Results show that VoxZip achieves a superior trade-off between perception fidelity and inference efficiency, maintaining ro-bust performance under extreme context lengths while significantly alleviating the memory bottlenecks of SLLMs. Extended evaluations further confirm robustness against acoustic disturbances, ensur-ing stable inference even when environmental noise compromises the ASR-guided anchors. The main contributions are summarized below. 
+
+• A semantic-anchored audio compression mechanism that compresses semantic audio segments via textual anchors, shrinking the initial KV cache to accelerate prefill while boosting semantic reasoning in long-context scenarios. 
+
+• A KV cache eviction strategy based on temporally decayed ac-cumulated attention scores, which mitigates the early-token accumulation bias prevalent in long contexts and ensures high performance stability even under extreme compression constraints. 
+
+• Extensive evaluations across six benchmarks show VoxZip consistently outperforms baselines, retaining over 90% per-formance at a 20 × compression ratio, with a 1.93 × through-put boost and a 3.34 × reduction in peak memory usage. 
+
+## 2 Related Works 2.1 Speech Large Language Models 
+
+Recent research in SLLMs has driven a paradigm shift from tra-ditional cascaded pipelines to unified end-to-end architectures [12, 21]. Foundational models such as Whisper have established ro-bust semantic representations of speech through large-scale weakly supervised pre-training [23] . Subsequently, advanced frameworks such as Qwen-Omni [30, 31], Audio Flamingo [9, 10], and Kimi-Audio [3, 8, 13] have further expanded the boundaries of speech reasoning. Beyond precise linguistic transcription, these models demonstrate an enhanced capability to perceive nuanced paralin-guistic cues, such as emotion, speaker traits, and environmental acoustics [6]. However, because end-to-end models must directly process audio features that significantly longer token representa-tions, critical system bottlenecks emerge as application scenarios scale to long-context tasks like extensive meeting summarization and ultra-multi-turn dialogues [1, 5, 11]. The quadratic computa-tional complexity of the self-attention mechanism, coupled with the linear memory accumulation of the Key-Value (KV) cache, imposes severe memory overheads [22]. Consequently, these architectural constraints significantly hinder the efficient inference and real-time deployment of long-form audio tasks on resource-constrained hardware. 
+
+## 2.2 KV Cache Compression in LLMs 
+
+To mitigate the memory overhead of large language models (LLMs) during inference, the research community initially proposed various KV cache compression strategies in the text modality [14, 19, 34]. Early works such as StreamingLLM [29] and SnapKV [15] primarily focused on token-level attention sink mechanisms and importance sampling. Subsequently, methods like PyramidKV exploited the heterogeneous attention patterns across network layers to achieve layer-wise compression [2], while ChunkKV [18] explored a coarse-grained compression paradigm based on semantic chunks . With the rapid evolution of multimodal models, compression techniques in the vision domain have also emerged. For instance, FastV [4] and DyCoke [25] designed dynamic pruning strategies tailored to the spatial-temporal redundancy of images and videos, establishing robust memory optimization paradigms for efficient long-context visual reasoning. However, directly transferring compression techniques from text or vision modalities to the audio domain is challenging due to the inherent temporal redundancy and low information density of acoustic signals. Currently, KV cache compression for Speech LLMs remains largely underexplored. While a recent study [17] investigates token pruning for speech representations, it lacks a dynamic eviction mechanism during the autoregressive decoding stage, and its closed-source nature currently precludes direct em-pirical comparison. Our proposed VoxZip fills this critical gap. By VoxZip: Semantic-Anchored Audio Compression MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+leveraging ASR-guided semantic anchoring and introducing a dy-namic filtering strategy with a temporal-decay mechanism to evict low information tokens during decoding, we achieve substantial compression ratios across multiple long-audio benchmarks while effectively preserving the model’s inherent comprehension and perception capabilities. 
+
+## 3 Methodology 3.1 Preliminaries: KV Cache in Speech LLMs 
+
+In standard SLLMs, the generative inference process typically con-sists of two main stages, namely the prompt prefilling stage and the auto-regressive decoding stage. To avoid the redundant compu-tation of historical states, SLLMs store past Key and Value repre-sentations in GPU memory, forming the KV cache. 
+
+Prefilling stage . Given raw audio and textual inputs, the model first extracts the corresponding acoustic and textual embeddings. These embeddings are then processed by the Transformer layers of the SLLM to compute the initial key and value matrices, denoted as 𝐾 0 and 𝑉 0. These matrices are stored to initialize the KV cache for the entire prompt sequence. 
+
+Decoding stage . The model generates new tokens auto-regressively. At time step 𝑡 , for the newly generated token 𝑥 𝑡 ,the model only computes its corresponding query 𝑞 𝑡 , key 𝑘 𝑡 , and value 𝑣 𝑡 ∈ R1×𝑑 , where 𝑑 is the hidden dimension. The model then retrieves the historical KV cache 𝐾 𝑡 −1 and 𝑉 𝑡 −1, dynamically updating it by concatenating the new representations: 
+
+𝐾 𝑡 = [𝐾 𝑡 −1, 𝑘 𝑡 ], 𝑉 𝑡 = [𝑉 𝑡 −1, 𝑣 𝑡 ] (1) here [· , ·] denotes the concatenation operation along the se-quence dimension. The attention output 𝑜 𝑡 for the current step is subsequently computed using the updated cache: 
+
+𝑜 𝑡 = Softmax 
+
+ 𝑞 𝑡 𝐾 ⊤
+
+> 𝑡
+
+√𝑑 
+
+
+
+𝑉 𝑡 (2) Consequently, the size of the KV cache grows linearly with the length of the input and generated sequences. This O( 𝐿 ) linear ex-pansion significantly increases inference latency and memory foot-print, particularly in long-context scenarios. Furthermore, unlike highly discrete text sequences, raw audio inputs exhibit extreme temporal redundancy, often producing massive audio tokens even for short utterances. Therefore, developing an efficient, modality-aware KV cache compression strategy is imperative to mitigate the memory bottleneck in SLLMs. 
+
+## 3.2 The Proposed VoxZip 
+
+In this section, we present VoxZip. As illustrated in Figure 2, VoxZip employs a two-stage compression strategy. The first stage com-presses audio tokens under the guidance of semantic anchors. The second stage further dynamically filters out low-information tokens based on temporally decayed accumulated attention scores. This approach aims to preserve model performance while reducing the token count as extensively as possible. 
+
+3.2.1 Semantic-Anchored Audio Compression. As shown in Figure 1, previous observations indicate that the attention of audio in-put in SLLMs suffers from attention dilution over long sequences. Unlike discrete text sequences, continuous audio streams exhibit lower information density and typically lack highly distinguish-able semantic boundaries. This characteristic severely limits the performance of SLLMs in long-audio reasoning and retrieval tasks. To address this issue and enhance the model’s comprehension of long contexts, we propose a semantic-anchored audio compression method. This approach utilizes transcribed text as explicit guides to compress the corresponding acoustic intervals, thereby signifi-cantly elevating the information density of these semantic regions. Specifically, the first-stage compression comprises three steps. 
+
+Temporal-Aligned Embedding Partitioning. Given a raw audio waveform input 𝐴 𝑟𝑎𝑤 with a total duration of 𝜏 𝑡𝑜𝑡𝑎𝑙 , we utilize an auxiliary ASR model to generate initial transcriptions. To ensure robustness against environmental noise, we only re-tain transcribed segments with a confidence score above a thresh-old of 0.3. The remaining high-confidence transcriptions consti-tute the valid semantic set S = {𝑆 1, . . . , 𝑆 𝑛 }, where each segment 
+
+𝑆 𝑖 = (𝜏 (𝑖 ) 
+
+> 𝑠𝑡𝑎𝑟𝑡
+
+, 𝜏 (𝑖 ) 
+
+> 𝑒𝑛𝑑
+
+, text (𝑖 ) ) contains the start time, end time, and the corresponding text. This preemptive filtering prevents erroneous se-mantic anchors from corrupting the continuous audio latent space. Concurrently, the SLLM encodes the raw audio 𝐴 𝑟𝑎𝑤 into a con-tinuous acoustic feature sequence 𝐸 𝐴 ∈ R𝐿 𝑎 ×𝑑 , while embedding each valid transcribed text text (𝑖 ) into 𝐸 (𝑖 ) 
+
+> 𝑇
+
+∈ R𝐿 (𝑖 )  
+
+> 𝑡 ×𝑑
+
+. Here, 𝐿 𝑎 and 
+
+𝐿 (𝑖 ) 
+
+> 𝑡
+
+denote their respective sequence lengths, and 𝑑 represents the shared hidden dimension. Crucially, instead of physically truncating the raw audio wave-form, we slice directly within the extracted continuous acoustic latent space 𝐸 𝐴 . Given the strong continuity of speech, this feature-level segmentation preserves the complete global acoustic context. Based on the obtained timestamps, we map the absolute time to discrete audio token indices: 
+
+𝑖𝑑𝑥 (𝑖 ) 
+
+> 𝑠𝑡𝑎𝑟𝑡
+
+= ⌊𝐿 𝑎 · 𝜏 (𝑖 )
+
+> 𝑠𝑡𝑎𝑟𝑡
+
+𝜏 𝑡𝑜𝑡𝑎𝑙 
+
+!
+
+⌋, 𝑖𝑑𝑥 (𝑖 ) 
+
+> 𝑒𝑛𝑑
+
+= ⌊𝐿 𝑎 · 𝜏 (𝑖 )
+
+> 𝑒𝑛𝑑
+
+𝜏 𝑡𝑜𝑡𝑎𝑙 
+
+!
+
+⌋ (3) Using these indices, we slice 𝐸 𝐴 to extract the semantic audio intervals , denoted as 𝐸 (𝑖 ) 
+
+> 𝐴,𝑠
+
+= 𝐸 𝐴 [𝑖𝑑𝑥 (𝑖 ) 
+
+> 𝑠𝑡𝑎𝑟𝑡
+
+: 𝑖𝑑𝑥 (𝑖 ) 
+
+> 𝑒𝑛𝑑
+
+]. The remaining parts of the sequence, which lack explicit semantic boundaries and are not covered by any transcribed intervals, are identified as 
+
+background acoustic intervals and denoted as {𝐸 (1)
+
+> 𝐴,𝑏𝑔
+
+, . . . , 𝐸 (𝑚 ) 
+
+> 𝐴,𝑏𝑔
+
+}.
+
+Semantic-Anchored Audio Compression. For the 𝑖 -th seman-tic audio interval, let 𝐸 (𝑖 ) 
+
+> 𝐴,𝑠
+
+= [𝑒 (𝑖 ) 
+
+> 𝑎, 1
+
+, . . . , 𝑒 (𝑖 )  
+
+> 𝑎,𝐿 (𝑖 )
+> 𝑎
+
+] ∈ R𝐿 (𝑖 )  
+
+> 𝑎 ×𝑑
+
+denote its acoustic feature sequence, and let 𝐸 (𝑖 ) 
+
+> 𝑇
+
+= [𝑒 (𝑖 ) 
+
+> 𝑡, 1
+
+, . . . , 𝑒 (𝑖 )  
+
+> 𝑡,𝐿 (𝑖 )
+> 𝑡
+
+] ∈ R𝐿 (𝑖 ) 
+
+> 𝑡 ×𝑑
+
+denote its corresponding text feature sequence. Since the audio se-quence length 𝐿 (𝑖 ) 
+
+> 𝑎
+
+is typically much larger than the text sequence length 𝐿 (𝑖 ) 
+
+> 𝑡
+
+, we uniformly partition the 𝐿 (𝑖 ) 
+
+> 𝑎
+
+acoustic features into 
+
+𝐿 (𝑖 ) 
+
+> 𝑡
+
+consecutive groups along the temporal dimension. For the 𝑗 -th group G𝑖,𝑗 , we perform an element-wise average pooling to obtain the compressed acoustic representation ˜ 𝑒 (𝑖 ) 
+
+> 𝑎,𝑗
+
+:˜𝑒 (𝑖 ) 
+
+> 𝑎,𝑗
+
+= 1
+
+|G 𝑖,𝑗 |∑︁ 𝑘 ∈ G 𝑖,𝑗 
+
+𝑒 (𝑖 ) 
+
+> 𝑎,𝑘
+
+(4) MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Wenxu Jia et al. ASR 
+
+> Model
+> Audio
+> Encoder
+> Semantic
+> Segment
+> Time aligned
+> Timestamp
+> Backgroud
+> Segment
+> Semantic
+> Segment
+> Asr time bar
+> Retain
+> raw audio
+> embeddings
+> ASR Text
+> Embedding
+
+Stage 1: Prefill stage 
+
+> Audio Input
+
+# LLM      
+
+> Attention sink Recent
+> token
+> 1.51 1.92 1.58 1.67 0.9
+> Top k filter
+
+Stage 2: 
+
+Decoding  stage         
+
+> Compressed Audio
+> Embedding
+> [start time ,end time ]
+> : "Hello, how are you?"
+> Pooling
+> [start time ,end time ]
+> : "goodbye~"
+> ASR :
+> Raw Audio Embedding
+> No ASR
+> Interleave ASR :
+> Cached Tokens
+> Pooling
+> Compressed Embedding
+
+.
+
+.
+
+.     
+
+> .
+> .
+> .
+> 0.9
+> 0.1
+> 0.2
+> 0.4 0.4 0.5
+> 0.4 0.4 0.3 0.8
+> 0.9
+> 0.9
+> 0.9
+> 0.9
+> .
+> .
+> .
+> 0.2
+> .
+> .
+> .
+> The compressed cache
+> Attention
+> score
+> Raw Audio Embedding ASR Text Embedding
+> Compressed Audio Embeding
+> Fused Embedding
+> Retain
+
+Figure 2: The VoxZip framework. Stage 1 (left) performs semantic-anchored audio compression during the prefill stage. Stage 2 (right) dynamically filters the KV cache using time-decayed attention scores during decoding. 
+
+where |G 𝑖,𝑗 | is the number of audio tokens in the group. Subse-quently, we perform an element-wise addition between this com-pressed acoustic representation ˜ 𝑒 (𝑖 ) 
+
+> 𝑎,𝑗
+
+and its aligned text embedding 
+
+𝑒 (𝑖 ) 
+
+> 𝑡,𝑗
+
+to construct the semantic anchor 𝑒 (𝑖 ) 
+
+> 𝑓 ,𝑗
+
+= ˜𝑒 (𝑖 ) 
+
+> 𝑎,𝑗
+
++ 𝑒 (𝑖 ) 
+
+> 𝑡,𝑗
+
+. This oper-ation compresses the audio semantic interval into a high-density sequence 𝐸 (𝑖 ) 
+
+> 𝑓
+
+= [𝑒 (𝑖 )
+
+> 𝑓 , 1
+
+, . . . , 𝑒 (𝑖 ) 
+
+> 𝑓 ,𝐿 (𝑖 )
+> 𝑡
+
+] ∈ R𝐿 (𝑖 )  
+
+> 𝑡 ×𝑑
+
+, naturally preserving crucial paralinguistic cues while tightly aligning with core textual semantics. 
+
+Background Preservation and Sequence Concatenation. 
+
+For the background acoustic intervals {𝐸 (1)
+
+> 𝐴,𝑏𝑔
+
+, . . . , 𝐸 (𝑚 ) 
+
+> 𝐴,𝑏𝑔
+
+}, we pre-serve their original acoustic features to maintain the model’s per-ception of global environmental sounds. Finally, we concatenate all the fused semantic embedding intervals 𝐸 (𝑖 ) 
+
+> 𝑓
+
+and the preserved back-ground embedding intervals 𝐸 (𝑘 ) 
+
+> 𝐴,𝑏𝑔
+
+in their original chronological order to form the final compressed input sequence 𝐸 𝑐𝑜𝑚𝑝 :
+
+𝐸 𝑐𝑜𝑚𝑝 = Concat (. . . , 𝐸 (𝑖 ) 
+
+> 𝑓
+
+, 𝐸 (𝑘 )
+
+> 𝐴,𝑏𝑔
+
+, 𝐸 (𝑖 +1) 
+
+> 𝑓
+
+, . . . ) (5) Through this strategy, the length of the transcribed audio inter-vals is compressed to approximately 0 .25 × of their original size. This significant reduction accelerates the prefill stage and substan-tially reduces the memory footprint of the initial KV cache. Further-more, the introduction of semantic anchors effectively enhances the model’s semantic reasoning and retrieval capabilities in long-audio contexts. 
+
+3.2.2 Temporally Decayed KV Cache Eviction. Following the first stage, the KV cache comprises both high-density semantic tokens and raw acoustic tokens. To further prune redundant and low infor-mation elements, we propose a dynamic KV cache eviction mecha-nism during the generation stage. Mainstream score-based eviction methods typically evaluate token importance via simple accumu-lation of historical attention scores [2, 15, 33]. However, directly applying this to long-form audio induces a severe accumulation bias. Since early tokens exist for a longer duration and undergo more accumulation steps, they inherently amass higher scores, caus-ing the eviction mechanism to persistently select and retain them. To mitigate this bias and preserve paralinguistic sensitivity, we introduce a temporal decay mechanism. Specifically, operating independently per layer, the time-decayed accumulated score vector 𝐴 (𝑡 ) ∈ R1×𝑡 is dynamically updated using the 𝑡 -th query 𝑞 𝑡 ∈ R1×𝑑 and the current key cache 𝐾 𝑡 ∈ R𝑡 ×𝑑 :
+
+𝐴 (𝑡 ) = 𝛾 · [ 𝐴 (𝑡 −1) , 0] + Softmax 
+
+ 𝑞 𝑡 𝐾 ⊤
+
+> 𝑡
+
+√𝑑 
+
+
+
+(6) where 𝑑 represents the head dimension, 𝛾 ∈ ( 0, 1) is a predefined decay coefficient, and [· , ·] denotes zero-padding concatenation to align the dimension for the newly generated token. This formu-lation evaluates the global historical contribution of tokens while explicitly penalizing stale acoustic states. During eviction, the cache is partitioned into an attention sink window, a recent window, and important historical tokens. To main-tain generation stability, we unconditionally preserve the first 𝑇 
+
+attention sink tokens and the latest 𝑀 recent tokens. For the in-termediate historical tokens, we extract the top-𝑁 elements based on their decayed accumulated score 𝐴 (𝑡 ) . In our implementation, we empirically set 𝑇 = 4 and dynamically allocate 20% of the total KV cache budget to the recent window 𝑀 , assigning the remaining capacity to 𝑁 . Finally, the updated KV cache is constructed via concatenation: 
+
+𝐾 𝑡 +1 = Concat (𝐾 𝑡 [: 𝑇 , :], 𝐾 𝑡 [I ℎ𝑖𝑠𝑡 , :], 𝐾 𝑡 [− 𝑀 :, :]) (7) 
+
+𝑉 𝑡 +1 = Concat (𝑉 𝑡 [: 𝑇 , :], 𝑉 𝑡 [I ℎ𝑖𝑠𝑡 , :], 𝑉 𝑡 [− 𝑀 :, :]) (8) 
+
+Iℎ𝑖𝑠𝑡 = Top 𝑁 
+
+
+
+𝐴 (𝑡 ) [𝑇 : −𝑀 ]
+
+
+
+(9) VoxZip: Semantic-Anchored Audio Compression MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+Table 1: Performance on long-context audio benchmarks under varying KV cache budgets (%). Backbone: Qwen3-Omni-Instruct-30B. Subsets: Beyond-Semantics Dialogue (BS), Conversational Dialogues (Conv), Ultra Multi-Turn Dialogue (UMT), Personal Monologue (PM), AudioMarathon (SCE: Speech Content Extraction; AC: Audio Classification; SR: Speaker Recognition), and SPIRAL Hard (H). Aver.: average accuracy. PRR: performance retention ratio vs. the Full KV baseline (%). Bold: best within each budget. Method Ratio Vox-Infinity AudioMarathon SPIRAL Aver. PRR BS Conv UMT PM SCE AC SR (H) 
+
+Full KV 100% 31.60 95.60 69.20 71.40 49.03 54.82 66.90 98.00 67.07 100.00 StreamingLLM 25% 28.40 70.00 24.00 12.20 40.15 50.56 52.49 61.10 42.36 63.16 SnapKV 25% 24.30 78.40 37.00 10.70 42.54 47.00 51.28 51.63 42.74 63.72 PyramidKV 25% 24.80 85.50 34.40 11.30 44.15 47.90 51.73 58.12 44.43 66.70 ChunkKV 25% 23.10 77.20 32.90 10.80 42.67 49.72 50.51 48.63 41.94 62.54 
+
+VoxZip (Ours) 25% 26.60 96.20 82.40 86.30 55.94 62.89 54.63 93.02 69.75 104.00 
+
+StreamingLLM 15% 28.00 67.60 18.60 8.60 39.83 41.98 48.32 53.38 38.28 57.08 SnapKV 15% 22.00 71.20 19.80 8.80 41.36 40.67 52.18 46.38 37.00 55.16 PyramidKV 15% 25.20 80.60 15.00 10.30 37.18 37.27 45.48 47.38 37.27 55.57 ChunkKV 15% 22.80 72.00 20.60 7.20 42.87 45.73 49.75 47.63 38.57 57.51 
+
+VoxZip (Ours) 15% 24.10 98.00 67.20 81.60 56.28 62.15 54.07 93.72 67.14 100.10 VoxZip (Ours) 10% 23.80 98.10 55.00 76.50 55.07 60.63 53.00 94.27 64.55 96.24 
+
+VoxZip (Ours) 5% 22.00 97.60 37.00 70.10 55.33 62.13 53.31 93.02 61.31 91.41 where Iℎ𝑖𝑠𝑡 represents the corresponding indices of the selected tokens in the original sequence. This dynamic mechanism strictly retains only the most essential semantic and acoustic tokens to bound the inference context. Consequently, it achieves a high com-pression ratio without sacrificing model performance. 
+
+## 4 Experiments 4.1 Experimental Setup and Implementation Details 
+
+4.1.1 Benchmark. To evaluate VoxZip, we select two categories of benchmarks. The first category, Long-Context Reasoning and Retrieval, is headlined by Vox-Infinity [5], the most demanding benchmark requiring complex multi-turn semantic retrieval and reasoning across ultra-long audio, with its Personal-Monologue subset averaging over 20 minutes. This category also includes Au-dioMarathon [11] and the SPIRAL hard subset [17], which focus on relatively straightforward single-turn long-audio understand-ing. The second category, General Audio Understanding, comprises MMSU [28], MMAU [24], and MMAR [20], primarily utilized to assess the model’s perception of fine-grained acoustic features and paralinguistic cues in shorter contexts. 
+
+4.1.2 Baselines. We evaluated our approach against five baselines. Full KV serves as the uncompressed baseline, which retains the complete KV cache. For compressed baselines, we include SLLM [29], which maintains performance by preserving attention sink tokens and the most recent tokens. We further evaluate SnapKV [15], a widely adopted method that selects the top-𝑘 tokens based on accumulated attention scores. To capture more sophisticated compression paradigms, we introduced PyramidKV [2], which al-locates KV cache budgets hierarchically across different layers, and ChunkKV [18], which retains the cache based on semantic segments. 
+
+4.1.3 Implementation Details. All experiments are conducted on a single computing node equipped with 8 NVIDIA A100 (80GB) GPUs. For the ASR model configuration, we utilize Whisper-Turbo as the ASR model and Qwen3-Omni-30B (both Instruct and Thinking variants) as the backbone LLM. For the hyperparameter settings, the temporal decay factor 𝛾 used for attention score aggregation in Stage 2 is empirically set to 0.95. 
+
+## 4.2 Performance on Long-Context Audio Benchmarks 
+
+To evaluate the long-context retrieval and reasoning capabilities of various compression algorithms, we evaluate the Qwen3-Omni-Instruct-30B and Qwen3-Omni-Thinking-30B on Vox-Infinity, Au-dioMarathon, and the SPIRAL (Hard) subset. These benchmarks rigorously test the model’s ability to extract core semantic features under substantial KV cache constraints. As shown in Table 1, at a 25% cache budget, VoxZip consistently outperforms all baselines and notably surpasses the uncompressed Full KV baseline in average accuracy. This gain is fundamentally driven by introducing ASR transcriptions as explicit semantic an-chors. Fusing these condensed textual features with aligned audio tokens reconstructs the sequence’s information density. These in-jected textual priors provide reliable guidance, significantly enhanc-ing long-audio semantic understanding while preserving essential paralinguistic cues. VoxZip maintains robust performance even under extreme com-pression. At a 10% cache budget, both the Instruct and Thinking variants retain over 90% of their uncompressed baseline, demon-strating the method’s robust generalization across distinct tuning MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Wenxu Jia et al. 
+
+Table 2: Performance on general audio benchmarks (Qwen3-Omni-Instruct-30B). Ratio: KV cache budget (%). MMAR: Semantic, Cultural, Perception, Signal; MMSU: Semantics, Phonology, Style, Traits; MMAU: Sound, Speech, Music. Aver.: average accuracy. PRR: performance retention ratio vs. Full KV (%). Method Ratio MMAR MMSU MMAU Aver. PRR Sem. Cul. Per. Sig. Sem. Pho. Sty. Tra. Snd. Spe. Mus. 
+
+Full KV 100% 70.56 58.39 55.45 46.51 81.64 69.97 54.03 35.35 80.48 78.08 74.25 65.18 100.0 StreamingLLM 25% 47.69 40.15 38.12 34.88 57.86 54.44 51.48 35.48 40.54 36.23 29.43 42.39 65.04 SnapKV 25% 39.17 46.72 37.13 48.84 38.45 53.61 40.43 35.48 25.23 23.63 22.52 37.35 57.30 PyramidKV 25% 55.47 60.58 48.51 55.81 51.79 72.92 54.49 42.61 71.17 65.87 58.86 58.01 89.01 ChunkKV 25% 44.53 50.36 45.30 69.77 38.65 60.90 61.11 44.27 74.47 64.07 50.45 54.91 84.24 
+
+VoxZip (Ours) 25% 72.51 72.99 67.24 61.54 72.35 63.72 56.80 37.53 80.78 75.48 75.45 66.93 102.64 VoxZip (Ours) 15% 72.75 70.80 66.09 58.14 72.49 65.06 56.74 37.53 80.48 75.45 75.77 66.48 102.01 
+
+VoxZip (Ours) 10% 72.51 69.34 65.84 58.14 70.06 62.04 56.74 37.66 79.88 74.31 75.77 65.66 100.86 architectures. Even at an extreme 5% KV cache budget, VoxZip sus-tains a 91.41% performance retention, significantly outperforming the strongest baseline PyramidKV [2], which retains only 66.70% at a much looser 25% budget. This resilience stems from the framework’s synergistic design, guided by the first-stage textual semantic an-chors, with the second stage employing a temporally decayed accu-mulated attention mechanism to dynamically evict low-information tokens. This formulation effectively mitigates early-token bias, en-abling aggressive pruning without compromising critical semantic and paralinguistic cues. 
+
+## 4.3 Performance on General Audio QA Benchmarks 
+
+Beyond long-range retrieval, we evaluate the acoustic perception precision of Qwen3-Omni-Instruct-30B on general audio question-answering (QA) benchmarks including MMAR [20], MMSU [28] and MMAU [24]. Unlike long-audio tasks, these focus on fine-grained features within a 30-second window, such as speaker traits, emo-tional and prosodic nuances, and low-level signal characteristics. This critically assesses whether VoxZip preserves the rich non-linguistic cues inherently absent from discrete text transcriptions. As illustrated in Table 2, under a 25% KV cache budget ratio, VoxZip achieves an average accuracy of 66.93%, surpassing the Full KV baseline by 1.75%. By contrast, competing KV compression schemes suffer notable degradation, with even the strongest Pyra-midKV baseline reaching only 58.01% average accuracy. Crucially, VoxZip maintains its superiority under extreme compression by sus-taining average accuracies of 66.48% and 65.66% at stricter 15% and 10% budgets respectively, thereby consistently outperforming the uncompressed Full KV baseline. Furthermore, VoxZip demonstrates extraordinary proficiency in tasks reliant on complex acoustic pro-filing. Specifically, on the Perception and Signal subsets of MMAR, it achieves accuracy gains of over 10% against Full KV. We attribute these performance gains over the uncompressed baseline to our framework’s synergistic design. The first-stage fusion robustly preserves essential paralinguistic cues, while the second-stage dynamic filtering evicts redundant tokens to suppress irrelevant acoustic noise. This denoised representation enables the model to focus precisely on salient acoustic events, yielding supe-rior accuracy under a constrained token budget. 
+
+## 4.4 Ablation Studies 
+
+4.4.1 Necessity of Semantic Anchors in Long Audio Understand-ing. To validate the necessity of semantic anchors in long audio understanding, we conducted an ablation study on three semantic-focused subsets of the Vox-Infinity benchmark. This dataset was specifically selected as its ultra-long context rigorously tests the model’s ability to accurately retrieve critical semantics amidst mas-sive acoustic noise. As shown in Table 3, removing the semantic-anchored com-pression (w/o Semantic-Anchored Comp.) at a 15% budget leads to severe performance degradation, with accuracy dropping to 6.4% on the longest PM subset. In contrast, integrating the semantic anchors (w/ Semantic-Anchored Comp.) not only prevents this col-lapse by boosting the PM performance to an exceptional 81.6%, but also elevates the overall average to 82.27%, directly surpassing the uncompressed Full KV baseline of 78.7%. This capability to exceed the uncompressed upper bound fun-damentally stems from the reconstruction of information density facilitated by semantic anchors. As illustrated by the attention maps in Figure 1, under unanchored pure audio conditions, the model’s attention toward low-density audio tokens is highly dis-crete and sparse. This sparsity leads to a severe loss of focus during long-context reasoning. Conversely, introducing semantic anchors injects highly condensed semantic priors into the continuous au-dio stream, densifying the originally scattered attention scores. This mechanism effectively guides the model to bypass acoustic redundancy and concentrate strictly on anchor segments that en-capsulate core semantics. Consequently, it fortifies the robustness of long-range semantic retrieval and provides highly reliable scoring criteria for the subsequent Stage-2 KV cache eviction. 
+
+4.4.2 Necessity of Preserving Acoustic and Paralinguistic Cues. To validate the design rationale of our first-stage semantic anchored compression, we conducted an ablation study across multiple bench-marks emphasizing acoustic and paralinguistic comprehension. Specifically, this study evaluates its performance advantages over VoxZip: Semantic-Anchored Audio Compression MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+Table 3: Ablation of semantic-anchored audio compression on Vox-Infinity semantic subsets. w/: with; w/o: without; Comp.: compression. Accuracy (%). Method Conv UMT PM Avg. 
+
+Full KV 95.60 69.20 71.40 78.70 
+
+KV Cache Budget Ratio: 15% 
+
+w/o Semantic-Anchored Comp. 87.04 44.80 6.40 46.08 w/ Semantic-Anchored Comp. 98.00 67.20 81.60 82.27 
+
+KV Cache Budget Ratio: 10% 
+
+w/o Semantic-Anchored Comp. 85.80 36.40 7.51 43.24 w/ Semantic-Anchored Comp. 98.10 55.00 76.50 76.53 
+
+the transcribed text-only baseline and the necessity of retaining un-transcribed pure audio segments during fusion. Table 4 presents a comprehensive performance comparison of the four evaluated methods. Fundamentally, the experimental results directly expose the in-herent modality deficit of the Text-only baseline when processing complex audio tasks. While ASR models accurately extract seman-tic content, they inevitably strip away crucial paralinguistic cues such as emotion, speaker style, and environmental sounds. By con-trast, our T+A (Full) strategy seamlessly integrates semantic and acoustic features, achieving an absolute average improvement of 7.80% over the text-only baseline. Notably, in tasks heavily reliant on low-level acoustic perception, such as the Sign subset in MMAR and the Snd subset in MMAU, our method delivers absolute gains of 15.03% and 15.31% over the pure text baseline, respectively. This strongly demonstrates that utilizing ASR transcriptions as anchors to compress and fuse audio features successfully preserves rich par-alinguistic information while maintaining high semantic fidelity. Furthermore, the ablation validates the necessity of retaining the un-transcribed audio segments. Under the T+A (Partial) con-figuration, which aggressively discards segments with no ASR out-put or low transcription confidence, the average accuracy drops from 60.76% to 57.41%. This degradation indicates that these non-semantic audio intervals encode rich acoustic information and par-alinguistic features essential for comprehensive scene and style reasoning. By continuously preserving these untranscribed or low-confidence segments, our T+A (Full) approach fully captures these underlying acoustic cues, effectively preventing the loss of acoustic information that is typically ignored by ASR transcriptions. Finally, we reference the uncompressed Audio-only input as the theoretical performance upper bound. Although the Audio-only baseline preserves the most comprehensive information and achieves the highest average accuracy of 62.84%, it concurrently incurs prohibitive KV cache overhead and inference latency. En-couragingly, our T+A (Full) approach maintains an exceptional performance of 60.76% while compressing massive volumes of re-dundant speech frames down to the text-token length level. This strongly suggests that our proposed semantic-anchored fusion strat-egy achieves a highly optimal balance between efficiency and accu-racy, trading an exceptionally massive token compression rate for a negligible performance degradation. 
+
+Figure 3: GPU peak memory across conversational turns. 
+
+4.4.3 Necessity of the Temporal Decay Mechanism. To validate the temporal decay (TD) mechanism, we ablate it on Qwen3-Omni-Instruct-30B over Vox-Infinity under a highly constrained 5% KV cache budget, comparing TD against the standard accumulation baseline ( 𝛾 = 1.0) and sweeping the decay factor 𝛾 . As shown in Table 5, TD yields the largest gains on the Personal Monologues (PM) subset, whose long duration demands extended temporal rea-soning. The non-TD baseline’s PM accuracy plummets to 62.6%, while the optimal TD setting ( 𝛾 = 0.95) raises it to 76.5%, a 13.9% absolute improvement. Sweeping 𝛾 reveals an inverted-U trend: aggressive decay ( 𝛾 ≤
+
+0.90) prematurely discards historical semantic anchors, while ex-cessively slow decay ( 𝛾 ≥ 0.99) under-penalizes stale audio tokens, with 𝛾 = 0.95 striking the optimal balance. By explicitly penaliz-ing early tokens, TD mitigates the accumulation bias that plagues conventional score-based eviction, preserving a vital long-term perspective for token selection and reliably safeguarding reasoning stability under the extreme 5% budget. 
+
+## 4.5 Inference Efficiency Analysis 
+
+To assess the practical computational efficiency of various compres-sion strategies, we evaluate the Qwen3-Omni-30B-Thinking under long-context multi-turn conversational scenarios. Table 6 details the inference metrics under a fixed 64K context window, whereas Figure 3 tracks the dynamic peak memory accumulation across 80 continuous conversational turns. Crucially, our reported peak memory (Mem) and throughput (TPS) are based on an end-to-end measurement protocol that explicitly accounts for the auxiliary ASR module’s overhead, including weight occupancy, initialization latency, and real-time transcription costs. Experimental results demonstrate that VoxZip achieves optimal inference efficiency across the evaluated dimensions. As shown in Table 6, in the fixed 64K context evaluation, VoxZip exhibits superior memory efficiency, requiring a peak memory of 70.68 GB, which yields a 3.34 × memory reduction compared to the Full Cache baseline. Furthermore, benefiting from the first-stage semantic an-chored compression, the initial KV cache of semantic audio intervals is reduced to approximately 25% of its original capacity. This sub-stantial compression significantly accelerates the prefill process, MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Wenxu Jia et al. 
+
+Table 4: Ablation of Stage-1 fusion strategies. Accuracy (%). Configurations: (1) T (Text-only): ASR transcriptions only; (2) A (Audio-only): raw audio only; (3) T+A (Partial): speech segments only, background discarded; (4) T+A (Full): our standard fusion. Acoustic Gain: absolute gain of T+A (Full) over T (Text-only). Configuration MMAR (Layer-wise) MMSU (Acoustic/Trait) MMAU (Task) AM (Subset) Vox Avg. 
+
+Sign. Perc. Cult. Phon. Style Trait Snd. Mus. Spch. SR AC BS (1) T (Text-only) 46.51 55.45 58.39 60.27 47.28 30.46 65.47 61.38 75.38 61.34 52.25 21.80 53.00 (2) A (Audio-only) 69.77 69.31 73.72 69.97 54.03 35.35 80.48 74.25 78.08 50.56 66.90 31.60 62.84 (3) T+A (Partial) 55.81 59.90 67.88 60.06 48.70 43.06 78.39 73.05 71.17 53.47 53.67 23.80 57.41 (4) T+A (Full) 61.54 67.24 72.99 63.72 56.74 37.53 80.78 75.45 75.48 62.89 54.63 25.20 60.76 
+
+Acoustic Gain +15.03 +11.79 +9.47 +3.50 +9.53 +7.07 +15.31 +14.10 +0.10 +1.55 +2.40 +3.40 +7.80 Table 5: Sensitivity to the temporal decay factor ( 𝛾 ) on Vox-Infinity under a 5% KV cache budget. Accuracy (%). 𝛾 = 1.0
+
+denotes the baseline without temporal decay. Bold: best. Decay Factor ( 𝛾 ) PM UMT Conv BS Avg. 
+
+𝛾 = 0.80 68.40 35.10 96.90 20.30 55.17 
+
+𝛾 = 0.90 73.20 36.40 97.20 21.40 57.05 
+
+𝛾 = 0.95 76.50 37.00 97.60 22.00 58.28 
+
+𝛾 = 0.99 67.10 37.50 97.00 20.60 55.55 
+
+𝛾 = 1.00 62.60 37.80 96.80 19.80 54.25 
+
+Table 6: Efficiency at 64K context, 300 output tokens, 25% budget, on 8 ×A100 (80GB). Mem (peak memory) and TPS (tokens per second) include ASR overhead; Prefill is the LLM prefill latency. Bold: best. Method Prefill (s) ↓ Mem (GB) ↓ TPS (Speedup) ↑
+
+Full KV 2.26 235.93 2.10 (1 .00 ×)SnapKV 1.62 80.04 3.23 (1 .54 ×)PyramidKV 1.66 89.66 2.87 (1 .37 ×)ChunkKV 1.67 79.98 3.52 (1 .68 ×)
+
+VoxZip (Ours) 1.30 70.68 4.06 ( 1.93 ×)
+
+bringing the latency down to 1.30 seconds (a 1.74 × speedup) and thereby outperforming mainstream methods such as SnapKV and PyramidKV. The dynamic memory profile during multi-turn conversation (Figure 3) further illustrates the architectural advantages of VoxZip. As conversational turns accumulate, the memory footprint of Full Cache exhibits linear growth, eventually leading to potential out-of-memory risks. Although SnapKV and PyramidKV stabilize in later turns, their lack of token compression during the prefill stage results in notable peak memory overhead due to the large volume of initial input tokens. In contrast, VoxZip reduces the sequence length directly at the input source via preemptive semantic-anchored com-pression. Combined with the second-stage dynamic compression mechanism that further condenses historical tokens, VoxZip main-tains a gradual peak memory growth, ultimately plateauing at ap-proximately 66 GB. This approach effectively lowers the hardware memory requirements for sustained multi-turn conversation. 
+
+## 5 Limitations 
+
+The proposed VoxZip has two main limitations. Firstly, its reliance on ASR transcriptions as semantic anchors introduces vulnerability to noise and heavy accents; while our confidence-filtering strat-egy mitigates this, it cannot completely eliminate the impact of low-quality transcriptions. Secondly, the element-wise addition used for audio-text fusion is inherently simplistic and may not ad-equately model complex cross-modal dynamics, suggesting that integrating learnable fusion mechanisms could offer substantial future improvements. 
+
+## 6 Conclusion 
+
+In this paper, we investigate the modal heterogeneity phenomenon where audio attention scores exhibit low information density rela-tive to text. We propose VoxZip, a train-free audio KV cache com-pression framework that accelerates prefill and decoding. VoxZip operates in two stages: in the first stage, we use ASR transcriptions as semantic anchors to compress corresponding audio intervals and fuse them with text embeddings, increasing the information density of the audio semantic segments. In the second stage, we filter out low-information tokens by employing temporally decayed accu-mulated attention scores as a contribution metric, which further reduces low-density tokens and raises the overall compression ra-tio. Benchmark results on the Qwen3-Omni architecture across six audio tasks demonstrate that VoxZip consistently preserves holistic perception under high compression ratios. Notably, our method retains over 90% of the original performance under a 20 × KV cache compression ratio. At a 4 × KV cache compression ratio, we achieve up to a 3.3 × peak memory reduction and a 1.9 × inference speedup. 
+
+## Acknowledgments 
+
+This work was supported by the National Natural Science Founda-tion of China under Grant No. U25B2064, the “Pioneer” and “Lead-ing Goose” R&D Program of Zhejiang under Grant No. 2025C02110, the Public Welfare Research Program of Ningbo under Grant No. VoxZip: Semantic-Anchored Audio Compression MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil 
+
+2024S062, and the Yongjiang Talent Project of Ningbo under Grant No. 2024A-161-G. This research was also supported by Meituan. 
+
+## References 
+
+[1] Orevaoghene Ahia, Martijn Bartelds, Kabir Ahuja, Hila Gonen, Valentin Hofmann, Siddhant Arora, Shuyue Stella Li, Vishal Puttagunta, Mofetoluwa Adeyemi, Char-ishma Buchireddy, Ben Walls, Noah Bennett, Shinji Watanabe, Noah A. Smith, Yulia Tsvetkov, and Sachin Kumar. 2025. BLAB: Brutally Long Audio Bench. arXiv:2505.03054 [cs.AI] https://arxiv.org/abs/2505.03054 [2] Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Kem-ing Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. 2025. PyramidKV: Dynamic KV Cache Compression based on Pyramidal Information Funneling. arXiv:2406.02069 [cs.CL] https://arxiv.org/abs/2406.02069 [3] Di Cao, Dongjie Fu, Hai Yu, Siqi Zheng, Xu Tan, and Tao Jin. 2026. X-OPD: Cross-Modal On-Policy Distillation for Capability Alignment in Speech LLMs. arXiv:2603.24596 [eess.AS] https://arxiv.org/abs/2603.24596 [4] Liang Chen, Haozhe Zhao, Tianyu Liu, Shuai Bai, Junyang Lin, Chang Zhou, and Baobao Chang. 2024. An Image is Worth 1/2 Tokens After Layer 2: Plug-and-Play Inference Acceleration for Large Vision-Language Models. arXiv:2403.06764 [cs.CV] https://arxiv.org/abs/2403.06764 [5] Xize Cheng, Dongjie Fu, Chenyuhao Wen, Tao Jin, Hai Yu, Di Cao, Qinying Liu, Yexin Yang, Zehan Wang, Shengpeng Ji, Siqi Zheng, Xu Tan, and Zhou Zhao. 2026. Vox-Infinity: Benchmarking the Limits of Long-Context Spoken Language Models. https://openreview.net/forum?id=6dKwqnT7bu [6] Wenqian Cui, Dianzhi Yu, Xiaoqi Jiao, Ziqiao Meng, Guangyan Zhang, Qichao Wang, Steven Y. Guo, and Irwin King. 2025. Recent Advances in Speech Language Models: A Survey. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Mohammad Taher Pilehvar (Eds.). Association for Computational Linguistics, Vienna, Austria, 13943–13970. doi:10.18653/v1/ 2025.acl-long.682 [7] Dongjie Fu, Xize Cheng, Linjun Li, Xiaoda Yang, Lujia Yang, and Tao Jin. 2025. PACHAT: Persona-Aware Speech Assistant for Multi-party Dialogue. In Proceed-ings of the 2025 Conference on Empirical Methods in Natural Language Process-ing . Association for Computational Linguistics, Suzhou, China, 29325–29342. doi:10.18653/v1/2025.emnlp-main.1492 [8] Dongjie Fu, Fangming Feng, Xize Cheng, Linjun Li, Zhou Zhao, and Tao Jin. 2026. Character Beyond Speech: Leveraging Role-Playing Evaluation in Audio Large Language Models via Reinforcement Learning. arXiv:2604.13804 [cs.LG] https://arxiv.org/abs/2604.13804 [9] Sreyan Ghosh, Arushi Goel, Jaehyeon Kim, Sonal Kumar, Zhifeng Kong, Sang gil Lee, Chao-Han Huck Yang, Ramani Duraiswami, Dinesh Manocha, Rafael Valle, and Bryan Catanzaro. 2025. Audio Flamingo 3: Advancing Audio Intelligence with Fully Open Large Audio Language Models. In The Thirty-ninth Annual Conference on Neural Information Processing Systems . https://openreview.net/ forum?id=FjByDpDVIO [10] Sreyan Ghosh, Zhifeng Kong, Sonal Kumar, S Sakshi, Jaehyeon Kim, Wei Ping, Rafael Valle, Dinesh Manocha, and Bryan Catanzaro. 2025. Audio Flamingo 2: An Audio-Language Model with Long-Audio Understanding and Expert Reasoning Abilities. arXiv:2503.03983 [cs.SD] https://arxiv.org/abs/2503.03983 [11] Peize He, Zichen Wen, Yubo Wang, Yuxuan Wang, Xiaoqian Liu, Jiajie Huang, Ze-hui Lei, Zhuangcheng Gu, Xiangqi Jin, Jiabing Yang, Kai Li, Zhifei Liu, Weijia Li, Cunxiang Wang, Conghui He, and Linfeng Zhang. 2025. AudioMarathon: A Com-prehensive Benchmark for Long-Context Audio Understanding and Efficiency in Audio LLMs. arXiv:2510.07293 [cs.SD] https://arxiv.org/abs/2510.07293 [12] Shengpeng Ji, Yifu Chen, Minghui Fang, Jialong Zuo, Jingyu Lu, Hanting Wang, Ziyue Jiang, Long Zhou, Shujie Liu, Xize Cheng, Xiaoda Yang, Zehan Wang, Qian Yang, Jian Li, Yidi Jiang, Jingzhen He, Yunfei Chu, Jin Xu, and Zhou Zhao. 2024. WavChat: A Survey of Spoken Dialogue Models. arXiv:2411.13577 [eess.AS] https://arxiv.org/abs/2411.13577 [13] KimiTeam, Ding Ding, Zeqian Ju, Yichong Leng, Songxiang Liu, Tong Liu, Zeyu Shang, Kai Shen, Wei Song, Xu Tan, Heyi Tang, Zhengtao Wang, Chu Wei, Yifei Xin, Xinran Xu, Jianwei Yu, Yutao Zhang, Xinyu Zhou, Y. Charles, Jun Chen, Yanru Chen, Yulun Du, Weiran He, Zhenxing Hu, Guokun Lai, Qingcheng Li, Yangyang Liu, Weidong Sun, Jianzhou Wang, Yuzhi Wang, Yuefeng Wu, Yuxin Wu, Dongchao Yang, Hao Yang, Ying Yang, Zhilin Yang, Aoxiong Yin, Ruibin Yuan, Yutong Zhang, and Zaida Zhou. 2025. Kimi-Audio Technical Report. arXiv:2504.18425 [eess.AS] https://arxiv.org/abs/2504.18425 [14] Haoyang Li, Yiming Li, Anxin Tian, Tianhao Tang, Zhanchao Xu, Xuejia Chen, Nicole Hu, Wei Dong, Qing Li, and Lei Chen. 2025. A Survey on Large Language Model Acceleration based on KV Cache Management. arXiv:2412.19442 [cs.AI] https://arxiv.org/abs/2412.19442 [15] Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM Knows What You are Looking for Before Generation. In Advances in Neural Information Processing Systems , A. Globerson, L. Mackey, D. Belgrave, A. Fan, U. Paquet, J. Tomczak, and C. Zhang (Eds.), Vol. 37. Curran Associates, Inc., 22947–22970. doi:10.52202/079017-0722 [16] Zongqian Li, Yinhong Liu, Yixuan Su, and Nigel Collier. 2024. Prompt Com-pression for Large Language Models: A Survey. arXiv:2410.12388 [cs.CL] https://arxiv.org/abs/2410.12388 [17] Yueqian Lin, Yuzhe Fu, Jingyang Zhang, Yudong Liu, Jianyi Zhang, Jingwei Sun, Hai Helen Li, and Yiran Chen. 2025. SpeechPrune: Context-Aware Token Pruning for Speech Information Retrieval. In 2025 IEEE International Conference on Multimedia and Expo (ICME) . 1–6. doi:10.1109/ICME59968.2025.11209113 [18] Xiang Liu, Zhenheng Tang, Peijie Dong, Zeyu Li, Yue Liu, Bo Li, Xuming Hu, and Xiaowen Chu. 2025. ChunkKV: Semantic-Preserving KV Cache Compression for Efficient Long-Context LLM Inference. arXiv:2502.00299 [cs.CL] https://arxiv. org/abs/2502.00299 [19] Yanyu Liu, Jingying Fu, Sixiang Liu, Yitian Zou, You Fu, Jiehan Zhou, and Shouhua Zhang. 2025. KV Cache Compression for Inference Efficiency in LLMs: A Review. arXiv:2508.06297 [cs.DC] https://arxiv.org/abs/2508.06297 [20] Ziyang Ma, Yinghao Ma, Yanqiao Zhu, Chen Yang, Yi-Wen Chao, Ruiyang Xu, Wenxi Chen, Yuanzhe Chen, Zhuo Chen, Jian Cong, Kai Li, Keliang Li, Siyou Li, Xinfeng Li, Xiquan Li, Zheng Lian, Yuzhe Liang, Minghao Liu, Zhikang Niu, Tianrui Wang, Yuping Wang, Yuxuan Wang, Yihao Wu, Guanrou Yang, Jianwei Yu, Ruibin Yuan, Zhisheng Zheng, Ziya Zhou, Haina Zhu, Wei Xue, Emmanouil Benetos, Kai Yu, EngSiong Chng, and Xie Chen. 2025. MMAR: A Challenging Benchmark for Deep Reasoning in Speech, Audio, Music, and Their Mix. In The Thirty-ninth Annual Conference on Neural Information Processing Systems Datasets and Benchmarks Track . https://openreview.net/forum?id=fgmrBJemlQ [21] Jing Peng, Yucheng Wang, Bohan Li, Yiwei Guo, Hankun Wang, YanGui Fang, Yu Xi, Haoyu Li, Xu Li, Ke Zhang, Shuai Wang, and Kai Yu. 2026. A Survey on Speech Large Language Models for Understanding. IEEE Journal of Selected Topics in Signal Processing 20, 1 (Jan. 2026), 2–31. doi:10.1109/jstsp.2025.3640535 [22] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Brad-bury, Anselm Levskaya, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. 2022. Efficiently Scaling Transformer Inference. arXiv:2211.05102 [cs.LG] https://arxiv.org/abs/2211.05102 [23] Alec Radford, Jong Wook Kim, Tao Xu, Greg Brockman, Christine McLeavey, and Ilya Sutskever. 2022. Robust Speech Recognition via Large-Scale Weak Supervision. arXiv:2212.04356 [eess.AS] https://arxiv.org/abs/2212.04356 [24] Sakshi Sakshi, Utkarsh Tyagi, Sonal Kumar, Ashish Seth, Ramaneswaran Selvakumar, Oriol Nieto, Ramani Duraiswami, Sreyan Ghosh, and Di-nesh Manocha. 2025. MMAU: A Massive Multi-Task Audio Under-standing and Reasoning Benchmark. In International Conference on Learn-ing Representations , Y. Yue, A. Garg, N. Peng, F. Sha, and R. Yu (Eds.), Vol. 2025. 84929–84964. https://proceedings.iclr.cc/paper_files/paper/2025/file/ d36f208919582785db965fe648b9fe59-Paper-Conference.pdf [25] Keda Tao, Can Qin, Haoxuan You, Yang Sui, and Huan Wang. 2025. DyCoke: Dynamic Compression of Tokens for Fast Video Large Language Models. In 
+
+Proceedings of the Computer Vision and Pattern Recognition Conference (CVPR) .18992–19001. [26] Zhongwei Wan, Xinjian Wu, Yu Zhang, Yi Xin, Chaofan Tao, Zhihong Zhu, Xin Wang, Siqi Luo, Jing Xiong, Longyue Wang, and Mi Zhang. 2025. D2O: Dynamic Discriminative Operations for Efficient Long-Context Inference of Large Language Models. arXiv:2406.13035 [cs.CL] https://arxiv.org/abs/2406.13035 [27] Zhongwei Wan, Ziang Wu, Che Liu, Jinfa Huang, Zhihong Zhu, Peng Jin, Longyue Wang, and Li Yuan. 2024. LOOK-M: Look-Once Optimization in KV Cache for Efficient Multimodal Long-Context Inference. In Findings of the Association for Computational Linguistics: EMNLP 2024 , Yaser Al-Onaizan, Mohit Bansal, and Yun-Nung Chen (Eds.). Association for Computational Linguistics, Miami, Florida, USA, 4065–4078. doi:10.18653/v1/2024.findings-emnlp.235 [28] Dingdong WANG, Jincenzi Wu, Junan Li, Dongchao Yang, Xueyuan Chen, Tian-hua Zhang, and Helen M. Meng. 2026. MMSU: A Massive Multi-task Spoken Language Understanding and Reasoning Benchmark. In The Fourteenth Interna-tional Conference on Learning Representations . https://openreview.net/forum?id= yHzCDP1tXw [29] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In The Twelfth Inter-national Conference on Learning Representations . https://openreview.net/forum? id=NG7sS51zVF [30] Jin Xu, Zhifang Guo, Jinzheng He, Hangrui Hu, Ting He, Shuai Bai, Keqin Chen, Jialin Wang, Yang Fan, Kai Dang, Bin Zhang, Xiong Wang, Yunfei Chu, and Junyang Lin. 2025. Qwen2.5-Omni Technical Report. arXiv:2503.20215 [cs.CL] https://arxiv.org/abs/2503.20215 [31] Jin Xu, Zhifang Guo, Hangrui Hu, Yunfei Chu, Xiong Wang, Jinzheng He, Yuxuan Wang, Xian Shi, Ting He, Xinfa Zhu, Yuanjun Lv, Yongqi Wang, Dake Guo, He Wang, Linhan Ma, Pei Zhang, Xinyu Zhang, Hongkun Hao, Zishan Guo, Baosong Yang, Bin Zhang, Ziyang Ma, Xipin Wei, Shuai Bai, Keqin Chen, Xuejing Liu, Peng Wang, Mingkun Yang, Dayiheng Liu, Xingzhang Ren, Bo Zheng, Rui Men, Fan Zhou, Bowen Yu, Jianxin Yang, Le Yu, Jingren Zhou, and Junyang Lin. 2025. Qwen3-Omni Technical Report. arXiv preprint arXiv:2509.17765 (2025). MM ’26, November 10–14, 2026, Rio de Janeiro, Brazil Wenxu Jia et al. 
+
+[32] Aohan Zeng, Zhengxiao Du, Mingdao Liu, Kedong Wang, Shengmin Jiang, Lei Zhao, Yuxiao Dong, and Jie Tang. 2024. GLM-4-Voice: Towards Intelligent and Human-Like End-to-End Spoken Chatbot. arXiv:2412.02612 [cs.CL] https://arxiv. org/abs/2412.02612 [33] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Re, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Thirty-seventh Conference on Neural Information Processing Systems . https://openreview.net/forum?id=RkRrPp7GKO [34] Zixuan Zhou, Xuefei Ning, Ke Hong, Tianyu Fu, Jiaming Xu, Shiyao Li, Yuming Lou, Luning Wang, Zhihang Yuan, Xiuhong Li, Shengen Yan, Guohao Dai, Xiao-Ping Zhang, Yuhan Dong, and Yu Wang. 2024. A Survey on Efficient Inference for Large Language Models. arXiv:2404.14294 [cs.CL] https://arxiv.org/abs/2404. 14294

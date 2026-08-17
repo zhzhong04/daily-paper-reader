@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-16</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-17</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 1 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>0</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-16 20:48:25 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-17 20:57:01 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读聚焦多轮智能体KV缓存压缩与调度优化，速读覆盖缓存检索、蒸馏与安全；最值得关注的是《CommitKV》提出的生命周期感知压缩（9.0分）和《TideRL》的就绪感知调度（8.0分）；建议读者优先跟进KV缓存效率与多租户安全方向，后续可关注实际部署效果。</p>
+<p>今日仅速读 1 篇论文，聚焦长上下文音频推理的 KV 缓存压缩。</p>
+<p>值得关注的方向：VoxZip 通过语义锚定压缩缓存，为音频推理提效提供新思路。</p>
+<p>建议普通读者后续可留意该方向在音频问答或多模态场景的落地验证。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">0 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CommitKV: Lifecycle-Aware KV Cache Compression via Commit Transitions for Multi-Turn Agents">CommitKV: Lifecycle-Aware KV Cache Compression via Commit Transitions for Multi-Turn Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="TideRL: Boosting Agentic RL Goodput with Readiness-Aware Scheduling">TideRL: Boosting Agentic RL Goodput with Readiness-Aware Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="ImpactHO: Importance-Aware KV Cache Transfer for Multi-User Edge LLM Handover">ImpactHO: Importance-Aware KV Cache Transfer for Multi-User Edge LLM Handover</span></li></ul>
+<p class="dpr-home-dashboard-empty">今日暂无推荐。</p>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs">KGCache: Amortized Subgraph Retrieval for KG Reasoning with LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="DistillCache: KL-Guided Adaptive KV-Cache Eviction for Memory-Efficient LLM Inference">DistillCache: KL-Guided Adaptive KV-Cache Eviction for Memory-Efficient LLM Inference</span></li><li><span class="dpr-home-dashboard-paper-title" title="Governing the KV Cache: Preventing Timing Side-Channel Leakage in Multi-Tenant LLM Inference">Governing the KV Cache: Preventing Timing Side-Channel Leakage in Multi-Tenant LLM Inference</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="VoxZip: Semantic-Anchored Temporal KV Cache Compression for Long-Context Audio Inference">VoxZip: Semantic-Anchored Temporal KV Cache Compression for Long-Context Audio Inference</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>6</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 </div>
 
