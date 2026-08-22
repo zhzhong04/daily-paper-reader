@@ -1,0 +1,1098 @@
+Title: Optimal Skill Selection for LLM Agents with Provable Bicriteria Guarantees
+
+URL Source: https://arxiv.org/pdf/2608.19993v1
+
+Published Time: Fri, 21 Aug 2026 00:51:50 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+## arXiv preprint, August 21, 2026 
+
+# Optimal Skill Selection for LLM Agents with Provable Bicriteria Guarantees 
+
+## Yu Chen 1,★ , Ruishuo Chen 1,★ , Xun Wang 1, Zhuoran Li 1, and Longbo Huang 1 #
+
+1Institute for Interdisciplinary Information Sciences, Tsinghua University 
+
+## # Correspondence: longbohuang@tsinghua.edu.cn  
+
+> ★
+
+## Equal contribution, listed in random order. 
+
+Abstract. Loading reusable skill documents into a bounded context window is now the primary way large language model (LLM) agents acquire task-specific capabilities, which makes skill selection a first-order determinant of task performance and token cost. Yet current agents score skills independently by semantic relevance and assemble the set by top-𝑘 or greedy packing, with no quality guarantee or cost awareness on the selected set. As a result, redundant or poorly chosen skills waste scarce context tokens and can even degrade performance. We give the first model of how the selected skill set shapes execution outcomes and cast skill selection as an optimization problem: choose a skill set under a hard token budget to maximize a monotone submodular benefit minus context penalty. For this problem, we develop Best Prefix Selection ( BPS ), a polynomial-time algorithm, and prove, to our knowledge, the first performance guarantee for skill selection: a bicriteria (1 − 1/𝑒, 1) approximation whose benefit coefficient is optimal in polynomial time. On a contamination-controlled BigCodeBench variant, BPS 
+
+outperforms all the baselines, reaching 0 .73 measured task success versus 0 .20–0 .52 for released skill routers, text retrievers, and the executor’s own selection, on 28% fewer tokens than the strongest released router. 
+
+## 1. Introduction 
+
+Large language model (LLM) agents increasingly rely on reusable skill documents to acquire task-specific capabilities beyond their parametric knowledge (Yang et al., 2026), and public skill registries already list tens of thousands of installable skills (Cho et al., 2026; Gao et al., 2026). Modern production agents such as Codex (OpenAI, 2026) and Claude Code (Anthropic, 2025) deploy skills through a two-stage mechanism of 
+
+selection and execution : the LLM reviews each installed skill’s metadata (name and description) and selects skills according to the query, then loads only the selected skill documents into its context window to solve the task. However, both stages are limited by the model’s finite context window: the context cost of selection scales with the size of the installed skill library, whereas execution consumes additional context for the selected skill documents and task input. As skill libraries grow to hundreds or thousands of entries (Cho et al., 2026; Zheng et al., 2026b), the metadata alone can exceed the available context budget, making exhaustive LLM-based selection infeasible (Gan & Sun, 2025). Furthermore, poor skill selection has measurable consequences for downstream execution: empirical evidence shows that selecting the wrong skills cuts pass rates by up to 21% as libraries grow (Song & Wei, 2026), and selected skills can even push success below the no-skill baseline on 13 of 87 benchmark tasks despite curation (Li et al., 2026b). These limitations of modern agent architectures have driven growing interest in dedicated skill-selection mechanisms, ranging from per-skill retrieval and routing to set-aware packing and context construction (Gan & Sun, 2025; Fore et al., 2024; Zheng et al., 2026b,a; Li et al., 2026c). However, without a principled formulation to guide selection, these methods largely follow a common heuristic template: each skill is scored independently by semantic relevance or a learned preference, and the selected set is then assembled using rules such as top-𝑘 (Qu et al., 2024; Li et al., 2026a), truncation (Liu et al., 2026), or greedy packing (Zheng 1arXiv:2608.19993v1 [cs.AI] 20 Aug 2026 Optimal Skill Selection for LLM Agents One Capability           
+
+> 0% 0%
+> Success Rate Tokens
+> 210 240
+> Complementary
+> pkzip_core pk64_core
+> pkzip_core
+> pk64_core
+> 93%
+> Success Rate Tokens
+> Redundant
+> pkzip_core pk64_core Success Rate Tokens
+> pk64_snip 94%
+> +1pp
+> 675 450
+> Irrelevant
+> pkzip_core pk64_core
+> Success Rate Tokens
+> 835 56% -23pp
+
+Skill Selection 
+
+> Skill 2 Skill 1
+
+LLM Executor   
+
+> ①Frozen Model
+> ②Context Budget
+> Select a set of skill
+
+Skill Selection Effect 
+
+Task: Complete a zip-then-encode pipeline. 
+
+Input Encode 0101 1010 
+
+Output Zip 
+
+Skill Selection Paradigm 
+
+> pkzip_core
+> Zip API and semantics ~210 Tokens
+> pk64_core
+> Encode API and semantics ~240 Tokens
+> pk64_snip
+> Encode API and similar semantics ~225 Tokens
+> pk64_extra
+> Irrelevant API and similar semantics ~385 Tokens
+
+Skill Library 
+
+> pk64_extra
+
+Figure 1 | Top: The common skill-selection paradigm for coding agents: given a task, the system selects skills from a library and provides them to a frozen LLM executor. Bottom: Effective skill selection depends on capability composition rather than individual relevance. The LLM executor benefits from skill sets that cover the required capabilities, while redundant and irrelevant skills consume context budget with little or negative utility. 
+
+et al., 2026a), ignoring the context cost that loading the selected skill documents imposes at execution time, and leaving capability overlap and complementarity among the selected skills unmodeled. Yet these capability relationships are critical to effective skill selection. Fig. 1 illustrates a common skill-selection paradigm for coding agents (OpenAI, 2026; Anthropic, 2025): given a task, the system selects skills from a library and provides them to a frozen LLM executor. Following this paradigm, we evaluate Qwen3-32B (Yang et al., 2025) on tasks whose required private APIs and semantics are accessible only through the selected skills, making execution performance directly dependent on selection quality. We find that skills covering only one capability achieve zero success, whereas complementary skills covering both reach a 93% success rate. After both capabilities are covered, adding a redundant pk64_snip skill consumes 225 additional tokens but improves the success rate by only 1 percentage point, while adding a semantically related but task-irrelevant 
+
+pk64_extra skill reduces it by 23 percentage points. Together, these results establish skill selection as a budgeted set-level decision rather than a ranking of individual skills. Motivated by these observations, we conduct a principled study on how to formalize and optimize the skill selection stage: given a task query and a bounded token budget, deciding which skill documents to inject into the execution context so that the scarce budget is allocated to the capabilities required by the task (Section 3). Our model takes a capability view of how skills improve performance: each skill document supplies task-relevant capabilities, and the query demands some of them. A concave response aggregates supplies of skill set 𝑆 within each capability dimension, capturing diminishing returns from repeatedly covering the same capability, while separate dimensions reward covering all demanded capabilities. The resulting gross benefit 𝐺 (𝑆 ) is monotone submodular. To model the performance degradation caused by overlong contexts, the selected skill set is in turn charged a linear context penalty proportional to its token length ℓ(𝑆 ), and the total length must not exceed the available budget 𝐵 . Skill selection therefore becomes maximizing this structured objective subject to the hard token budget with the form: max   
+
+> 𝑆 :ℓ(𝑆 ) ≤ 𝐵
+
+𝐹 (𝑆 ) := 𝐺 (𝑆 ) − 𝜅ℓ (𝑆 ). (1) This problem, formalized in Section 3, is an instance of regularized submodular maximization under a knapsack constraint. 2Optimal Skill Selection for LLM Agents 
+
+Solving this optimization with a provable guarantee, however, faces fundamental barriers. Without the penalty, the problem contains monotone submodular knapsack maximization, which admits no approximation better than 1 − 1/𝑒 unless P = NP (Feige, 1998). With the penalty, the objective may be negative, ruling out constant multiplicative approximation and motivating a bicriteria guarantee (Nikolakaki et al., 2021; Harshaw et al., 2019). Existing results for solving regularized submodular maximization with a hard budget constraint obtain weaker approximation coefficients (Gong et al., 2024; Guo et al., 2026; Zhang & Luo, 2026) or incur an additive precision-dependent loss (Perrault et al., 2021). Our result attains the best possible coefficient 1 − 1/𝑒 on the submodular benefit while preserving the full penalty, achieving a bicriteria (1 − 1/𝑒, 1)-approximation guarantee for the skill selection problem (1) via a novel budget-aligned interpolation argument that converts a fractional point on a density chain into one of its recorded integral prefixes, exploiting the aligned form of the constraint and the penalty. To our knowledge, this work provides the first structured model of how the selected skill set shapes execution outcomes and the first skill-selection algorithm with a provable performance guarantee. We summarize our main contributions as follows. • New Formulation. We formalize skill selection as a regularized submodular maximization problem under a token budget constraint in Section 3. The structured objective makes redundancy, complementarity, and context cost explicit, and its parameters can be fitted from execution outcomes, with fitting error provably transferring to bounded selection regret. We validate the model on real executions in Section 5.2. • Optimal Bicriteria Guarantee. We develop Best Prefix Selection ( BPS , Algorithm 1), a polynomial-time algorithm for the skill selection problem, and prove the tight (1−1/𝑒, 1) bicriteria guarantee (Theorem 1), achieving optimality for the benefit approximation coefficient. In the analysis, we propose budget-aligned interpolation, a novel technique exploiting the fact that the budget constraint and the context penalty share the same length coordinate, which yields the tight benefit coefficient 1 − 1/𝑒 (Section 4.3). • Real-world Experiments. We construct a contamination-controlled benchmark whose tasks are gated to be unsolvable unless the injected skills supply every capability they require. On it, objective (1) fitted from pass/fail records alone predicts unseen skill sets accurately and recovers their hidden capability coverage; BPS attains its exact optimum on every selection instance; and the sets it selects beat every deployed selector we could run by 0 .22–0 .53 in measured task success, on 28% fewer tokens than the strongest released router (Sections 3.3 and 5). 
+
+## 2. Related Work 
+
+2.1. Skill Selection for LLM Agents 
+
+Skill retrieval and routing (Cho et al., 2026; Zheng et al., 2026b; Su et al., 2026; Xiao et al., 2026; Wang et al., 2026) narrow a large skill library to a candidate pool for downstream selection, following a pipeline inherited from tool use (Qin et al., 2024; Qu et al., 2024). SkillsInjector (Li et al., 2026c) learns how many skills to inject and renders them jointly; SkillSelect-Serve (Zheng et al., 2026a) greedily packs itemwise scores under token and deployment constraints; Graph-of-Skills (Liu et al., 2026) expands dependency-aware bundles under a context cap yet leaves its budgeted objective unsolved; GoSkills (Zeng et al., 2026) and SkillComposer (Zhao et al., 2026) assemble bounded skill groups and autoregressive subsets. To our knowledge, none of these heuristics states a provable guarantee for the injected set. Guarantee-bearing neighbors decide different objects: PACMS (Ghulyani et al., 2026) applies facility-location coverage to accumulated session content under a token knapsack, and the knapsack composer of (Yuan et al., 2025) admits agentic components online with a competitive ratio. In contrast, we formulate skill selection for a fixed executor as regularized submodular maximization under a hard knapsack token budget, explicitly modeling set-level redundancy and complementarity. 
+
+2.2. Regularized Submodular Maximization 
+
+Submodular maximization under a knapsack budget is a classical template for placing content and services on constrained resources (Golrezaei et al., 2012; Poularakis et al., 2019). Skill selection re-instantiates it with the context window as the constraint. For the pure benefit objective, density greedy with size-three 3Optimal Skill Selection for LLM Agents 
+
+seed enumeration attains the tight 1 − 1/𝑒 (Sviridenko, 2004), and refined analyses shrink the enumerated seeds to size two (Kulik et al., 2021; Feldman et al., 2023). ParetoGreedy (Vombatkere & Terzi, 2026) extends this template toward benefit-cost trade-offs by recording every prefix of each greedy chain, and proves instance-dependent guarantees on the Pareto frontier, but no guarantee for the regularized objective 𝐺 − 𝜅ℓ 
+
+at a fixed 𝜅 . Maximizing this regularized objective, however, changes the problem’s character: it can be negative, which rules out any constant multiplicative approximation (Nikolakaki et al., 2021). Distorted greedy (Harshaw et al., 2019) achieves a (1 − 1/𝑒, 1) bicriteria guarantee only under a cardinality constraint. Under the hard knapsack constraint, guarantees for the regularized objective come from two sparsely connected lines. Specializing the knapsack Ψ-greedy of (Perrault et al., 2021) to our aligned objective gives (1 − 1/𝑒, 1)
+
+up to an additive 𝜅𝜖 , paid with 𝑂 (𝐵 /𝜖 ) budget levels. The budgeted-profit works reach (1/4, 1) (Gong et al., 2024) and (( 1 − 1/𝑒 )/ 2, 1/2) in near-linear time (Guo et al., 2026), and (1/8 − 𝜖, 1) in one streaming pass (Zhang & Luo, 2026). Our result attains (1 − 1/𝑒, 1) exactly, with none of these compromises, and the benefit coefficient 1 − 1/𝑒 is optimal for polynomial-time algorithms (Section 4). 
+
+## 3. Model and Optimization Problem 
+
+In this section, we formalize the two-stage skill-interaction model in modern LLM agents. Let L = {𝑠 1, · · · , 𝑠 𝐿 }
+
+denote the skill library, where 𝑠 𝑖 is the 𝑖 -th skill document. Given a query 𝑞 , the selection stage chooses a subset of skills, indexed by 𝑆 ⊆ [ 𝐿 ], for a downstream executor 𝐸 , held fixed throughout. With the documents of the selected skills injected into its context window, 𝐸 executes the query 𝑞 and produces an observable outcome  
+
+> 𝑌 𝐸
+
+(𝑞, 𝑆 ). We define the execution effect of skill set 𝑆 as  
+
+> 𝐹 ★𝐸
+
+(𝑞, 𝑆 ) := 𝔼 𝑌 𝐸 (𝑞, 𝑆 ) − 𝑌 𝐸 (𝑞, ∅)  . (2)  
+
+> 𝐹 ★𝐸
+
+(𝑞, 𝑆 ) measures the performance improvement from injecting skill set 𝑆 into 𝐸 ’s context window, relative to running 𝐸 without any skills. A natural formulation of the selection stage is to choose the skill index set 𝑆 that maximizes the execution effect 𝐹 ★𝐸 (𝑞, 𝑆 ). However, the execution effect 𝐹 ★𝐸 (𝑞, 𝑆 ) is a black-box function of the frozen executor 𝐸 , the query 
+
+> 𝑞
+
+, and the skill set 𝑆 . Therefore, we need a structured model to approximate the execution effect 𝐹 ★𝐸 (𝑞, 𝑆 ).In the following sections, we model the execution effect 𝐹 ★𝐸 (𝑞, 𝑆 ) in three steps. Section 3.1 distills empirical observations into a structured objective, a monotone submodular capability benefit minus a linear degradation penalty; Section 3.2 casts the selection stage as maximizing this objective under a hard token budget and locates its computational hardness; and Section 3.3 shows that all latent parameters are learnable from execution records, with fitting error provably transferring to selection regret (Proposition 1). We validate the fitted objective on real executions in Section 5.2. 
+
+3.1. Key Observations and Structured Objective 
+
+The structured model is motivated by three recurring observations. (i) Context value is query-dependent and set-level: for the fixed executor 𝐸 , the positive performance contribution of injecting a skill is not an intrinsic per-skill score. It depends in part on whether the capabilities conveyed by the skill document match those required by query 𝑞 (Didolkar et al., 2024; An et al., 2023; Xu et al., 2024) and complement those already supplied by the selected set 𝑆 (Gupta et al., 2023). (ii) More injected context is not uniformly beneficial: irrelevant content can distract execution (Shi et al., 2023), redundant items may add little marginal coverage (Gupta et al., 2023; Kumari et al., 2024), and longer inputs can reduce performance in some settings even when the relevant evidence is retrieved correctly (Liu et al., 2024). (iii) For a fixed executor and agent-framework configuration, the selected skill documents must fit within the residual context budget (Ye et al., 2023; Kumari et al., 2024; Qu et al., 2024). Guided by these observations, we build the structured model around a latent capability space . Observations (i) and (ii) shape the benefit side, while observations (ii) and (iii) shape the cost side. The following two paragraphs formalize the two sides in turn. 
+
+Structured Capability Benefit Following observations (i) and (ii), we model the positive contribution of skills through a latent capability space with 𝑑 dimensions. For each skill 𝑠 𝑖 ∈ L , we assume there exists a latent 4Optimal Skill Selection for LLM Agents 
+
+capability supply vector 𝒖 𝑖 = (𝑢 𝑖, 1, · · · , 𝑢 𝑖,𝑑 ) ∈ ℝ𝑑 
+
+> +
+
+, where 𝑢 𝑖,𝑘 quantifies how much capability skill 𝑠 𝑖 supplies in the 𝑘 -th dimension, e.g., operating git or analyzing logs. To model the complementarity and redundancy among skills, we introduce a nondecreasing concave function 
+
+ℎ𝑘 with ℎ𝑘 (0) = 0 that captures diminishing returns within the same capability dimension: for a skill set 𝑆 , we use ℎ𝑘 
+
+ Í 𝑖 ∈𝑆 𝑢 𝑖,𝑘 
+
+ to represent the capability coverage of 𝑆 in the 𝑘 -th dimension, so that supplies in the same dimension overlap redundantly while supplies in different dimensions remain complementary. For query 𝑞 , we assume there exists a latent capability demand vector 𝒘 𝑞 = (𝑤 𝑞 
+
+> 1
+
+, · · · , 𝑤 𝑞 𝑑 ) ∈ ℝ𝑑  
+
+> +
+
+that encodes the query’s demand for each capability dimension. We then model the gross benefit of injecting skill set 𝑆 into executor 𝐸 as a monotone submodular function 
+
+𝐺 𝐸 (𝑞, 𝑆 ) :=
+
+> 𝑑
+
+∑︁ 
+
+> 𝑘 =1
+
+𝜂 𝐸 𝑘 𝑤 𝑞 𝑘 · ℎ𝑘 𝜆 𝐸 𝑘 ∑︁ 𝑖 ∈𝑆 
+
+𝑢 𝑖,𝑘 
+
+!
+
+, (3) where 𝜂 𝐸 𝑘 ≥ 0 and 𝜆 𝐸 𝑘 ≥ 0 are executor-specific parameters that calibrate 𝐸 ’s sensitivity to the 𝑘 -th capability dimension. 𝐺 𝐸 ’s form aligns with the standard model of weighted coverage with diminishing returns in document summarization and data selection (Lin & Bilmes, 2011; Kirchhoff & Bilmes, 2014), with capability dimensions playing the role of features. Intuitively, 𝐺 𝐸 lives on the scale of a log success probability, since success rates across demanded dimensions multiply, so its steepest gains fall on demanded dimensions that remain uncovered. 
+
+Degradation Penalty and Hard Context Budget Following observation (ii), injected documents impose a cost that grows with context length. Assume each skill document 𝑠 𝑖 has a token length ℓ𝑖 , the number of context-window tokens it occupies once injected, and write ℓ(𝑆 ) := Í𝑖 ∈𝑆 ℓ𝑖 for the total token length of skill set 
+
+𝑆 . We model the performance degradation caused by injecting 𝑆 as a linear penalty 
+
+𝑐 𝐸 (𝑆 ) := 𝜅 𝐸 · ℓ(𝑆 ), (4) where 𝜅 𝐸 ≥ 0 is the frozen executor’s first-order per-token context sensitivity. This per-token charge is consistent with measurements in the skill setting: compressing skill-document bodies improves execution quality (Gao et al., 2026), and focused skills outperform larger, exhaustive ones (Li et al., 2026b). Moreover, observation (iii) imposes a hard feasibility limit on skill selection. We take the budget 𝐵 to be the residual token budget available to skill documents in the agent framework. The hard budget defines the feasible family 
+
+F𝐵 = {𝑆 ⊆ [ 𝐿 ] : ℓ(𝑆 ) ≤ 𝐵 } . (5) 
+
+3.2. Optimization Problem in Skill Selection 
+
+Given the structured model above, we formalize the selection stage as a constrained optimization problem. The structured selection objective combines the capability benefit with the degradation penalty, 
+
+𝐹 𝐸 (𝑞, 𝑆 ) := 𝐺 𝐸 (𝑞, 𝑆 ) − 𝑐 𝐸 (𝑆 ), (6) and the selection problem maximizes it over the feasible family: max 
+
+> 𝑆 ∈ F 𝐵
+
+𝐹 𝐸 (𝑞, 𝑆 ). (7) Problem (7) is computationally hard: setting 𝜅 𝐸 = 0 and specializing the responses ℎ𝑘 to truncated sums recovers budgeted maximum coverage (Khuller et al., 1999), an NP-hard slice of monotone submodular knapsack maximization (Sviridenko, 2004). Moreover, the penalty makes 𝐹 𝐸 non-monotone and possibly negative, ruling out any constant multiplicative approximation in polynomial time (Nikolakaki et al., 2021). Section 4 therefore develops an algorithm with a bicriteria guarantee that treats the benefit and the penalty asymmetrically. 5Optimal Skill Selection for LLM Agents 3.3. Model Validity and Learnable Parameterization 
+
+The structured objective (6) is built on latent quantities. Among its primitives, only the token length ℓ𝑖 for each skill document 𝑠 𝑖 is observable. The capability supplies 𝒖 𝑖 , the query demand 𝒘 𝑞 , and the executor calibration parameters 𝜂 𝐸 𝑘 , 𝜆 𝐸 𝑘 , 𝜅 𝐸 admit no direct measurement. Two questions therefore decide whether the model is usable in practice: whether these latent quantities can be estimated from data, and whether an accurately estimated objective leads to a well-chosen skill set. For the first question, the key observation is that the selection objective never requires the latent factors individually. In (3), the demand 𝑤 𝑞 𝑘 enters only through the product 𝜂 𝐸 𝑘 𝑤 𝑞 𝑘 , and the supply 𝑢 𝑖,𝑘 only through 
+
+𝜆 𝐸 𝑘 𝑢 𝑖,𝑘 . Defining the effective demand and effective supply 
+
+e𝑤 𝑞 𝑘 := 𝜂 𝐸 𝑘 𝑤 𝑞 𝑘 , e𝑢 𝑖,𝑘 := 𝜆 𝐸 𝑘 𝑢 𝑖,𝑘 , ∀𝑘 ∈ [ 𝑑 ], (8) the gross benefit (3) rewrites exactly as 𝐺 𝐸 (𝑞, 𝑆 ) = Í𝑑 𝑘 =1 e𝑤 𝑞 𝑘 ℎ𝑘 
+
+ Í 𝑖 ∈𝑆 e𝑢 𝑖,𝑘 
+
+. We therefore estimate the effective quantities directly with two capability encoders : a demand encoder b𝜓 𝐸 : 𝑞 ↦ → b𝒘 𝑞 and a supply encoder 
+
+b𝜙 𝐸 : 𝑠 𝑖 ↦ → b𝒖 𝑖 , where b𝒘 𝑞 and b𝒖 𝑖 are estimates of the effective demand e𝒘 𝑞 and effective supply e𝒖 𝑖 , respectively. Each encoder is instantiated as a text encoder with a nonnegative output layer, so that the fitted objective inherits the monotone submodularity established in Section 3.1. The context sensitivity is calibrated as b𝜅 𝐸 
+
+jointly with the encoders on execution records (𝑞, 𝑆, 𝑌 𝐸 (𝑞, 𝑆 )) of the frozen executor. Inspired by (Iyer & Bilmes, 2015), we fix the saturating form ℎ𝑘 (𝑥 ) = 1 − 𝑒 −𝑥 , which is nondecreasing, concave, and bounded, thereby assigning diminishing marginal value once a capability dimension is sufficiently covered. For the second question, we give a conditional answer: whenever the fitted objective is uniformly accurate, any near-optimal selection under the fitted objective is provably near-optimal for the true execution effect. Let 
+
+b𝐹 𝐸 (𝑞, 𝑆 ) denote the fitted objective, obtained by instantiating (6) with the encoder outputs and the calibrated 
+
+b𝜅 𝐸 :
+
+b𝐹 𝐸 (𝑞, 𝑆 ) :=
+
+*b𝜓 𝐸 (𝑞 ), ℎ  ∑︁ 
+
+> 𝑖 ∈𝑆
+
+b𝜙 𝐸 (𝑠 𝑖 )
+
+!+ 
+
+− b𝜅 𝐸 · ℓ(𝑆 ), (9) where ℎ(·) applies {ℎ𝑘 } componentwise. At decision time, the selection layer solves the fitted selection problem ,which is the deployable counterpart of (7) and is defined by max 
+
+> 𝑆 ∈ F 𝐵
+
+b𝐹 𝐸 (𝑞, 𝑆 ). (10) Solving (10) is worthwhile, however, only insofar as the fitted objective tracks the true execution effect. We formalize this accuracy requirement as a uniform error bound over the feasible family. 
+
+Assumption 1 (Uniform fitting error) . For the fixed instance (𝑞, 𝐸, 𝐵 ), there exists 𝜀 ≥ 0 such that 𝐹 ★𝐸 (𝑞, 𝑆 ) − 
+
+b𝐹 𝐸 (𝑞, 𝑆 ) ≤ 𝜀 for all 𝑆 ∈ F 𝐵 .The fitting error 𝜀 aggregates two sources: structural mismatch of the objective model in Section 3.1, and estimation error of the encoders and the calibrated b𝜅 𝐸 .In Section 5.2 we fit (9) on execution records of a frozen Qwen3-32B and evaluate it on skill combinations held out from the fit. It predicts their success to within one percentage point, and orders them by success more accurately than every value model we compare against, including neural set regressors with 60 × as many parameters. Its fitted supplies also recover the true skill-capability coverage matrix, hidden from the fit: over the 155 (skill, capability) pairs, b𝑢 𝑖,𝑘 ranks a covered pair above an uncovered one 99 .6% of the time (AUC 0.996, Fig. 2). Assumption 1 is therefore attainable on a real executor from pass/fail outcomes alone, with 281 parameters and nothing assumed beyond the structured form (3). The next proposition bounds the end-to-end selection regret for any rule that approximately solves (10). 
+
+Proposition 1 (Error transfer) . Under Assumption 1, every b𝑆 ∈ F 𝐵 with b𝐹 𝐸 (𝑞, b𝑆 ) ≥ max 𝑆 ∈ F 𝐵 b𝐹 𝐸 (𝑞, 𝑆 ) − 𝛿 satisfies 
+
+max  
+
+> 𝑇 ∈ F 𝐵
+
+𝐹 ★𝐸 (𝑞, 𝑇 ) − 𝐹 ★𝐸 (𝑞, b𝑆 ) ≤ 2𝜀 + 𝛿. (11) 6Optimal Skill Selection for LLM Agents pk64 pkbin pkzip pkdigest pkmac     
+
+> true coverage (hidden from the fit)
+> single-module docs handbooks distractors pk64 pkbin pkzip pkdigest pkmac
+> fitted supply ui,k
+> 0.0 0.5 1.0
+
+Figure 2 | Parameter recovery. Top: the true skill-capability coverage matrix, hidden from the fit. Bottom: the fitted supply 
+
+b𝑢 𝑖,𝑘 , learned from pass/fail outcomes alone; its latent dimensions carry no names, so they are matched to the capabilities by the best permutation. Columns are the 31 skills, rows the 5 capabilities. Both panels use the scale on the right, white 
+
+= 0 to dark blue = 1; the bottom panel plots b𝑢 𝑖,𝑘 divided by its largest entry. 
+
+Proof. Let 𝑇 ★ maximize 𝐹 ★𝐸 (𝑞, ·) over F𝐵 . Then we have 𝐹 ★𝐸 (𝑞, 𝑇 ★) − 𝐹 ★𝐸 (𝑞, b𝑆 ) ≤ b𝐹 𝐸 (𝑞, 𝑇 ★) − b𝐹 𝐸 (𝑞, b𝑆 ) + 2𝜀 ≤ 𝛿 +2𝜀 . □
+
+Proposition 1 decomposes the selection regret into its two sources: the fitting error 𝜀 of the learned model, whose origins we discussed above, and the optimization error 𝛿 of solving the fitted selection problem (10), which will be further bounded in Theorem 1. 
+
+## 4. Skill Selection with Provable Guarantees 
+
+We now present the selection algorithm and its per-instance guarantee for the fitted selection problem (10). Throughout this section we fix the query 𝑞 , the frozen executor 𝐸 , and the budget 𝐵 , and suppress them from the notation, writing b𝐺 (𝑆 ) for the fitted capability benefit, b𝜅 for the calibrated context sensitivity, and 
+
+b𝐹 (𝑆 ) = b𝐺 (𝑆 ) − b𝜅ℓ (𝑆 ) for the fitted objective defined in (9). Our analysis uses only that b𝐺 is normalized ( b𝐺 (∅) = 0), nondecreasing, and submodular, that all lengths ℓ𝑖 are positive, and that b𝜅 ≥ 0. The objective b𝐹 = b𝐺 − b𝜅ℓ raises three difficulties at once. First, although b𝐺 is monotone, b𝐹 can be non-monotone and negative, so a selection rule must be allowed to stop early or output the empty set. In particular, the classical greedy analysis for monotone submodular maximization no longer applies to b𝐹 . Second, skills have heterogeneous lengths under a single knapsack constraint, so locally dense choices can block valuable combinations. Third, the executor accepts only integral skill sets, so fractional reasoning must eventually land on an integral candidate. In this section, we show that these difficulties call for a new analysis of approximate greedy algorithms. We present our algorithm, Best Prefix Selection (BPS ), and prove, to our knowledge, the first per-instance bicriteria approximation guarantee for the fitted selection problem (10) (Theorem 1). 
+
+4.1. The BPS Algorithm 
+
+We state Best Prefix Selection (BPS ) in Algorithm 1, a partial-enumeration density-greedy procedure with seed size two. In Lines 2–4, the algorithm enumerates all feasible seeds of size at most two. Then it grows a density-greedy chain from each seed by iteratively adding the skill with the highest marginal benefit per token (Lines 5–9), and records every feasible prefix encountered along each chain. Finally, it returns the single best 
+
+recorded prefix, the one maximizing the fitted objective b𝐹 (Line 11). Algorithm 1 implements the standard partial-enumeration density greedy for monotone submodular knapsack (Khuller et al., 1999; Sviridenko, 2004; Kulik et al., 2021). Under a monotone benefit, the endpoint of each chain dominates all its prefixes, so the known 1 − 1/𝑒 analyses compare only chain endpoints. Under the 7Optimal Skill Selection for LLM Agents Algorithm 1 Best Prefix Selection ( BPS )
+
+Require: skill library L, budget 𝐵 , fitted benefit oracle b𝐺 , fitted context sensitivity b𝜅 .
+
+Ensure: selected skill set 𝑆 BPS . 
+
+> 1:
+
+Discard every skill 𝑖 with ℓ𝑖 > 𝐵 ; initialize the prefix pool P ← ∅ . 
+
+> 2:
+
+for each seed 𝐴 ⊆ [ 𝐿 ] with | 𝐴 | ≤ 2 and ℓ( 𝐴 ) ≤ 𝐵 do   
+
+> 3: 𝑆
+
+← 𝐴  
+
+> 4:
+
+Add prefix 𝑆 to P. // each seed opens a prefix chain  
+
+> 5:
+
+while some 𝑖 ∉ 𝑆 fits, i.e., ℓ(𝑆 ) + ℓ𝑖 ≤ 𝐵 do   
+
+> 6: 𝑖 ★
+
+← argmax 𝑖 ∉𝑆, ℓ (𝑆 )+ ℓ𝑖 ≤𝐵 
+
+b𝐺 ({ 𝑖 }∪ 𝑆 ) − b𝐺 (𝑆 )
+
+
+
+/ℓ𝑖   
+
+> 7: 𝑆
+
+← 𝑆 ∪ { 𝑖 ★}. 
+
+> 8:
+
+Add prefix 𝑆 to P. // record every prefix in chain  
+
+> 9:
+
+end while  
+
+> 10:
+
+end for   
+
+> 11: 𝑆 BPS
+
+← argmax 𝑆 ∈ P b𝐹 (𝑆 ). // choose the best prefix  
+
+> 12:
+
+return 𝑆 BPS 
+
+non-monotone fitted objective b𝐹 , however, the endpoint need not be the best candidate, since the optimum can sit strictly inside a chain. Inspired by (Vombatkere & Terzi, 2026), we record every prefix and select the best one over the full collection by b𝐹 ; this best-prefix selection step gives BPS its name. 
+
+4.2. Main Result: Bicriteria Approximation Guarantee 
+
+Throughout, let 𝛼 = 1 − 1/𝑒 . The theoretical guarantee for Algorithm 1 is given below. 
+
+Theorem 1 (Bicriteria (1 − 1/𝑒, 1)-approximation guarantee) . Let b𝐺 be normalized ( b𝐺 (∅) = 0), nondecreasing, and submodular, let ℓ𝑖 > 0 for all 𝑖 ∈ [ 𝐿 ], and let b𝜅 ≥ 0. The BPS output 𝑆 BPS of Algorithm 1 satisfies 𝑆 BPS ∈ F 𝐵 and 
+
+b𝐹 (𝑆 BPS ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ) ∀𝑇 ∈ F 𝐵 . (12) The guarantee (12) is a bicriteria approximation : the two coefficients are 𝛼 = 1 − 1/𝑒 on the benefit and 1 on the penalty, meaning that BPS recovers at least a (1 − 1/𝑒 ) fraction of any feasible set’s capability benefit while incurring its full context-length penalty. 
+
+Tightness The benefit coefficient 𝛼 = 1 − 1/𝑒 in (12) cannot be improved under standard complexity assumptions (any (1− 1/𝑒 +𝜖 )-approximation is NP-hard (Feige, 1998)). Theorem 1 provides a tight polynomial-time bicriteria guarantee for maximizing a monotone submodular benefit minus a linear penalty under a knapsack constraint. 
+
+Comparison to prior work The guarantees closest to our setting address the same regularized objective under the same knapsack constraint, and each concedes what Theorem 1 does not: weaker approximation coefficients (Gong et al., 2024; Guo et al., 2026; Zhang & Luo, 2026), an additive precision-dependent loss (Perrault et al., 2021), or a fractional output (Feldman, 2021). ParetoGreedy (Vombatkere & Terzi, 2026), whose candidate generation BPS shares, proves instance-dependent guarantees on the Pareto frontier, but none for the regularized objective at a fixed b𝜅 . Theorem 1 is, to our knowledge, the first to combine all four properties: a regularized objective, a knapsack constraint with heterogeneous item sizes, an integral output, and zero additive loss. 
+
+Selection regret Let 𝑆 ★ = argmax 𝑇 ∈ F 𝐵 𝐹 ★𝐸 (𝑞, 𝑇 ) denote the skill set maximizing the true execution effect. Taking 𝑇 = 𝑆 ★ in (12) gives b𝐹 (𝑆 BPS ) ≥ b𝐹 (𝑆 ★) − 1 
+
+> 𝑒
+
+b𝐺 (𝑆 ★), so the suboptimality of the BPS output is at most a 1 /𝑒 
+
+fraction of the optimum’s benefit b𝐺 (𝑆 ★). Combining Theorem 1 with the error transfer of Proposition 1 yields an end-to-end bound on the true execution effect. 8Optimal Skill Selection for LLM Agents Corollary 1 (Selection regret of BPS ). Under Assumption 1, the BPS output 𝑆 BPS satisfies 𝐹 ★𝐸 (𝑞, 𝑆 ★) − 𝐹 ★𝐸 (𝑞, 𝑆 BPS ) ≤  
+
+> 1
+> 𝑒
+
+b𝐺 (𝑆 ★) + 2𝜀. 
+
+Time Complexity Algorithm 1 runs in 𝑂 (𝑑𝐿 4) time, where 𝑑 is the capability dimension and 𝐿 the library size: 𝑂 (𝐿 2) seeds each grow a chain of at most 𝐿 density steps, and each step scans 𝑂 (𝐿 ) candidates at 𝑂 (𝑑 )
+
+cost per marginal evaluation. In practice 𝐿 is the size of the shortlist left by a high-recall retrieval stage (Cho et al., 2026; Zheng et al., 2026b; Gan & Sun, 2025), not of the whole registry. 
+
+4.3. Proof of Theorem 1 
+
+For an arbitrary feasible set 𝑇 , the proof proceeds in three steps: (i) Construct a seed 𝐽 from 𝑇 ’s two highest-marginal items and define a residual benefit function 𝑓 . (ii) Lower-bound the trajectory function (18) of the density chain grown from 𝐽 by a piecewise-exponential bounding function 𝜑 , adapting the refined analysis of (Kulik et al., 2021), and establish b𝐺 (𝐽 ) + 𝑉 (𝑟 ) ≥ 𝛼 b𝐺 (𝑇 ). (iii) Convert this fractional bound into an actual recorded integral prefix via budget-aligned interpolation, and conclude via the b𝐹 -maximization of Algorithm 1. 
+
+4.3.1 Seed construction and residual function 
+
+We first write b𝐺 (𝑖 | 𝑆 ) = b𝐺 (𝑆 ∪ { 𝑖 }) − b𝐺 (𝑆 ) for the marginal benefit. We order the items of 𝑇 greedily by nonincreasing marginal benefit with an arbitrary fixed tie-breaking rule: 
+
+𝑡 𝑗 ∈ argmax    
+
+> 𝑖 ∈𝑇 \{ 𝑡 1,··· ,𝑡 𝑗 −1}
+
+b𝐺  𝑖 | { 𝑡 1, · · · , 𝑡 𝑗 −1 } ,𝑚 𝑗 := b𝐺  𝑡 𝑗 | { 𝑡 1, · · · , 𝑡 𝑗 −1 } , ∀𝑗 ∈ [| 𝑇 |] .
+
+(13) If |𝑇 | ≤ 2, then Algorithm 1 enumerates 𝑇 itself as a seed, and we have b𝐹 (𝑇 ) = b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ).
+
+We set the feasible seed set 𝐽 with ℓ(𝐽 ) ≤ 𝐵 as 
+
+𝐽 := {𝑡 1, 𝑡 2 }. (14) Then Algorithm 1 enumerates it in Line 2 and records it in Line 4, so 𝐽 ∈ P . If |𝑇 | = 3: b𝐺 (𝐽 ) = 𝑚 1 + 𝑚 2 ≥ 
+
+> 23
+
+(𝑚 1 + 𝑚 2 + 𝑚 3) = 23 b𝐺 (𝑇 ) ≥ 𝛼 b𝐺 (𝑇 ) and ℓ(𝐽 ) ≤ ℓ(𝑇 ) give b𝐹 (𝐽 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅 ℓ (𝑇 ).In the following, we assume |𝑇 | ≥ 4. Our goal is to prove that on the chain grown from 𝐽 , some recorded prefix 
+
+𝑆 𝑇 satisfies b𝐹 (𝑆 𝑇 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ).Inspired by the analysis in (Sviridenko, 2004), we define the residual function 
+
+𝑓 (𝑈 ) := b𝐺 (𝐽 ∪ 𝑈 ) − b𝐺 (𝐽 ), ∀𝑈 ⊆ [ 𝐿 ]. (15) By the properties of b𝐺 , 𝑓 is normalized ( 𝑓 (∅) = 0), nonnegative, nondecreasing, and submodular. Let 𝑃 = 𝑇 \ 𝐽 
+
+denote the comparator residual. For every 𝑣 ∈ 𝑃 , we have 𝑓 ({ 𝑣 }) = b𝐺 ({ 𝑣 } ∪ 𝐽 ) − b𝐺 (𝐽 ) = b𝐺 (𝑣 | 𝐽 ) ≤ b𝐺 (𝑣 | { 𝑡 1 }) ≤ 
+
+𝑚 2, where the first inequality uses submodularity and the second uses the greedy ordering (13). Therefore, we have 
+
+b𝐺 (𝐽 ) = b𝐺 ({ 𝑡 1, 𝑡 2 }) − b𝐺 ({ 𝑡 1 }) + b𝐺 ({ 𝑡 1 }) = 𝑚 1 + 𝑚 2 ≥ 2𝑚 2 ≥ 2 𝑓 ({ 𝑣 }) , ∀𝑣 ∈ 𝑃. (16) We choose 𝑣 ★ ∈ 𝑃 as the item with maximum token length, i.e., 𝑣 ★ = argmax 𝑣 ∈𝑃 ℓ({ 𝑣 }) . Set 
+
+𝑟 = ℓ(𝑃 \ { 𝑣 ★}) . (17) Then we can show that the density chain starting with seed 𝐽 must have total token length larger than 𝑟 .9Optimal Skill Selection for LLM Agents 4.3.2 Bounding-function domination 
+
+Run the density chain of Algorithm 1 from seed 𝐽 , and let 𝐴 0 = ∅ ⊊ 𝐴 1 ⊊ · · · ⊊ 𝐴 𝑚 be its accepted additions, so the actual recorded prefixes are 𝐽 ∪ 𝐴 𝑗 . Write 𝑎 𝑗 = 𝐴 𝑗 \ 𝐴 𝑗 −1 for the 𝑗 -th accepted item. Following (Kulik et al., 2021), we define the piecewise-affine residual-benefit trajectory 𝑉 by 𝑉 (0) = 0 and, for ℓ( 𝐴 𝑗 −1) ≤ 𝑢 ≤ ℓ( 𝐴 𝑗 ),
+
+𝑉 (𝑢 ) := 𝑓 ( 𝐴 𝑗 −1) +  𝑢 − ℓ( 𝐴 𝑗 −1) 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1)
+
+ℓ({ 𝑎 𝑗 }) . (18) The function 𝑉 : [0, ℓ ( 𝐴 𝑚 )] → ℝ≥0 traces the residual benefit accumulated by the density chain as a function of the total added length 𝑢 = ℓ( 𝐴 𝑗 ) beyond the seed 𝐽 . At each breakpoint 𝑢 = ℓ( 𝐴 𝑗 ), the trajectory evaluates to 
+
+𝑉 (ℓ( 𝐴 𝑗 )) = 𝑓 ( 𝐴 𝑗 ), the exact residual benefit of the 𝑗 -th recorded prefix. Between consecutive breakpoints, 𝑉 
+
+interpolates linearly. Then we have the following lemmas. 
+
+Lemma 1 (Trajectory coverage) . 𝑉 (𝑟 ) is well-defined; that is, ℓ( 𝐴 𝑚 ) ≥ 𝑟 .Proof. If 𝑃 ⊆ 𝐴 𝑚 , then ℓ( 𝐴 𝑚 ) ≥ ℓ(𝑃 ) > 𝑟 by definition in (17). Otherwise pick 𝑣 ∈ 𝑃 \ 𝐴 𝑚 . When the chain stops, adding 𝑣 is infeasible. Then ℓ( 𝐴 𝑚 ) + ℓ({ 𝑣 }) > 𝐵 − ℓ(𝐽 ). Since ℓ({ 𝑣 }) ≤ ℓ({ 𝑣 ★}) and ℓ(𝑇 ) ≤ 𝐵 , we have 
+
+ℓ( 𝐴 𝑚 ) > 𝐵 − ℓ(𝐽 ) − ℓ({ 𝑣 }) ≥ ℓ(𝑇 ) − ℓ(𝐽 ) − ℓ({ 𝑣 ★}) = 𝑟 . □
+
+Lemma 2 (Residual feasibility before 𝑟 ). Consider an accepted segment whose left endpoint 𝑢 0 = ℓ( 𝐴 𝑗 −1) satisfies 
+
+𝑢 0 < 𝑟 . Then every item 𝑣 ∈ 𝑃 \ 𝐴 𝑗 −1 is feasible at that point. Proof. By maximality of ℓ({ 𝑣 ★}) , we have ℓ( 𝐴 𝑗 −1 ∪{ 𝑣 }) = 𝑢 0 +ℓ({ 𝑣 }) < 𝑟 +ℓ({ 𝑣 ★}) = ℓ(𝑃 ) = ℓ(𝑇 ) − ℓ(𝐽 ) ≤ 𝐵 −ℓ(𝐽 ).Therefore, 𝑣 is feasible at the selection on 𝑎 𝑗 . □
+
+Lemma 2 is where removing the longest residual item pays off. We adapt the bounding-function technique of (Kulik et al., 2021). Partition 𝑃 into two nonempty blocks {𝑣 ★}
+
+and 𝑅 = 𝑃 \ { 𝑣 ★}, and order them as (𝑋 1, 𝑋 2) so that 
+
+𝑓 (𝑋 1)
+
+ℓ(𝑋 1) ≥ 𝑓 (𝑋 2)
+
+ℓ(𝑋 2) . (19) Set 𝑑 𝑗 = ℓ(𝑋 𝑗 ) for 𝑗 = 1, 2, and define the block densities 
+
+𝜌 1 = 𝑓 (𝑋 1)
+
+𝑑 1
+
+, 𝜌 2 = 𝑓 (𝑋 2 | 𝑋 1)
+
+𝑑 2
+
+, (20) where 𝑓 (𝑋 2 | 𝑋 1) = 𝑓 (𝑋 1 ∪ 𝑋 2) − 𝑓 (𝑋 1). Submodularity and (19) give 𝜌 1 ≥ 𝜌 2. Write 
+
+𝐷 = ℓ(𝑃 ) = 𝑑 1 + 𝑑 2. (21) If 𝜌 2 > 0, let 𝐷 1 = 𝑑 1 ln 𝜌 1 
+
+> 𝜌 2
+
+. If 𝜌 2 = 0, set 𝐷 1 = +∞ . Define a continuous function 𝜑 : [0, ∞) → ℝ≥0 by 
+
+𝜑 (𝑢 ) =
+
+
+
+𝑓 (𝑋 1) ( 1 − exp (− 𝑢 /𝑑 1)) , 0 ≤ 𝑢 < 𝐷 1,𝑓 (𝑃 ) − 𝜌 2 𝐷 exp 
+
+
+
+− 𝑢 − 𝐷 1
+
+𝐷 
+
+
+
+, 𝑢 ≥ 𝐷 1. (22) The bounding function 𝜑 is constructed so that: on the first branch, it tracks exponential saturation toward 
+
+𝑓 (𝑋 1) at rate 1 /𝑑 1; on the second branch, it tracks saturation toward 𝑓 (𝑃 ) at rate 1 /𝐷 . The transition at 𝐷 1 is precisely where the two exponentials meet. The next two lemmas separate the argument into a dynamic half, showing that the trajectory of the density chain never falls below 𝜑 before 𝑟 , and a static half, showing that the seed and 𝜑 (𝑟 ) together already account for an 𝛼 fraction of b𝐺 (𝑇 ). And the proofs are computational and deferred to Appendix A. 
+
+Lemma 3 (Trajectory bound) . 𝑉 (𝑢 ) ≥ 𝜑 (𝑢 ), ∀𝑢 ∈ [ 0, 𝑟 ].
+
+Lemma 4 (Static bound at 𝑟 ). b𝐺 (𝐽 ) + 𝜑 (𝑟 ) ≥ 𝛼 b𝐺 (𝑇 ).
+
+10 Optimal Skill Selection for LLM Agents 4.3.3 Budget-aligned interpolation 
+
+Lemmas 3 and 4 give 
+
+b𝐺 (𝐽 ) + 𝑉 (𝑟 ) ≥ b𝐺 (𝐽 ) + 𝜑 (𝑟 ) ≥ 𝛼 b𝐺 (𝑇 ). (23) Choose consecutive recorded prefixes 𝐴 𝑗 −1, 𝐴 𝑗 whose segment contains 𝑟 . There exists 𝜆 ∈ [ 0, 1] with 𝑉 (𝑟 ) = (1−
+
+𝜆 ) 𝑓 ( 𝐴 𝑗 −1) + 𝜆 𝑓 ( 𝐴 𝑗 ), and 𝑟 = (1−𝜆 ) ℓ( 𝐴 𝑗 −1) + 𝜆 ℓ ( 𝐴 𝑗 ). Because the penalty b𝜅 ℓ (·) is the same linear function of the same length coordinate, the two interpolations combine: (1−𝜆 )b𝐹 (𝐽 ∪ 𝐴 𝑗 −1) + 𝜆 b𝐹 (𝐽 ∪ 𝐴 𝑗 ) = b𝐺 (𝐽 ) + 𝑉 (𝑟 ) − b𝜅 (ℓ(𝐽 ) + 𝑟 ).Since ℓ(𝐽 ) + 𝑟 = ℓ(𝑇 ) − ℓ({ 𝑣 ★}) ≤ ℓ(𝑇 ), (23) gives (1 − 𝜆 )b𝐹 (𝐽 ∪ 𝐴 𝑗 −1) + 𝜆 b𝐹 (𝐽 ∪ 𝐴 𝑗 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅 (ℓ(𝑇 ) − ℓ({ 𝑣 ★})) ≥ 
+
+𝛼 b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ). A convex combination of two numbers is at most their maximum, so at least one of the two recorded prefixes satisfies 
+
+b𝐹 (𝐽 ∪ 𝐴 𝑠 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅ℓ (𝑇 ), 𝑠 ∈ { 𝑗 − 1, 𝑗 }. (24) Therefore, in every case, some recorded candidate 𝑆 𝑇 ∈ P satisfies b𝐹 (𝑆 𝑇 ) ≥ 𝛼 b𝐺 (𝑇 ) − b𝜅 ℓ (𝑇 ). Since 𝑆 BPS maximizes 
+
+b𝐹 over P (Line 11 of Algorithm 1), b𝐹 (𝑆 BPS ) ≥ b𝐹 (𝑆 𝑇 ). The seed and witness prefix depend on 𝑇 , but every seed of size at most two is enumerated and one selection maximizes b𝐹 over all recorded candidates, so the single output 𝑆 BPS satisfies (12) for every 𝑇 ∈ F 𝐵 . This statement finishes the proof of Theorem 1. ■
+
+## 5. Evaluation 
+
+Corollary 1 bounds the selection regret of BPS by a fitting term and an optimization term, and we measure both on real executions of a frozen executor. Section 5.2 measures the first, how closely the fitted objective tracks those executions, and Section 5.3 the second, how far the sets BPS returns fall short of the exact optimum of that objective, which Theorem 1 bounds only in the worst case. Section 5.4 then executes the selected sets and reports the task success they achieve. 
+
+5.1. Testbed: A Contamination-Controlled Skill Benchmark             
+
+> Original task pretraining alone: 85 %pass
+> dict zlib.compress b64encode POST
+> swap libraries for private forks
+> Forked task no skills injected: 0%pass
+> dict pkzip.lade pk64.enrobe POST
+
+Figure 3 | Forking a BigCodeBench task. Standard li-braries are swapped for private forks with new names and altered constants: pkzip.lade plays the role of 
+
+zlib.compress but XORs the payload and prepends a private header, and pk64.enrobe base64-encodes under a remapped alphabet. 
+
+Public code benchmarks cannot measure skill selection, because a capable executor already solves them with no skill at all: Qwen3-32B, the frozen executor throughout, passes 85% of runs on the original BigCodeBench (Zhuo et al., 2025) tasks from pretraining alone. We therefore build our own, and everything below rests on 63 ,596 executions of it against real test suites. 
+
+Private modules We fork the benchmark, replacing its standard libraries with sixteen private modules over 
+
+𝑑 = 5 capability families. Each module’s call surface is unguessable from the task prose and documented only in the skill library (Fig. 3). 
+
+Task admission A task is admitted only if the private-module solution passes its tests while both the standard-library solution and every one-capability hybrid of the two fail, so that only tasks needing all of their capabilities survive. Fewer than one in three of the tasks we forked cleared this gate, and those that did form the testbed. 
+
+Skill library We wrote 47 skill documents, of which 𝐿 = 31 form the library: single-module skills ranging from a short snippet to a full tutorial, two-module handbooks, and distractors covering only look-alike functions no task calls for. 
+
+5.2. Validity of the Structured Objective 
+
+We instantiate the fitted objective (9) on the testbed and evaluate it on two counts, its prediction of held-out executions and the quality of the sets it selects; its recovery of the true coverage matrix was reported in Section 3.3. 11 Optimal Skill Selection for LLM Agents 0.5 0.6 0.7 0.8 0.9        
+
+> held-out ranking accuracy
+> Ours 281 DeepSets 16.9k Datamodels 672 Additive fit 672 Shapley 651 Linear response 281 Set Transformer 16.6k
+> chance params unseen doc extrapolation
+
+Prediction     
+
+> 0.0 0.2 0.4 0.6 0.8
+> success of selected sets
+> 0.674 0.640 0.279 0.202 0.156 0.144 0.049
+> empirical ceiling
+
+Selection 
+
+Figure 4 | Value-model comparison. Left: pairwise ranking accuracy on held-out set pairs, under the extrapolation (filled dots) and unseen-doc (open dots) protocols. Right: measured success of the sets each model selects; the dashed line is the empirical ceiling, the best set per instance in hindsight. 
+
+Instantiation and fitting We set 𝑑 = 5, one dimension per module family, and fix ℎ𝑘 (𝑥 ) = 1 − 𝑒 −𝑥 a priori, as in Section 3.3. The task set and the library are both fixed, so the encoders reduce to lookup tables that assume nothing beyond the structured form (3): one supply vector b𝒖 𝑖 per skill, one demand vector b𝒘 𝑞 per task, and one offset per task, 281 parameters in total. These are trained jointly by gradient descent, minimizing the log loss of the measured pass/fail outcomes against the predicted success probability exp b𝐹 𝐸 (9). 
+
+Baselines We compare against the value models in common use, all fit on the same execution records. Additive fit gives each skill an independent per-task value and sums it over the set; Shapley scores (Ghorbani & Zou, 2019) do the same with values estimated from measured marginal contributions. Datamodels (Ilyas et al., 2022) regresses the measured rate on the set indicator. DeepSets (Zaheer et al., 2017) and Set Transformer (Lee et al., 2019) are black-box neural set regressors. Linear response is an ablation of our own model, keeping the capability structure but dropping the concave saturation. 
+
+Prediction Each model scores pairs of sets whose measured success rates differ by a clear margin, and Fig. 4 (left) reports how often it orders the pair correctly. Two protocols probe unseen set compositions. Under extrapolation, a model trains only on sets of at most two skills and must predict sets of three or more; under unseen doc, it sees a skill only on its own, never in combination, and must predict the sets that pair it with others. The structured objective is the most accurate under both, and its predicted rates fall within one percentage point of the measured ones. 
+
+Selection Prediction accuracy matters only insofar as it changes which set is chosen, so we also let each model choose. Each is refit from a small sample of each test task and returns the set it scores highest, which is then executed (Fig. 4, right). The structured objective reaches 95% of the empirical ceiling, and every interpretable alternative gives up at least 0 .37 in absolute success. Only DeepSets remains competitive, at 60 ×
+
+the parameters and with an advantage that never separates from zero; being a black box, it also exposes no structure for BPS to exploit and can be maximized only by brute force. 
+
+5.3. Optimization Quality 
+
+To isolate the optimization term 𝛿 , we freeze the objective at the fit of Section 5.2 and vary only the rule that maximizes it, so that the comparison measures search quality alone. The 80 instances of the fitted selection problem (10) span held-out tasks, token budget levels 𝐵 , and settings of the token soft-penalty coefficient. 
+
+Baselines Five rules receive the same fitted objective but do not maximize it. Three score every skill in isolation, by the benefit (9) assigns the singleton {𝑠 𝑖 }, and never evaluate the set they assemble or charge for the tokens it costs: top-𝑘 relevance fills the budget in that order, while MMR (Carbonell & Goldstein, 1998) 12 Optimal Skill Selection for LLM Agents 0 25 50 75 100           
+
+> instances solved to the exact optimum
+> 100% 0BPS (ours)
+> 45% 0.03 Best-of-100
+> 44% 0.05 Density greedy
+> 7.5% 3.51 DPP-MAP
+> 7.5% 3.69 MMR
+> 7.5% 4.36 Top-k
+> mean gap
+> 0300 600 900 1200
+> tokens injected
+> 0.2 0.4 0.6 0.8
+> measured success
+> Ours (lookup tables) Ours (neural encoder)
+> Executor self-select SkillRouter BM25 SkillRouter top-1 Dense retrieval Graph-of-Skills
+
+Figure 5 | The 80 selection instances. Left: optimization quality. Every rule is given the same fitted objective; bars are the share of instances on which a rule attains the exact optimum, found by exhaustive search over every feasible set, and the right-hand column is its mean shortfall in objective value. Right: end-to-end selection. Each rule is placed by the tokens it injects and the measured success of the sets it chooses; up and to the left is better. Both of our points run BPS and differ only in how the objective’s encoders are instantiated. 
+
+and DPP-MAP (Kulesza & Taskar, 2012) discount that score by similarity to the fitted supplies already selected. Two do score whole sets but search them heuristically: density greedy adds the skill with the best value per token until the budget closes, and best-of-100 random keeps the highest-scoring of 100 random budget-feasible sets. 
+
+Solution quality BPS attains the exact optimum of (10) on all 80 instances, so the optimization error 𝛿 
+
+of Proposition 1 vanishes throughout (Fig. 5, left). The three rules that score skills one at a time reach the optimum on fewer than a tenth of them, with a mean shortfall nearly two orders of magnitude larger than that of any rule scoring whole sets; the two set-scoring heuristics come closer, but still reach it on only 45% and 44%. 
+
+5.4. End-to-End Selection Quality 
+
+The end-to-end test executes every rule’s chosen set on the frozen executor over the same 80 instances, and measures success on executions the fit never saw. 
+
+Baselines We compare against the skill selection systems in use today. BM25 and a dense bi-encoder, the two retrievers that the skill-retrieval literature defaults to (Su et al., 2026), rank the documents by their text against the task prompt and fill the budget in that order. SkillRouter (Zheng et al., 2026b) is a released retrieve-and-rerank router, which we run both at its own top-1 operating point and, more generously, in its reranked order up to our full budget; Graph-of-Skills (Liu et al., 2026) diffuses over an offline skill graph and hydrates under a context cap. Both run from their authors’ released implementations on our library. Finally we let the executor select for itself under the progressive disclosure that deployed systems use, shown every skill’s name, cost and one-line description with the bodies hidden. 
+
+Measured execution No deployed system we could run matches BPS in measured success (Fig. 5, right). The released routers and retrievers reach 0 .20–0 .43, between 0 .30 and 0 .53 below it, and BPS attains its own result on 28% fewer tokens than the strongest of them; the strongest deployed selector, the executor picking for itself, still gives up 0 .22. These systems rarely select distractors. What they select instead are the skills whose text matches the task, and those need not be the skills that cover the capabilities it exercises. 
+
+A neural capability encoder The encoders of Section 5.2 instantiate the structured objective on the bench-mark’s fixed task set and library; deployment beyond them requires encoding tasks and skills from their text. We therefore replace the lookup tables with a neural encoder that projects frozen text-embedding-v4 (Zhang 13 Optimal Skill Selection for LLM Agents 
+
+et al., 2025) embeddings of the task prompt and of each skill document into 64 latent capability dimensions, warmed up on annotated examples of covering skill sets and then trained online on pass/fail feedback from the frozen executor; BPS still performs the selection. Its sets reach 0 .68 measured success on 716 injected tokens (red star in Fig. 5): 0 .05 below the lookup-table instantiation, and 0 .17–0 .48 above every deployed system, injecting fewer tokens than all of them except the executor’s own selection. 
+
+## 6. Conclusion 
+
+This paper casts skill selection for LLM agents as regularized submodular maximization under a hard token budget: a submodular capability benefit makes complementarity and redundancy explicit, and a linear penalty charges every injected token. Our polynomial-time selection rule BPS carries a bicriteria (1 − 1/𝑒, 1) guarantee, proved via budget-aligned interpolation and tight in the benefit coefficient. On a contamination-controlled benchmark with real executions, the fitted objective was the most accurate value model, and BPS outperformed every deployed skill selector in measured success while injecting fewer tokens than any released system. Future work includes online selection over streaming queries and degradation models beyond a linear per-token charge. 
+
+## References 
+
+An, S. et al. Skill-Based Few-Shot Selection for In-Context Learning. In Proc. 2023 Conf. Empirical Methods Natural Lang. Process. (EMNLP) , pp. 13472–13492, 2023. Anthropic. Equipping agents for the real world with agent skills. Anthropic Engineering Blog, 2025. URL https://www.anthropic.com/engineering/ equipping-agents-for-the-real-world-with-agent-skills . Accessed 2026-07-23. Carbonell, J. and Goldstein, J. The use of MMR, diversity-based reranking for reordering documents and producing summaries. In Proc. 21st Annu. Int. ACM SIGIR Conf. Res. Develop. Inf. Retrieval , pp. 335–336, 1998. Cho, H., Kang, R., and Kim, Y. SkillRet: A large-scale benchmark for skill retrieval in LLM agents. arXiv preprint arXiv:2605.05726 , 2026. Didolkar, A. et al. Metacognitive Capabilities of LLMs: An Exploration in Mathematical Problem Solving. In 
+
+Adv. Neural Inf. Process. Syst. 37 (NeurIPS 2024) , pp. 19783–19812, 2024. Feige, U. A threshold of ln n for approximating set cover. J. ACM , 45(4):634–652, 1998. Feldman, M. Guess free maximization of submodular and linear sums. Algorithmica , 83(3):853–878, 2021. Feldman, M., Nutov, Z., and Shoham, E. Practical budgeted submodular maximization. Algorithmica , 85(5): 1332–1371, 2023. Fore, M., Singh, S., and Stamoulis, D. GeckOpt: LLM system efficiency via intent-based tool selection. In Proc. Great Lakes Symp. VLSI (GLSVLSI) , pp. 353–354, 2024. Gan, T. and Sun, Q. RAG-MCP: Mitigating prompt bloat in LLM tool selection via retrieval-augmented generation. arXiv preprint arXiv:2505.03275 , 2025. Gao, Y., Li, Z., Yuan, Y., Ji, Z., Ma, P., and Wang, S. SkillReducer: Optimizing LLM agent skills for token efficiency. arXiv preprint arXiv:2603.29919 , 2026. Ghorbani, A. and Zou, J. Data Shapley: Equitable valuation of data for machine learning. In Proc. 36th Int. Conf. Mach. Learn. (ICML) , pp. 2242–2251, 2019. Ghulyani, M., Singh, A., Bharadwaj, K., Nath, A., and Goswami, S. PACMS: Submodular context selection as a pluggable engine for LLM agents. arXiv preprint arXiv:2606.20047 , 2026. Golrezaei, N., Shanmugam, K., Dimakis, A. G., Molisch, A. F., and Caire, G. FemtoCaching: Wireless video content delivery through distributed caching helpers. In Proc. IEEE INFOCOM , pp. 1107–1115, 2012. 14 Optimal Skill Selection for LLM Agents 
+
+Gong, S., Nong, Q., Wang, Y., and Du, D. Budget-constrained profit maximization without non-negative objective assumption in social networks. J. Glob. Optim. , 90(4):1007–1030, 2024. Guo, Q., Feng, C., Shi, J., Tang, J., Zhou, X., and Wang, S. Efficient algorithms for budgeted profit maximization with theoretical guarantees. IEEE Trans. Knowl. Data Eng. , 38(4):2234–2248, 2026. Gupta, S., Gardner, M., and Singh, S. Coverage-based example selection for in-context learning. In Findings Assoc. Comput. Linguistics: EMNLP 2023 , 2023. Harshaw, C., Feldman, M., Ward, J., and Karbasi, A. Submodular maximization beyond non-negativity: Guarantees, fast algorithms, and applications. In Proc. 36th Int. Conf. Mach. Learn. (ICML) , pp. 2634–2643, 2019. Ilyas, A., Park, S. M., Engstrom, L., Leclerc, G., and Madry, A. Datamodels: Understanding predictions with data and data with predictions. In Proc. 39th Int. Conf. Mach. Learn. (ICML) , pp. 9525–9587, 2022. Iyer, R. and Bilmes, J. Submodular Point Processes with Applications to Machine learning. In Proc. 18th Int. Conf. Artif. Intell. Statist. (AISTATS) , pp. 388–397, 2015. Khuller, S., Moss, A., and Naor, J. The budgeted maximum coverage problem. Inf. Process. Lett. , 70(1):39–45, 1999. Kirchhoff, K. and Bilmes, J. Submodularity for data selection in machine translation. In Proc. 2014 Conf. Empirical Methods Natural Lang. Process. (EMNLP) , pp. 131–141, 2014. Kulesza, A. and Taskar, B. Determinantal point processes for machine learning. Found. Trends Mach. Learn. , 5 (2–3):123–286, 2012. Kulik, A., Schwartz, R., and Shachnai, H. A refined analysis of submodular greedy. Oper. Res. Lett. , 49(4): 507–514, 2021. Kumari, L., Wang, S., Das, A., Zhou, T., and Bilmes, J. An end-to-end submodular framework for data-efficient in-context learning. In Findings Assoc. Comput. Linguistics: NAACL 2024 , pp. 3293–3308, 2024. Lee, J., Lee, Y., Kim, J., Kosiorek, A. R., Choi, S., and Teh, Y. W. Set transformer: A framework for attention-based permutation-invariant neural networks. In Proc. 36th Int. Conf. Mach. Learn. (ICML) , pp. 3744–3753, 2019. Li, H. et al. Organizing, orchestrating, and benchmarking agent skills at ecosystem scale. arXiv preprint arXiv:2603.02176 , 2026a. Li, X. et al. SkillsBench: Benchmarking how well agent skills work across diverse tasks. arXiv preprint arXiv:2602.12670 , 2026b. Li, Y. et al. SkillsInjector: Dynamic skill context construction for LLM agents. arXiv preprint arXiv:2605.29794 ,2026c. Lin, H. and Bilmes, J. A class of submodular functions for document summarization. In Proc. 49th Annu. Meeting Assoc. Comput. Linguistics (ACL) , pp. 510–520, 2011. Liu, D. et al. Graph-of-Skills: Dependency-aware structural retrieval for massive agent skills. arXiv preprint arXiv:2604.05333 , 2026. Liu, N. F. et al. Lost in the middle: How language models use long contexts. Trans. Assoc. Comput. Linguistics ,12:157–173, 2024. Nikolakaki, S. M., Ene, A., and Terzi, E. An efficient framework for balancing submodularity and cost. In Proc. 27th ACM SIGKDD Conf. Knowl. Discov. Data Min. , pp. 1256–1266, 2021. OpenAI. Build skills. Codex Documentation, 2026. URL https://developers.openai.com/codex/ skills/ . Accessed 2026-07-26. Perrault, P., Healey, J., Wen, Z., and Valko, M. On the approximation relationship between optimizing ratio of submodular (RS) and difference of submodular (DS) functions. arXiv preprint arXiv:2101.01631 , 2021. 15 Optimal Skill Selection for LLM Agents 
+
+Poularakis, K., Llorca, J., Tulino, A. M., Taylor, I., and Tassiulas, L. Joint service placement and request routing in multi-cell mobile edge computing networks. In Proc. IEEE INFOCOM , pp. 10–18, 2019. Qin, Y. et al. ToolLLM: Facilitating large language models to master 16000+ real-world APIs. In Proc. 12th Int. Conf. Learn. Represent. (ICLR) , 2024. Qu, C. et al. Towards completeness-oriented tool retrieval for large language models. In Proc. ACM Int. Conf. Inf. Knowl. Manage. (CIKM) , pp. 1930–1940, 2024. Shi, F. et al. Large language models can be easily distracted by irrelevant context. In Proc. 40th Int. Conf. Mach. Learn. (ICML) , pp. 31210–31227, 2023. Song, H. and Wei, S. More skills, worse agents? skill shadowing degrades performance when expanding skill libraries. arXiv preprint arXiv:2605.24050 , 2026. Su, W. et al. Skill retrieval augmentation for agentic AI. arXiv preprint arXiv:2604.24594 , 2026. Sviridenko, M. A note on maximizing a submodular set function subject to a knapsack constraint. Oper. Res. Lett. , 32(1):41–43, 2004. Vombatkere, K. and Terzi, E. Computing approximate pareto frontiers for submodular utility and cost tradeoffs. 
+
+arXiv preprint arXiv:2602.15964 , 2026. Wang, Z., Wen, W., Ji, Q., Qiao, R., and Sun, X. Skill is not document: A query-conditional benchmark and two-stage retriever for LLM agent skill routing. arXiv preprint arXiv:2606.03565 , 2026. Xiao, J. et al. SkillSight: Calibrating generic content bias for skill retrieval. arXiv preprint arXiv:2607.18785 ,2026. Xu, Z., Wang, H., Bespalov, D., Wu, X., Stone, P., and Qi, Y. LaRS: Latent Reasoning Skills for Chain-of-Thought Reasoning. In Findings Assoc. Comput. Linguistics: EMNLP 2024 , pp. 3624–3643, 2024. Yang, A. et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. Yang, C. et al. A survey of agent skills: Toward procedural infrastructure for LLM agents. Preprints.org preprint ,2026. doi: 10.20944/preprints202605.1276.v1. Ye, J., Wu, Z., Feng, J., Yu, T., and Kong, L. Compositional exemplars for in-context learning. In Proc. 40th Int. Conf. Mach. Learn. (ICML) , pp. 39818–39833, 2023. Yuan, M. et al. Automated composition of agents: A knapsack approach for agentic component selection. arXiv preprint arXiv:2510.16499 , 2025. Zaheer, M., Kottur, S., Ravanbakhsh, S., Póczos, B., Salakhutdinov, R., and Smola, A. J. Deep sets. In Adv. Neural Inf. Process. Syst. (NeurIPS) , pp. 3391–3401, 2017. Zeng, K. et al. Group of skills: Group-structured skill retrieval for agent skill libraries. arXiv preprint arXiv:2605.06978 , 2026. Zhang, H. and Luo, W. A streaming algorithm for non-monotone regularized submodular maximization. Oper. Res. Lett. , 67:107456, 2026. Zhang, Y. et al. Qwen3 embedding: Advancing text embedding and reranking through foundation models. 
+
+arXiv preprint arXiv:2506.05176 , 2025. Zhao, X. et al. Generative skill composition for LLM agents. arXiv preprint arXiv:2606.32025 , 2026. Zheng, J. et al. SkillSelect-Serve: QoS-aware budgeted skill service recommendation for LLM agents. arXiv preprint arXiv:2607.00011 , 2026a. Zheng, Y. et al. SkillRouter: Skill routing for LLM agents at scale. arXiv preprint arXiv:2603.22455 , 2026b. Zhuo, T. Y. et al. BigCodeBench: Benchmarking code generation with diverse function calls and complex instructions. In Proc. 13th Int. Conf. Learn. Represent. (ICLR) , 2025. 16 Optimal Skill Selection for LLM Agents 
+
+# Appendix 
+
+A Missing Proof in Section 4.3 18 
+
+A.1 Proof of Lemma 3 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 19 A.2 Proof of Lemma 4 . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . . 20 17 Optimal Skill Selection for LLM Agents 
+
+## A. Missing Proof in Section 4.3 
+
+Throughout the appendices we use the notation of Section 4.3: the seed 𝐽 = {𝑡 1, 𝑡 2 } of (14), the residual function 𝑓 of (15), the comparator residual 𝑃 = 𝑇 \ 𝐽 with |𝑇 | ≥ 4, the longest residual item 𝑣 ★, the remainder 
+
+𝑅 = 𝑃 \ { 𝑣 ★}, the lengths 𝑝 := ℓ({ 𝑣 ★}) and 𝑟 = ℓ(𝑅 ) of (17), the block order (𝑋 1, 𝑋 2) of (19) with 𝑑 𝑗 = ℓ(𝑋 𝑗 ) and densities 𝜌 1 = 𝑓 (𝑋 1)/ 𝑑 1, 𝜌 2 = 𝑓 (𝑋 2 | 𝑋 1)/ 𝑑 2, the total residual length 𝐷 = ℓ(𝑃 ) = 𝑑 1 + 𝑑 2 of (21), the crossover point 𝐷 1, the bounding function 𝜑 of (22), the trajectory 𝑉 of (18), and 𝛼 = 1 − 1/𝑒 . Since |𝑇 | ≥ 4 we have 
+
+|𝑃 | ≥ 2, so both blocks {𝑣 ★} and 𝑅 are nonempty; all item lengths are positive, hence 
+
+𝑝 > 0, 𝑟 > 0, 𝑑 1 > 0, 𝑑 2 > 0, 𝐷 = 𝑝 + 𝑟. (25) Recall from Section 4.3 that 𝑓 is normalized ( 𝑓 (∅) = 0), nonnegative, nondecreasing, and submodular, and that submodularity with (19) gives 𝜌 1 ≥ 𝜌 2 ≥ 0. We first record two auxiliary lemmas whose proofs are elementary computations; both are used repeatedly below. 
+
+Lemma 5 (Residual marginals and the trajectory) .
+
+(i) For every 𝑈 ⊆ [ 𝐿 ] and 𝑣 ∈ [ 𝐿 ], 𝑓 (𝑣 | 𝑈 ) = b𝐺 (𝑣 | 𝐽 ∪ 𝑈 ) ≥ 0.(ii) 𝑉 is continuous, piecewise affine, and nondecreasing on [0, ℓ ( 𝐴 𝑚 )] ; it satisfies 𝑉 (ℓ( 𝐴 𝑗 )) = 𝑓 ( 𝐴 𝑗 ) for every 𝑗 ,and it is defined on all of [0, 𝑟 ].(iii) Consider the chain step that selects 𝑎 𝑗 from the state 𝐽 ∪ 𝐴 𝑗 −1, and let 𝜎 𝑗 = 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1)/ ℓ𝑎 𝑗 denote its density. Then 𝑓 (𝑣 | 𝐴 𝑗 −1)/ ℓ({ 𝑣 }) ≤ 𝜎 𝑗 for every item 𝑣 ∉ 𝐽 ∪ 𝐴 𝑗 −1 that is feasible at that step. Proof. (i) Expanding definition (15) twice, 
+
+𝑓 (𝑣 | 𝑈 ) = 𝑓 (𝑈 ∪ { 𝑣 }) − 𝑓 (𝑈 ) =  b𝐺 (𝐽 ∪ 𝑈 ∪ { 𝑣 }) − b𝐺 (𝐽 ) −  b𝐺 (𝐽 ∪ 𝑈 ) − b𝐺 (𝐽 ) = b𝐺 (𝑣 | 𝐽 ∪ 𝑈 ),
+
+which is nonnegative because b𝐺 is nondecreasing. (ii) By construction (18), 𝑉 is affine on each segment [ℓ( 𝐴 𝑗 −1), ℓ ( 𝐴 𝑗 )] with slope 𝜎 𝑗 = 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1)/ ℓ𝑎 𝑗 , and its value at the right endpoint of segment 𝑗 telescopes to 𝑉 (ℓ( 𝐴 𝑗 )) = 𝑓 ( 𝐴 𝑗 −1) + 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1) = 𝑓 ( 𝐴 𝑗 ), which equals the value used at the left endpoint of segment 𝑗 + 1; hence 𝑉 is continuous. Each slope satisfies 𝜎 𝑗 ≥ 0 by (i) and ℓ𝑎 𝑗 > 0, so 𝑉 is nondecreasing. Finally, ℓ( 𝐴 𝑚 ) ≥ 𝑟 by Lemma 1, so [0, 𝑟 ] lies in the domain of 𝑉 .(iii) Line 6 of Algorithm 1 selects, among all items 𝑖 ∉ 𝐽 ∪ 𝐴 𝑗 −1 that are feasible at the current state 𝑆 = 𝐽 ∪ 𝐴 𝑗 −1,one maximizing b𝐺 (𝑖 | 𝑆 )/ ℓ𝑖 . By (i), b𝐺 (𝑣 | 𝐽 ∪ 𝐴 𝑗 −1) = 𝑓 (𝑣 | 𝐴 𝑗 −1) for every such 𝑣 , so maximizing the density with respect to b𝐺 is the same as maximizing it with respect to 𝑓 ; in particular the selected item 𝑎 𝑗 satisfies 
+
+𝑓 (𝑣 | 𝐴 𝑗 −1)/ ℓ({ 𝑣 }) ≤ 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1)/ ℓ𝑎 𝑗 = 𝜎 𝑗 for every feasible 𝑣 . □
+
+Lemma 6 (Properties of the bounding function) . The function 𝜑 of (22) satisfies: (i) 𝜑 (0) = 0; this holds on the first branch when 𝐷 1 > 0 and on the second branch when 𝐷 1 = 0.(ii) If 0 < 𝐷 1 < +∞ , the two branches agree at 𝑢 = 𝐷 1, so 𝜑 is continuous on [0, ∞) .(iii) On the first branch (0, 𝐷 1), 𝜑 ′ (𝑢 ) =   𝑓 (𝑋 1) − 𝜑 (𝑢 )/𝑑 1; on the second branch (𝐷 1, ∞) , 𝜑 ′ (𝑢 ) =   𝑓 (𝑃 ) − 
+
+𝜑 (𝑢 )/𝐷 .Proof. We use throughout the chain-rule decomposition 
+
+𝑓 (𝑃 ) = 𝑓 (𝑋 1) + 𝑓 (𝑋 2 | 𝑋 1) = 𝑓 (𝑋 1) + 𝜌 2𝑑 2 = 𝜌 1𝑑 1 + 𝜌 2𝑑 2. (26) (i) If 𝐷 1 > 0, the first branch gives 𝜑 (0) = 𝑓 (𝑋 1)( 1 − 𝑒 0) = 0. If 𝐷 1 = 0, then by definition of 𝐷 1 we have 
+
+𝜌 2 > 0 and 𝑑 1 ln (𝜌 1/𝜌 2) = 0, hence 𝜌 1 = 𝜌 2; the second branch then gives, using (26), 𝜑 (0) = 𝑓 (𝑃 ) − 𝜌 2 𝐷𝑒 0 =
+
+𝜌 1𝑑 1 + 𝜌 2𝑑 2 − 𝜌 2 (𝑑 1 + 𝑑 2) = 0. 18 Optimal Skill Selection for LLM Agents 
+
+(ii) Let 0 < 𝐷 1 < +∞ , so 𝜌 2 > 0 and 𝑒 −𝐷 1/𝑑 1 = 𝜌 2/𝜌 1. The left limit at 𝐷 1 along the first branch is 
+
+𝑓 (𝑋 1)  1 − 𝑒 −𝐷 1/𝑑 1  = 𝑓 (𝑋 1)
+
+
+
+1 − 𝜌 2
+
+𝜌 1
+
+
+
+= 𝑓 (𝑋 1) − 𝜌 2𝑑 1,
+
+where the last step uses 𝑓 (𝑋 1) = 𝜌 1𝑑 1. The value at 𝐷 1 on the second branch is 𝑓 (𝑃 ) − 𝜌 2 𝐷𝑒 0 = 𝑓 (𝑃 ) − 𝜌 2 (𝑑 1 + 𝑑 2),which equals 𝑓 (𝑋 1) − 𝜌 2𝑑 1 by (26). The two branches agree, and each branch is continuous, so 𝜑 is continuous. (iii) On (0, 𝐷 1), differentiating 𝜑 (𝑢 ) = 𝑓 (𝑋 1)( 1 − 𝑒 −𝑢 /𝑑 1 ) gives 𝜑 ′ (𝑢 ) = 𝑓 (𝑋 1 ) 
+
+> 𝑑 1
+
+𝑒 −𝑢 /𝑑 1 , while 𝑓 (𝑋 1) − 𝜑 (𝑢 ) =
+
+𝑓 (𝑋 1)𝑒 −𝑢 /𝑑 1 ; dividing by 𝑑 1 matches. On (𝐷 1, ∞) , differentiating 𝜑 (𝑢 ) = 𝑓 (𝑃 ) − 𝜌 2 𝐷 exp  − 𝑢 −𝐷 1
+
+> 𝐷
+
+ gives 𝜑 ′ (𝑢 ) =
+
+𝜌 2 exp  − 𝑢 −𝐷 1
+
+> 𝐷
+
+, while 𝑓 (𝑃 ) − 𝜑 (𝑢 ) = 𝜌 2 𝐷 exp  − 𝑢 −𝐷 1
+
+> 𝐷
+
+; dividing by 𝐷 matches. □
+
+A.1. Proof of Lemma 3 
+
+Proof. The proof has three steps: a density lower bound valid on every segment that starts before 𝑟 (Step 1), a differential inequality for the difference 𝑊 = 𝑉 − 𝜑 on each branch (Step 2), and a piecewise integrating-factor argument that propagates 𝑊 ≥ 0 across the finitely many breakpoints (Step 3). Step 4 checks that all placements of 𝐷 1 relative to [0, 𝑟 ] are covered. 
+
+Step 1 (density lower bound). Fix an accepted segment starting at 𝐴 𝑗 −1 with left endpoint 𝑢 0 = ℓ( 𝐴 𝑗 −1) < 𝑟 , and let 𝜎 𝑗 = 𝑓 (𝑎 𝑗 | 𝐴 𝑗 −1)/ ℓ𝑎 𝑗 be the density of the item selected by Algorithm 1 on that segment. Let 𝑄 ⊆ 𝑃 be any set such that every member of 𝑄 \ 𝐴 𝑗 −1 is feasible at this step; by Lemma 2, this holds for every 𝑄 ⊆ 𝑃 , since 
+
+𝑢 0 < 𝑟 . We claim 
+
+𝑓 (𝑄 ) ≤ 𝑓 ( 𝐴 𝑗 −1 ∪ 𝑄 ) ≤ 𝑓 ( 𝐴 𝑗 −1) + ∑︁  
+
+> 𝑣 ∈𝑄 \𝐴 𝑗 −1
+
+𝑓 (𝑣 | 𝐴 𝑗 −1) ≤ 𝑓 ( 𝐴 𝑗 −1) + 𝜎 𝑗 ℓ(𝑄 ). (27) The first inequality is monotonicity of 𝑓 . For the second, enumerate 𝑄 \ 𝐴 𝑗 −1 = {𝑣 1, . . . , 𝑣 𝑠 } in an arbitrary order and telescope: 
+
+𝑓 ( 𝐴 𝑗 −1 ∪ 𝑄 ) − 𝑓 ( 𝐴 𝑗 −1) =
+
+> 𝑠
+
+∑︁ 
+
+> 𝑘 =1
+
+𝑓  𝑣 𝑘 | 𝐴 𝑗 −1 ∪ { 𝑣 1, . . . , 𝑣 𝑘 −1 } ≤
+
+> 𝑠
+
+∑︁ 
+
+> 𝑘 =1
+
+𝑓 (𝑣 𝑘 | 𝐴 𝑗 −1),
+
+where each summand is bounded via submodularity of 𝑓 (conditioning on a superset of 𝐴 𝑗 −1 can only decrease the marginal). For the third inequality, every 𝑣 ∈ 𝑄 \ 𝐴 𝑗 −1 is feasible at this step, so Lemma 5(iii) gives 
+
+𝑓 (𝑣 | 𝐴 𝑗 −1) ≤ 𝜎 𝑗 ℓ({ 𝑣 }) ; summing over 𝑄 \ 𝐴 𝑗 −1 and using 𝜎 𝑗 ≥ 0 together with ℓ(𝑄 \ 𝐴 𝑗 −1) ≤ ℓ(𝑄 ) (lengths are positive) yields the claim. Rearranging (27) and using ℓ(𝑄 ) > 0, 
+
+𝜎 𝑗 ≥ 𝑓 (𝑄 ) − 𝑓 ( 𝐴 𝑗 −1)
+
+ℓ(𝑄 ) ≥ 𝑓 (𝑄 ) − 𝑉 (𝑢 )
+
+ℓ(𝑄 ) for every 𝑢 ∈ [ ℓ( 𝐴 𝑗 −1), ℓ ( 𝐴 𝑗 )] , (28) where the second inequality holds because 𝑉 is nondecreasing (Lemma 5(ii)) with 𝑉 (ℓ( 𝐴 𝑗 −1)) = 𝑓 ( 𝐴 𝑗 −1), so 
+
+𝑉 (𝑢 ) ≥ 𝑓 ( 𝐴 𝑗 −1) on the whole segment. Since 𝑋 1 ⊆ 𝑃 and 𝑃 ⊆ 𝑃 , inequality (28) is available both for 𝑄 = 𝑋 1
+
+and for 𝑄 = 𝑃 on every segment starting before 𝑟 .
+
+Step 2 (differential inequality on each branch). Consider the difference 𝑊 (𝑢 ) := 𝑉 (𝑢 ) − 𝜑 (𝑢 ) on [0, 𝑟 ]. Both 𝑉 
+
+and 𝜑 are continuous (Lemma 5(ii) and Lemma 6(ii)), so 𝑊 is continuous. Partition [0, min (𝑟, 𝐷 1)] (and, when 
+
+𝐷 1 < 𝑟 , also [𝐷 1, 𝑟 ]) by the finitely many trajectory breakpoints ℓ( 𝐴 0) < ℓ ( 𝐴 1) < · · · falling in the respective interval. On the interior of each cell of this partition, 𝑉 is affine with 𝑉 ′ (𝑢 ) = 𝜎 𝑗 for the segment index 𝑗 
+
+containing the cell, and 𝜑 is differentiable (Lemma 6(iii)). 
+
+First branch. Let 𝑢 lie in the interior of a cell of [0, min (𝑟, 𝐷 1)] . The segment containing 𝑢 has left endpoint 
+
+𝑢 0 ≤ 𝑢 < 𝑟 , so (28) applies with 𝑄 = 𝑋 1, and Lemma 6(iii) gives the ODE for 𝜑 . Subtracting, 
+
+𝑊 ′ (𝑢 ) = 𝑉 ′ (𝑢 ) − 𝜑 ′ (𝑢 ) ≥ 𝑓 (𝑋 1) − 𝑉 (𝑢 )
+
+𝑑 1
+
+− 𝑓 (𝑋 1) − 𝜑 (𝑢 )
+
+𝑑 1
+
+= −𝑊 (𝑢 )
+
+𝑑 1
+
+. (29) 19 Optimal Skill Selection for LLM Agents 
+
+Second branch. Let 𝐷 1 < 𝑟 and let 𝑢 lie in the interior of a cell of [𝐷 1, 𝑟 ]. Again the segment containing 𝑢 has left endpoint 𝑢 0 < 𝑟 , so (28) applies with 𝑄 = 𝑃 , and the same subtraction gives 
+
+𝑊 ′ (𝑢 ) ≥ 𝑓 (𝑃 ) − 𝑉 (𝑢 )
+
+𝐷 − 𝑓 (𝑃 ) − 𝜑 (𝑢 )
+
+𝐷 = −𝑊 (𝑢 )
+
+𝐷 . (30) 
+
+Step 3 (integrating factor and propagation across breakpoints). Fix a branch and write ℓ𝑄 for its rate constant (ℓ𝑄 = 𝑑 1 on the first branch, ℓ𝑄 = 𝐷 on the second). On the interior of each cell, dd𝑢 
+
+
+
+𝑒 𝑢 /ℓ𝑄 𝑊 (𝑢 )
+
+
+
+= 𝑒 𝑢 /ℓ𝑄 
+
+
+
+𝑊 ′ (𝑢 ) + 𝑊 (𝑢 )
+
+ℓ𝑄 
+
+
+
+≥ 0 (31) by (29) or (30). Hence 𝑒 𝑢 /ℓ𝑄 𝑊 (𝑢 ) is nondecreasing on the interior of each cell; since it is continuous on the whole branch interval and the partition has finitely many cells, it is nondecreasing on the entire branch interval. Therefore, if 𝑊 ≥ 0 at the left endpoint of the branch interval, then 𝑒 𝑢 /ℓ𝑄 𝑊 (𝑢 ) ≥ 0, hence 𝑊 (𝑢 ) ≥ 0, throughout that interval. It remains to check the left-endpoint values. On [0, min (𝑟, 𝐷 1)] the left endpoint is 𝑢 = 0, where 𝑊 (0) =
+
+𝑉 (0) − 𝜑 (0) = 0 − 0 = 0 by (18) and Lemma 6(i). On [𝐷 1, 𝑟 ] (when 0 < 𝐷 1 < 𝑟 ) the left endpoint is 𝑢 = 𝐷 1,where the first-branch conclusion and continuity of 𝑊 give 𝑊 (𝐷 1) ≥ 0. When 𝐷 1 = 0, the left endpoint of the second-branch interval is 𝑢 = 0, and Lemma 6(i) again gives 𝑊 (0) = 0. 
+
+Step 4. If 𝐷 1 ≥ 𝑟 (including 𝐷 1 = +∞ , which occurs when 𝜌 2 = 0), then [0, 𝑟 ] ⊆ [ 0, min (𝑟, 𝐷 1)] and the first-branch argument alone gives 𝑊 ≥ 0 on [0, 𝑟 ]. If 𝐷 1 = 0, then only the second branch is active on [0, 𝑟 ], with initial value 𝑊 (0) = 0. If 0 < 𝐷 1 < 𝑟 , the first-branch argument gives 𝑊 ≥ 0 on [0, 𝐷 1] and the second-branch argument extends it to [𝐷 1, 𝑟 ]. In every case 𝑉 (𝑢 ) ≥ 𝜑 (𝑢 ) for all 𝑢 ∈ [ 0, 𝑟 ], which is the claim of Lemma 3. □
+
+A.2. Proof of Lemma 4 
+
+We use the following standard inequality; we include its one-line proof for completeness. 
+
+Lemma 7 (Log-sum inequality) . For positive reals 𝑎 1, 𝑎 2, 𝑏 1, 𝑏 2,
+
+𝑎 1 ln 𝑏 1
+
+𝑎 1
+
++ 𝑎 2 ln 𝑏 2
+
+𝑎 2
+
+≤ (𝑎 1 + 𝑎 2) ln 𝑏 1 + 𝑏 2
+
+𝑎 1 + 𝑎 2
+
+. (32) 
+
+Proof. Apply Jensen’s inequality to the concave function ln with weights 𝜆 𝑖 = 𝑎 𝑖 /( 𝑎 1 + 𝑎 2) and points 𝑢 𝑖 = 𝑏 𝑖 /𝑎 𝑖 :
+
+𝑎 1
+
+𝑎 1 + 𝑎 2
+
+ln 𝑏 1
+
+𝑎 1
+
++ 𝑎 2
+
+𝑎 1 + 𝑎 2
+
+ln 𝑏 2
+
+𝑎 2
+
+≤ ln 
+
+ 𝑎 1
+
+𝑎 1 + 𝑎 2
+
+· 𝑏 1
+
+𝑎 1
+
++ 𝑎 2
+
+𝑎 1 + 𝑎 2
+
+· 𝑏 2
+
+𝑎 2
+
+
+
+= ln 𝑏 1 + 𝑏 2
+
+𝑎 1 + 𝑎 2
+
+.
+
+Multiplying both sides by 𝑎 1 + 𝑎 2 > 0 gives (32). □
+
+Proof of Lemma 4. Abbreviate 𝐶 := b𝐺 (𝐽 ) and 𝐻 := b𝐺 (𝑇 ) for the duration of this proof. Since 𝐽 ∪ 𝑃 = 𝑇 , definition (15) gives 
+
+𝑓 (𝑃 ) = b𝐺 (𝑇 ) − b𝐺 (𝐽 ) = 𝐻 − 𝐶. (33) 
+
+Step 0 (reduction and common identities). If 𝑓 (𝑃 ) = 0, then 𝐻 = 𝐶 by (33), and since 𝜑 ≥ 0 (both branches of (22) are nonnegative: the first is a nonnegative multiple of 1 − 𝑒 −𝑢 /𝑑 1 ≥ 0, and the second is bounded below by its value at 𝑢 = 𝐷 1, which equals the first-branch value 𝑓 (𝑋 1)( 1 − 𝑒 −𝐷 1/𝑑 1 ) ≥ 0 by Lemma 6(ii)), 
+
+𝐶 + 𝜑 (𝑟 ) ≥ 𝐶 = 𝐻 ≥ 𝛼𝐻. 
+
+Assume from now on that 𝑓 (𝑃 ) > 0. Then 𝜌 1 > 0: otherwise 𝑓 (𝑋 1) = 0, and the block order (19) forces 
+
+𝑓 (𝑋 2) ≤ 𝑑 2 
+
+> 𝑑 1
+
+𝑓 (𝑋 1) = 0, whence by submodularity 𝑓 (𝑋 2 | 𝑋 1) ≤ 𝑓 (𝑋 2) = 0 and 𝑓 (𝑃 ) = 𝑓 (𝑋 1) + 𝑓 (𝑋 2 | 𝑋 1) ≤ 0, a contradiction. 20 Optimal Skill Selection for LLM Agents 
+
+Define (𝑥, 𝑧 ) according to the block order: 
+
+(𝑥, 𝑧 ) =
+
+(  𝑓 ({ 𝑣 ★}) , 𝑓 (𝑅 | { 𝑣 ★}) , 𝑋 1 = {𝑣 ★},
+
+  𝑓 (𝑣 ★ | 𝑅 ), 𝑓 (𝑅 ), 𝑋 1 = 𝑅. (34) In both orders the chain rule gives 𝑥 + 𝑧 = 𝑓 (𝑃 ), so by (33),  
+
+> 𝐻
+
+= 𝐶 + 𝑥 + 𝑧. (35) In both orders we also have  
+
+> 𝐶
+
+≥ 2𝑥. (36) Indeed, if 𝑋 1 = {𝑣 ★} then 𝑥 = 𝑓 ({ 𝑣 ★}) and (16) applies directly with 𝑣 = 𝑣 ★; if 𝑋 1 = 𝑅 then submodularity gives  
+
+> 𝑥
+
+= 𝑓 (𝑣 ★ | 𝑅 ) ≤ 𝑓 ({ 𝑣 ★}) , and (16) gives 𝐶 ≥ 2 𝑓 ({ 𝑣 ★}) ≥ 2𝑥 .Finally, recall the block data in the two orders. If 𝑋 1 = {𝑣 ★}: 𝑑 1 = 𝑝 , 𝑑 2 = 𝑟 , 𝜌 1 = 𝑥 /𝑝 , 𝜌 2 = 𝑧 /𝑟 . If 𝑋 1 = 𝑅 : 
+
+> 𝑑 1
+
+= 𝑟 , 𝑑 2 = 𝑝 , 𝜌 1 = 𝑧 /𝑟 , 𝜌 2 = 𝑥 /𝑝 . In both orders, whenever 𝑥, 𝑧 > 0,  
+
+> 𝑑 1
+
+ln 𝜌 1 + 𝑑 2 ln 𝜌 2 = 𝑝 ln 𝑥 𝑝 + 𝑟 ln 𝑧 𝑟 , (37) because the two summands on the left are exactly the two summands on the right, possibly in the opposite order. We now distinguish the same three structural cases as the refined analysis of (Kulik et al., 2021); Step 4 verifies that they are exhaustive. 
+
+Step 1 (Case 1: 𝑟 ≥ 𝐷 1). Since 𝑟 < ∞, the case condition forces 𝐷 1 < ∞, hence 𝜌 2 > 0 by the definition of 𝐷 1,and with 𝜌 1 ≥ 𝜌 2 both block values are positive; reading off the block data above, this means  
+
+> 𝑥 >
+
+0 and 𝑧 > 0in both orders, so every logarithm below has a strictly positive argument. Because 𝑟 ≥ 𝐷 1, the second branch of (22) evaluates 𝜑 (𝑟 ), and by (33) and (35),  
+
+> 𝐶
+
++ 𝜑 (𝑟 ) = 𝐶 + 𝑓 (𝑃 ) − 𝜌 2 𝐷 exp 
+
+
+
+− 𝑟 − 𝐷 1
+
+> 𝐷
+
+
+
+= 𝐻 − 𝜌 2 𝐷 exp 
+
+
+
+− 𝑟 − 𝐷 1
+
+> 𝐷
+
+ 
+
+> .
+
+(38) It therefore suffices to bound the exponential tail by 𝐻 /𝑒 .First, combining (36) with (35),  
+
+> 𝐻
+
+− 𝑧 = 𝐶 + 𝑥 ≥ 2𝑥 + 𝑥 = 3𝑥. (39) Next we bound the weighted-log expression (37). Using 𝑥 ≤ ( 𝐻 − 𝑧 )/ 3 from (39) and the monotonicity of ln, then splitting off ln 3, then applying Lemma 7 with (𝑎 1, 𝑎 2) = ( 𝑝, 𝑟 ) and (𝑏 1, 𝑏 2) = (𝐻 − 𝑧, 𝑧 ) (all four are positive, 𝑝 + 𝑟 = 𝐷 , and (𝐻 − 𝑧 ) + 𝑧 = 𝐻 ), and finally using ln 3 > 1 with 𝑝 > 0:  
+
+> 𝑝
+
+ln 𝑥 𝑝 + 𝑟 ln 𝑧 𝑟 ≤ 𝑝 ln 𝐻 − 𝑧 
+
+3𝑝 + 𝑟 ln 𝑧 𝑟 
+
+= − 𝑝 ln 3 + 𝑝 ln 𝐻 − 𝑧 𝑝 + 𝑟 ln 𝑧 𝑟 
+
+≤ − 𝑝 ln 3 + 𝐷 ln 𝐻 𝐷 
+
+≤ − 𝑝 + 𝐷 ln 𝐻 𝐷 .
+
+(40) Now rewrite the exponential tail. Using 𝑟 = 𝐷 − 𝑝 ,  
+
+> 𝜌 2𝐷
+
+exp 
+
+
+
+− 𝑟 − 𝐷 1
+
+> 𝐷
+
+
+
+= 𝐷 exp 
+
+
+
+ln 𝜌 2 − 𝐷 − 𝑝 − 𝐷 1
+
+> 𝐷
+
+
+
+= 𝐷 exp 
+
+
+
+−1 + 𝑝 + 𝐷 1 
+
+> 𝐷
+
++ ln 𝜌 2
+
+
+
+> ,
+
+21 Optimal Skill Selection for LLM Agents 
+
+and since 𝐷 1 = 𝑑 1 ln (𝜌 1/𝜌 2) and 𝐷 = 𝑑 1 + 𝑑 2,
+
+𝐷 1
+
+𝐷 + ln 𝜌 2 = 𝑑 1 ln 𝜌 1 − 𝑑 1 ln 𝜌 2 + 𝐷 ln 𝜌 2
+
+𝐷 = 𝑑 1 ln 𝜌 1 + 𝑑 2 ln 𝜌 2
+
+𝐷 ,
+
+so that, by (37), 
+
+𝜌 2 𝐷 exp 
+
+
+
+− 𝑟 − 𝐷 1
+
+𝐷 
+
+
+
+= 𝐷 exp 
+
+
+
+−1 + 𝑝 + 𝑝 ln 𝑥 𝑝 + 𝑟 ln 𝑧 𝑟 
+
+𝐷 
+
+
+
+. (41) Substituting the bound (40) into (41) and using the monotonicity of exp, 
+
+𝜌 2 𝐷 exp 
+
+
+
+− 𝑟 − 𝐷 1
+
+𝐷 
+
+
+
+≤ 𝐷 exp 
+
+
+
+−1 + 𝐷 ln (𝐻 /𝐷 )
+
+𝐷 
+
+
+
+= 𝐷 · 1
+
+𝑒 · 𝐻 𝐷 = 𝐻 𝑒 . (42) Combining (38) and (42), 
+
+𝐶 + 𝜑 (𝑟 ) ≥ 𝐻 − 𝐻 𝑒 = 𝛼𝐻. 
+
+The boundary subcases are included: 𝑟 = 𝐷 1 uses the second branch of (22), which is defined for all 𝑢 ≥ 𝐷 1,and 𝐷 1 = 0 poses no difficulty since only the case condition 𝑟 ≥ 𝐷 1 was used. 
+
+Step 2 (Case 2: 𝑟 < 𝐷 1 and 𝑋 1 = {𝑣 ★}). Here 𝑥 = 𝑓 ({ 𝑣 ★}) , 𝑧 = 𝑓 (𝑅 | { 𝑣 ★}) , 𝑑 1 = 𝑝 , and we write 
+
+𝛿 := 𝑟 𝑝 > 0. (43) Note 𝑥 = 𝜌 1 𝑝 > 0 because 𝜌 1 > 0 (Step 0). Since 𝑟 < 𝐷 1, the first branch of (22) evaluates 𝜑 (𝑟 ):
+
+𝜑 (𝑟 ) = 𝑥  1 − 𝑒 −𝑟 /𝑝  = 𝑥  1 − 𝑒 −𝛿 . (44) Suppose first 𝑧 > 0. Then 𝜌 2 = 𝑧 /𝑟 > 0 and the case condition 𝑟 < 𝐷 1 = 𝑝 ln 𝑥 /𝑝 𝑧 /𝑟 can be divided by 𝑝 > 0 to read 
+
+𝛿 < ln 
+
+ 𝑥 𝑝 · 𝑟 𝑧 
+
+
+
+= ln 
+
+ 𝑥 𝑧 𝛿 
+
+
+
+.
+
+Exponentiating gives 𝑒 𝛿 < 𝑥 𝑧 𝛿 , i.e., 
+
+𝑥 > 𝑧 𝑒 𝛿 
+
+𝛿 . (45) We now chain the estimates; each line is justified below: 
+
+𝐶 + 𝜑 (𝑟 ) = 𝐶 + 𝑥  1 − 𝑒 −𝛿 
+
+= 23 (𝐶 + 𝑥 ) + 
+
+h 13 (𝐶 + 𝑥 ) − 𝑥𝑒 −𝛿 
+
+i
+
+≥ 23 (𝐶 + 𝑥 ) + 𝑥  1 − 𝑒 −𝛿 
+
+> 23 (𝐶 + 𝑥 ) + 𝑧 𝑒 𝛿 − 1
+
+𝛿 
+
+≥ 23 (𝐶 + 𝑥 ) + 𝑧 
+
+≥ 23 (𝐶 + 𝑥 + 𝑧 ) = 23 𝐻 > 𝛼𝐻. 
+
+(46) Line 2 only splits 𝐶 + 𝑥 = 23 (𝐶 + 𝑥 ) + 13 (𝐶 + 𝑥 ) and regroups. Line 3 uses (36): 𝐶 ≥ 2𝑥 implies 13 (𝐶 + 𝑥 ) ≥ 𝑥 , so the bracket is at least 𝑥 − 𝑥𝑒 −𝛿 . Line 4 uses (45) together with 1 − 𝑒 −𝛿 = 𝑒 −𝛿 (𝑒 𝛿 − 1) > 0: 
+
+𝑥  1 − 𝑒 −𝛿  > 𝑧 𝑒 𝛿 
+
+𝛿 𝑒 −𝛿  𝑒 𝛿 − 1 = 𝑧 𝑒 𝛿 − 1
+
+𝛿 .
+
+Line 5 uses the elementary inequality 𝑒 𝛿 ≥ 1 + 𝛿 , which gives (𝑒 𝛿 − 1)/ 𝛿 ≥ 1, and 𝑧 > 0. Line 6 uses 𝑧 ≥ 23 𝑧 , and the final equality is (35). The last strict comparison uses 𝑒 < 3: 𝛼 = 1 − 1/𝑒 < 1 − 1/3 = 2/3. 22 Optimal Skill Selection for LLM Agents 
+
+If instead 𝑧 = 0, no logarithm involving 𝑧 is ever formed: lines 1–3 of (46) are unchanged and give 
+
+𝐶 + 𝜑 (𝑟 ) ≥ 23 (𝐶 + 𝑥 ) + 𝑥  1 − 𝑒 −𝛿  ≥ 23 (𝐶 + 𝑥 ) = 23 𝐻 > 𝛼𝐻, 
+
+using 𝑥 (1 − 𝑒 −𝛿 ) ≥ 0 and 𝐻 = 𝐶 + 𝑥 + 0 from (35). 
+
+Step 3 (Case 3: 𝑟 < 𝐷 1 and 𝑋 1 = 𝑅 ). Here 𝑧 = 𝑓 (𝑅 ), 𝑥 = 𝑓 (𝑣 ★ | 𝑅 ), and 𝑑 1 = ℓ(𝑅 ) = 𝑟 . Since 𝑟 < 𝐷 1, the first branch of (22) evaluates 𝜑 (𝑟 ), and because the branch rate constant is 𝑑 1 = 𝑟 ,
+
+𝜑 (𝑟 ) = 𝑓 (𝑋 1)  1 − 𝑒 −𝑟 /𝑑 1  = 𝑧  1 − 𝑒 −1 = 𝛼𝑧. (47) From (36), 𝐶 ≥ 2𝑥 , hence 3 𝐶 ≥ 2𝐶 + 2𝑥 , i.e., 
+
+𝐶 ≥ 23 (𝐶 + 𝑥 ) ≥ 𝛼 (𝐶 + 𝑥 ), (48) where the second inequality again uses 23 > 𝛼 (from 𝑒 < 3) and 𝐶 + 𝑥 ≥ 0. Adding (47) and (48) and using (35), 
+
+𝐶 + 𝜑 (𝑟 ) ≥ 𝛼 (𝐶 + 𝑥 ) + 𝛼𝑧 = 𝛼 (𝐶 + 𝑥 + 𝑧 ) = 𝛼𝐻. 
+
+Step 4. The reduction 𝑓 (𝑃 ) = 0 was handled in Step 0, so assume 𝑓 (𝑃 ) > 0. If 𝐷 1 ≤ 𝑟 — which includes 𝐷 1 = 0, since 𝑟 > 0 by (25) — we are in Case 1. If 𝑟 < 𝐷 1 — which includes 𝐷 1 = +∞ , i.e., 𝜌 2 = 0 — we are in Case 2 or Case 3 according to whether the block order puts {𝑣 ★} or 𝑅 first; these two options are exhaustive because 
+
+(𝑋 1, 𝑋 2) is a permutation of  {𝑣 ★}, 𝑅 . In every case b𝐺 (𝐽 ) + 𝜑 (𝑟 ) ≥ 𝛼 b𝐺 (𝑇 ), which is the claim of Lemma 4. □
+
+23
