@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-22</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-23</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-22 20:49:43 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-23 19:59:53 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦12篇论文，精读6篇、速读6篇，核心围绕多智能体KV缓存优化与设备端Agent学习。最值得关注GraniKV提出的非对称粒度分页方案（10分）和LOCAL的连续设备端学习框架（9分），均直击长共享前缀与资源受限场景痛点。建议后续优先复现GraniKV的缓存分页策略，并延伸关注KV缓存调度的理论最优比研究。</p>
+<p>今日精读聚焦多智能体工作流优化与LLM推理服务系统，速读覆盖分层记忆管理与边缘MoE执行。最值得关注的是Token管理在复杂AI工作流中的关键作用，以及推理系统面对智能体负载的架构挑战。建议深入探索如何结合分层记忆与带宽自适应调度，提升长期任务的部署效率。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="GraniKV: Asymmetric Granularity KV-Cache Paging for Multi-Agent Systems with Long Shared Prefix">GraniKV: Asymmetric Granularity KV-Cache Paging for Multi-Agent Systems with Long Shared Prefix</span></li><li><span class="dpr-home-dashboard-paper-title" title="LOCAL: Enabling Learning On-device Contiguously for Agent LLMs">LOCAL: Enabling Learning On-device Contiguously for Agent LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ReCache: Efficient KV Cache Reuse and Compression for Tool-Augmented LLM Agents">ReCache: Efficient KV Cache Reuse and Compression for Tool-Augmented LLM Agents</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Token Optimization and Context Window Management in Multi-Agent AI Workflows">Token Optimization and Context Window Management in Multi-Agent AI Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems">From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="What Does Context Compression Cost an Agent? Interaction Costs Unrevealed by Task-Completion Metrics">What Does Context Compression Cost an Agent? Interaction Costs Unrevealed by Task-Completion Metrics</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems">From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="A Tight Linear Deterministic Competitive Ratio for Fully Online KV-Cache Scheduling">A Tight Linear Deterministic Competitive Ratio for Fully Online KV-Cache Scheduling</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State">Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HyMem: Hierarchical Context Management for Long-Horizon Agents via Information Isolation">HyMem: Hierarchical Context Management for Long-Horizon Agents via Information Isolation</span></li><li><span class="dpr-home-dashboard-paper-title" title="FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution">FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 </div>
 
