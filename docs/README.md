@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-23</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-24</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-23 19:59:53 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-24 20:59:35 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读聚焦多智能体工作流优化与LLM推理服务系统，速读覆盖分层记忆管理与边缘MoE执行。最值得关注的是Token管理在复杂AI工作流中的关键作用，以及推理系统面对智能体负载的架构挑战。建议深入探索如何结合分层记忆与带宽自适应调度，提升长期任务的部署效率。</p>
+<p>今日精读2篇、速读1篇，聚焦异构语言模型间通信与状态恢复机制。</p>
+<p>最值得看的是9分《Dual-Cache Latent Space Communication》提出的双缓存潜空间通信，以及8分《Bounded-State Restoration》的本地恢复与外部状态解耦。</p>
+<p>建议优先精读这两篇高分论文，并留意其对长时程LLM智能体记忆与稳定性的实际影响。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Token Optimization and Context Window Management in Multi-Agent AI Workflows">Token Optimization and Context Window Management in Multi-Agent AI Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems">From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="What Does Context Compression Cost an Agent? Interaction Costs Unrevealed by Task-Completion Metrics">What Does Context Compression Cost an Agent? Interaction Costs Unrevealed by Task-Completion Metrics</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Dual-Cache Latent Space Communication between Heterogeneous Language Models">Dual-Cache Latent Space Communication between Heterogeneous Language Models</span></li><li><span class="dpr-home-dashboard-paper-title" title="Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State">Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="HyMem: Hierarchical Context Management for Long-Horizon Agents via Information Isolation">HyMem: Hierarchical Context Management for Long-Horizon Agents via Information Isolation</span></li><li><span class="dpr-home-dashboard-paper-title" title="FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution">FreeToken: Efficient Edge-Native MoE Serving with Bandwidth-Adaptive Execution</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Weighted Memory Tree: Remembering What Matters for Long-Horizon LLM Agents">Weighted Memory Tree: Remembering What Matters for Long-Horizon LLM Agents</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
 </section>
 </div>
 
