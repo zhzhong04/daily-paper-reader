@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-26</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-26 21:32:48 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-29 22:48:11 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,10 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦AI智能体状态恢复与记忆治理，5篇论文中精选2篇高分精读。最值得关注《Bounded-State Restoration》与《CausalCache》，前者解耦恢复能力与外部状态，后者实现长时GUI代理的高保真条件恢复。建议普通读者优先了解长时运行智能体的记忆压缩“断崖效应”与恢复机制，以应对实际部署中的状态丢失问题。</p>
+<p>今日共生成 3 篇推荐（精读 1 篇，速读 2 篇）</p>
+<p>精读：《TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving》（9.0/10）</p>
+<p>速读：《The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory》（7.0/10）, 《TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy》（7.0/10）</p>
+<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +74,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State">Bounded-State Restoration: Decoupling Local Restore Capacity from External LLM State</span></li><li><span class="dpr-home-dashboard-paper-title" title="CausalCache: Conditional High-Fidelity Restoration for Long-Horizon GUI Agents">CausalCache: Conditional High-Fidelity Restoration for Long-Horizon GUI Agents</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving">TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +87,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PowerSlider: Exploiting Phase Asymmetry for LLM Serving under Demand Response">PowerSlider: Exploiting Phase Asymmetry for LLM Serving under Demand Response</span></li><li><span class="dpr-home-dashboard-paper-title" title="MemGuard: Persisting Verifier Signals for LLM-Agent Memory Governance">MemGuard: Persisting Verifier Signals for LLM-Agent Memory Governance</span></li><li><span class="dpr-home-dashboard-paper-title" title="The Compaction Cliff in Long-Running AI Agent Memory">The Compaction Cliff in Long-Running AI Agent Memory</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory">The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy">TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 </div>
 
