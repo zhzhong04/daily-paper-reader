@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-29</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-30</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-29 22:48:11 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-08-30 21:36:31 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,10 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 3 篇推荐（精读 1 篇，速读 2 篇）</p>
-<p>精读：《TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving》（9.0/10）</p>
-<p>速读：《The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory》（7.0/10）, 《TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy》（7.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>今日精读2篇、速读3篇，聚焦AI智能体的工具路由与记忆管理架构。</p>
+<p>最值得关注：CacheRouter以双路径缓存隔离攻克长尾工具发现，记忆分层演化策略平衡共享与个性化。</p>
+<p>普通读者可优先了解KV缓存淘汰的注意力机制改进，对新架构实践更有启发。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -74,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving">TOPAS: Workflow-Aware Prefix-State Scheduling for Multi-Agent LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CacheRouter: A Dual-Path Tool Routing Architecture with Cache-Preserving Main-Model Isolation for Long-Tail Tool Discovery">CacheRouter: A Dual-Path Tool Routing Architecture with Cache-Preserving Main-Model Isolation for Long-Tail Tool Discovery</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning What to Share and What to Personalize: Hierarchical Strategy Co-Evolution for Agent Memory">Learning What to Share and What to Personalize: Hierarchical Strategy Co-Evolution for Agent Memory</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory">The Retriever Should Remember: Experience-Amortized Reranking for Long-Term Agent Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy">TwinKV: A Composable Repair Pass for KV Cache Eviction via Pairwise Key Redundancy</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction">Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="SKILL.state: Scalable Long-Horizon Agent Skills">SKILL.state: Scalable Long-Horizon Agent Skills</span></li><li><span class="dpr-home-dashboard-paper-title" title="PolyMemDB: A Polyglot Database System for AI Memory Management">PolyMemDB: A Polyglot Database System for AI Memory Management</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 </div>
 
