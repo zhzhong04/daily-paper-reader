@@ -1,0 +1,653 @@
+Title: Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction
+
+URL Source: https://arxiv.org/pdf/2608.27975v1
+
+Published Time: Mon, 31 Aug 2026 00:35:53 GMT
+
+Number of Pages: 22
+
+Markdown Content:
+Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction 
+
+## Haocheng Xia 
+
+## Harvard University & UIUC 
+
+## William Nixon 
+
+## University of Chicago & Harvard University 
+
+## Bintang Dwi Marthen 
+
+## Harvard University & Institut Teknologi Bandung 
+
+## Pranav Bhandari 
+
+## Meta 
+
+## Juncheng Yang 
+
+## Harvard University 
+
+## Abstract 
+
+Caching is widely used across the system stack to improve per-formance and efficiency, with eviction algorithms at its core. Existing cache eviction policies fall into two broad categories: static heuristics (e.g., 2Q, S3-FIFO) and smart algorithms (e.g., ARC, LRB). Smart caches can adapt to workloads and have the potential to achieve higher efficiency and robustness than static heuristics. However, we find that existing smart caches suffer from objective mismatches and instability. We introduce Learning-Augmented Heuristics (LAH), a framework that learns the cache-level parameters of static heuristics. By decoupling the data and control planes, LAH supports simple, high-speed data reads and writes on the data plane, while performing occasional asynchronous learning on the control plane using cache-level features. We demonstrate the effectiveness of LAH through S4-FIFO, a Smart S3-FIFO cache eviction algorithm. We pre-train a single model on 4,140 production traces and embed it in S4-FIFO to learn optimal cache parameters. On 1,035 evaluation traces, S4-FIFO improves the mean efficiency by 26% compared to S3-FIFO and by 8% compared to 3L-Cache, the best state-of-the-art algorithm. S4-FIFO is also robust— increasing miss ratio over FIFO by 0.8% on the worst trace, whereas 3L-Cache increases FIFO’s miss ratio by 8.8%. Fi-nally, S4-FIFO’s decisions are also interpretable: a language model can provide a rationale for why a particular configura-tion was chosen. 
+
+## 1 Introduction 
+
+Caching underpins performance across modern systems— from storage stacks [11, 64, 67, 75] and databases [35, 57] to large web services [7,9,12,14,25,27,47,50,54,61,69,72]— by absorbing repeated access and reducing backend load. At the heart of every cache is an eviction algorithm that decides which objects to retain under tight memory budgets. Today’s production systems overwhelmingly rely on static heuristics such as LRU, 2Q [35], S3-FIFO [74], and SIEVE [77] because they are simple, fast, and easy to deploy. In parallel, a grow-Prediction frequency           
+
+> Every miss Periodic
+> Object level  Cache level
+> LR B
+> LHD
+> 3L -Cache
+> ARC
+> LeCaR
+> GL -Cache
+> Learning -
+> Augmented
+> Heuristics
+> (S4 -FIFO)
+> Learning objective
+> Heuristics Smart cache Efficiency Robustness
+> LRU
+> SLRU
+> 2Q
+> S3 -FIFO
+> SIEVE
+> LIRS
+> CLOCK
+> Miss ratio reduction
+> over FIFO (%)
+> 18 12 60
+> S4 -FIFO
+> S3 -FIFO
+> 3L -Cache
+> LRB
+> LHD
+> ARC
+> LeCaR
+> GL -Cache
+> Worst trace miss ratio
+> increase over FIFO (%)
+> 0816 24
+> Lower is better Higher is better
+
+Figure 1: A classification of eviction algorithms (Section 2.2) in-dicates that periodic cache-level learning is highly effective, yet it has not been explored. We bridge this gap with learning-augmented heuristics, exemplified by a new algorithm, S4-FIFO, which achieves both high efficiency and strong robustness. 
+
+ing body of work has proposed “smart” caches—adaptive and learned policies such as ARC [46], LeCaR [63], LRB [58], LHD [10], GL-Cache [70], and 3L-Cache [83]—that aim to tailor eviction decisions to each workload. In principle, smart caches should dominate hand-crafted heuristics. In practice, very few of them (if any) have been adopted. Many of the smart caches learn at the granularity of individual objects and make predictions on every miss , opti-mizing surrogate objectives such as reuse-distance regression loss or per-object utility scores rather than the cache’s true objective, the miss ratio. These object-level, per-miss learning schemes suffer from four recurring problems: (1) objective mismatch , where improvements in prediction metrics do not translate into fewer misses; (2) instability and noise sensi-tivity , as these schemes react to highly variable request-level signals; (3) overheads , due to per-object metadata, frequent inference on the critical path, and additional runtime com-plexity; and (4) limited robustness and interpretability , as eviction decisions are opaque, difficult to interpret, and may yield miss ratios higher than FIFO on some workloads. At the same time, recent work shows that static heuristics can achieve surprisingly strong performance. S3-FIFO [74], for example, uses a small FIFO queue, a main FIFO queue, arXiv:2608.27975v1 [cs.DC] 28 Aug 2026 and a metadata-only ghost queue with simple promotion rules to filter one-hit wonders and retain popular objects. While it is strong on the mean and median trace, our analysis reveals that its static configuration leaves substantial headroom for the tail traces. We classify smart eviction algorithms along two axes— 
+
+learning granularity (object vs. cache level) and prediction frequency (per-miss vs. periodic)—and observe that existing approaches occupy three of the four quadrants (Figure 1). The remaining quadrant, periodic cache-level learning, remains un-explored, despite offering an appealing opportunity: directly learning cache parameters that optimize miss ratio. This observation motivates a fundamentally different ap-proach to incorporating learning into caching: instead of learning a new, complex eviction policy, we propose learn-ing to configure a simple, expressive heuristic. We introduce 
+
+Learning-Augmented Heuristics (LAH), a framework that cleanly separates the cache’s data and control planes. The data plane implements a deterministic heuristic with a small num-ber of explicit knobs. The control plane runs asynchronously and infrequently, using cache-level features to select a con-figuration that directly targets miss-ratio reduction. A single model, pre-trained offline on a large corpus of traces, acts as a reusable “foundation model” for caches: it performs zero-shot prediction without per-deployment retraining. We realize LAH in S4-FIFO, a “Smart S3-FIFO” eviction algorithm that augments S3-FIFO with an additional FIFO region and exposes its internal control knobs for learning. S4-FIFO discretizes the configuration space into a small set of representative parameter combinations and trains a gradient-boosted decision tree [18, 28] to choose among them using a cost-sensitive objective that explicitly anchors robustness to FIFO. Trained once on 4,140 production traces spanning block, key–value, and CDN caches, this model is embed-ded into the algorithm as lightweight, dependency-free code. When evaluated on 1,035 held-out production traces, S4-FIFO improves mean miss-ratio reduction by 26% over S3-FIFO and by 8% over 3L-Cache, the best prior algorithm, while never exceeding FIFO’s miss ratio by more than 0.8% on the worst trace. For comparison, the next-best algorithm, 3L-Cache, increases FIFO’s miss ratio by 8.8% in the worst case. Because of the separation of the control and data planes, S4-FIFO achieves throughput on par with other heuristics, such as LRU and 2Q. Because both its inputs and outputs are cache-level quantities with clear semantics, S4-FIFO’s decisions are also relatively interpretable: a language model can reason about the factors behind a particular configuration choice. This paper makes the following contributions: • We introduce a cache classification and demonstrate that 
+
+periodic cache-level learning is the most effective approach. • We propose learning-augmented heuristics (LAH), a frame-work that augments static heuristics with parameters and uses a foundation model to learn them. • We design and implement S4-FIFO, an example of LAH. We pre-train a gradient boosting tree model for S4-FIFO on 4,140 production traces and provide a dependency-free library for users 1.• We evaluate S4-FIFO on 1,035 production traces and show that it is both more efficient and more robust than state-of-the-art algorithms, while matching the throughput of heuristics. Moreover, S4-FIFO’s decisions are interpretable. 
+
+## 2 Background and Motivations 2.1 Evolution of Cache Eviction Algorithms 
+
+A central component of cache performance is the eviction algorithm, deciding which object(s) to remove when space runs out. Over the years, researchers and practitioners have designed a wide spectrum of eviction strategies, from simple heuristics to learning-based policies. 
+
+2.1.1 Heuristics-Based Algorithms 
+
+Most (if not all) production systems use heuristics-based evic-tion algorithms today. Traditional heuristics, such as 2Q [35] and LIRS [33], and modern heuristics, such as S3-FIFO [74] and SIEVE [77], operate based on manually curated rules that exploit recency and frequency patterns in a workload. These heuristics are valued for their simplicity, high throughput, and ease of implementation. However, they often fall short in efficiency compared to adaptive algorithms. 
+
+2.1.2 Smart Cache Eviction Algorithms Adaptive algorithms. For example, ARC [46] maintains four LRU queues: two for data and two for ghost. It dynam-ically resizes recency and frequency data queues based on observed hits on the corresponding ghost queues. Similarly, DLIRS [41] extends LIRS by introducing an adaptive parti-tion between low-reuse (HIR) and high-reuse (LIR) regions, which is dynamically resized based on its reuse distance. Al-though adaptive cache eviction algorithms do not employ machine learning models, we classify them as smart cache eviction algorithms because they can adapt to workloads by observing dynamic features. 
+
+Learning-based algorithms. More recent work builds pre-diction models to guide eviction decisions. Algorithms such as LRB [58], 3L-Cache [83], and GL-Cache [70] use super-vised learning at the object level to estimate reuse distance and then evict the object predicted to have the least future value. Other approaches like LHD [10] model eviction us-ing conditional hit-density, while LeCaR [63] adaptively reweights LFU and LRU weights with regret minimization. Although these complex policies may outperform heuristics, deploying them adds practical challenges, mainly: (1) online model training and inference add overheads, reducing cache throughput, and (2) their decision-making logic is opaque, from their features to their outputs. As a result, it is hard to interpret, tune, or debug why they behaved the way they did. 
+
+> 1https://libcachesim.com
+
+Table 1: Classifying smart caches based on learning granularity and prediction frequency.                                 
+
+> Learning granularity Prediction frequency Example Problems Object-level Every miss LRB [58], LHD [10], 3L-Cache [83] Objective mismatch, unpredictability, overheads Periodic GL-Cache [70] Stale prediction Cache-level Every miss ARC [46], LeCaR [63] Instability, delayed reward Periodic S4-FIFO (this work) None of the above Object AB
+> Future Reuse Distance (RD) 1000 50
+> Object AB
+> Predicted RD 40 50
+> L2 Loss 921,600
+> Eviction Target B
+> Result MISS
+> Object AB
+> Predicted RD 4000 60
+> L2 Loss 9,000,100
+> Eviction Target A
+> Result HIT
+> Model A (lower loss) Model B (fewer misses)
+> Ideally evict A
+
+Figure 2: Object-level learning has an objective mismatch issue. A smaller loss on object-level metrics, e.g., reuse distance, does not guarantee fewer cache misses. 
+
+## 2.2 Classifying Smart Eviction Algorithms 
+
+We classify existing smart cache eviction algorithms along two dimensions: the granularity of learning and the frequency of prediction or adaptation (Table 1). 
+
+Learning granularity. A smart cache eviction algorithm adapts to workloads by making predictions about the work-load. These predictions can be either at the object level or the cache level. Object-level algorithms , such as 3L-Cache [83], LRB [58], and LHD [10] assign utility score or eviction prob-ability to every individual object in the cache. For example, LRB and 3L-Cache learn the reuse distance for objects in the cache to predict the next access. Note that we also classify GL-Cache [70] as an object-level algorithm because it makes predictions for object groups similar to objects. In contrast, cache-level algorithms learn by optimizing the internal cache parameters rather than evaluating indi-vidual objects. A classic example is ARC [46], which dy-namically tunes the target sizes of its recency and frequency queues based on workload patterns, without assigning scores to cached objects. Similarly, LeCaR [63] dynamically adjusts the expert weights based on hits on the ghost queues. 
+
+Prediction frequency. Besides granularity, the frequency at which an algorithm predicts or adapts is also critical. Most prior algorithms (e.g., LRB, ARC, LeCaR) make a prediction 
+
+every miss . For example, LRB samples 64 objects and predicts their reuse distance at each eviction; ARC updates the queue sizes upon each hit on the ghost queue (cache miss). GL-Cache is the only algorithm that makes predictions 
+
+periodically by ranking all object groups and evicting the top 10%. It does not trigger another prediction before all the top 10% object groups are evicted. 
+
+## 2.3 Learning Granularity: Object vs Cache 
+
+2.3.1 Object-level Learning 
+
+Several recent approaches operate at the granularity of in-dividual objects, typically by predicting reuse distance or popularity. While this formulation appears natural, object-level learning faces inherent challenges regarding objective alignment , predictability , and robustness and interpretability .
+
+Objective mismatch. The first challenge with object-level learning is objective mismatch, a phenomenon akin to Good-hart’s Law: when a proxy becomes the target, it ceases to be a good measure. Many learned caches optimize for object-level metrics (e.g., minimizing L2 loss on reuse distance) rather than the actual miss ratio objective. For example, Figure 2 shows an example where model A achieves a lower L2 loss than model B, yet it fails to evict the correct object. 
+
+Unpredictability. Object-level metrics often cannot be pre-dicted accurately. First, metrics, such as object reuse distance, are not intrinsic to an object and are heavily influenced by the workload, such as burstiness. Furthermore, cache work-loads often exhibit a large number of one-hit wonders [74], for which no information (e.g., past N reuse distance, frequency) is available for learning. Some object-level metrics, such as popularity, are intrinsic properties of an object; however, they change quickly over time and cannot be used directly for eviction. 
+
+Robustness and interpretability. As object-level learning is driven by the unpredictable metrics described above, it be-comes highly sensitive. Variations in workload can produce wrong eviction decisions. This volatility directly translates into poor robustness; models may perform well on average yet fail badly on certain workloads. Moreover, the outputs of object-level learning are fundamentally opaque. The model as-signs per-object scores with little to no operational semantics, leaving operators unable to explain when the miss ratio in-creases. This combination of unpredictable inputs and opaque outputs makes object-level learning risky to deploy at scale. 
+
+2.3.2 Cache-level Learning 
+
+Cache-level learning avoids the aforementioned problems by tuning a small set of global cache parameters. For example, 10S 1M 5M 20M 1H 1D     
+
+> Interval
+> 20 40 60
+> Miss Ratio (%) Adaptive Static Best Static 0246810
+> Miss Ratio Reduction over FIFO (%)
+> Mean Median Figure 3: (a) Cache metrics, such as miss ratio, exhibit greater vari-ance at finer time granularity. (b) Choosing the correct parameters can outperform LeCaR’s per-miss adaptivity.
+
+ARC [46] maintains two data queues and two ghost queues. Data queues store data, while ghost queues only keep meta-data of recently evicted objects. ARC dynamically adjusts the queue size based on ghost hits. Intuitively, the more hits on the ghost queue, the more space is needed for the corre-sponding data queue. As another example, LeCaR [63] uses two eviction algorithms as experts and randomly chooses one expert to pick an eviction candidate based on its weight. The expert (algorithm) with a larger weight is more likely to be used for eviction. Similar to ARC, LeCaR adjusts experts’ weights based on ghost hits using reinforcement learning. 
+
+Direct optimization. Cache-level learning often directly optimizes for the miss ratio . For example, a ghost hit means that if the data queue is larger, it will be a cache hit, so increas-ing the data queue size directly reduces misses. Similarly, if an expert has many ghost hits in LeCaR, indicating it is not suit-able for the workloads, then reducing its weight would reduce the number of wrong evictions. Direct optimization not only helps reduce the miss ratio but also improves interpretability, enabling operators to reason about specific actions. 
+
+Magic parameters. Although cache-level learning is intu-itive and avoids the objective-mismatch problem, it often has magic parameters. For example, how much and how often the parameters should be updated. Previous work has shown that the default move one slot per ghost hit approach in ARC has pathological failure cases [74]. 
+
+## 2.4 Prediction Frequency: Per-miss vs Periodic 
+
+While the learning objective is critical for the effectiveness of a smart cache, how often a cache makes a prediction or adaptation is equally important. 
+
+2.4.1 Per-miss Prediction and Adaptation 
+
+Most algorithms make predictions at the request granularity, e.g., every miss. For example, LRB estimates object reuse distance on each cache miss, while ARC and LeCaR update queue sizes or weights on every hit to their ghost queues. Although such per-miss adaptation can appear highly respon-sive, it suffers from three key limitations: instability and noise overfitting , delayed reward , and inference overhead .
+
+Instability and overfitting to noise. Observations on each request and object might not reflect the overall patterns in the workload. By reacting to every miss, the algorithms will instead “chase” this noise. We find that real-world workloads often exhibit significant variance at fine time granularity, and request-level signals are often very noisy. Figure 3 left shows the miss ratio measured at different time granularities on a CloudPhysics trace. We observe that at smaller time intervals, the miss ratio over time tends to have a very large variance. We further measured the impact of per-miss adaptivity us-ing 106 traces from the CloudPhysics dataset. Figure 3 right shows that, although per-miss adaptivity improves over using a single static parameter for all traces (static), it is signifi-cantly worse than choosing the best static parameter for each trace. This suggests that choosing the right parameter is much more important than per-miss adaptivity. 
+
+Delayed Reward for Cache-level Learning. Besides over-fitting, per-miss learning also suffers from the delayed reward problem. Because a cache miss may happen long after an object is evicted, and parameter changes take time to become effective, we find that the change often lags behind the need. This lag makes the feedback signal slow and ambiguous. 
+
+Overheads for Object-level Learning. When pairing per-miss prediction with object-level learning, another drawback is the overhead. Performing a model inference on each miss significantly reduces the throughput. Besides, object-level learning also incurs significant per-object metadata storage overhead. For example, LRB adds over 200 bytes of features to each object, which eats into DRAM capacity. 
+
+2.4.2 Periodic Prediction 
+
+To the best of our knowledge, GL-Cache [70] is the only cache eviction algorithm that uses periodic prediction. Simi-lar to other object-level learned caches, GL-Cache predicts a score for each object group. However, instead of predicting on the critical path, GL-Cache makes one prediction period-ically and reuses the scores until 10% of the object groups are evicted. However, because the usefulness of objects and groups changes over time, their predictions quickly become stale, and periodic prediction often leads to lower efficiency when used with object-level learning. Our analysis of existing algorithms reveals a dichotomy in the design space. Object-level algorithms suffer from objec-tive mismatch, unpredictability, and huge overheads. More-over, per-miss learning algorithms are prone to instability and delayed rewards. Table 1 highlights a distinct gap in the design space—we need smart cache eviction algorithms that 
+
+learn and adapt at the cache level, with the learning objec-tive aligned with miss ratio reduction ; meanwhile, we need 
+
+periodic learning to avoid unnecessary overfitting to noise and magic parameters. Pretraining  Data  path   
+
+> training
+> workload
+> traces
+> Tencent Block
+> Twitter
+> Meta CDN
+> offline pre -train
+> params set N
+> params set 2
+> params set 1
+> histogram #hit
+> …
+> trace
+> training corpus
+
+…
+
+… new  traces    
+
+> Parameter set
+> candidates
+> traverse params traverse traces
+> feature table with default params set
+> params set miss ratio trace
+> labe ltable
+> Pre -train
+
+Contro l path  
+
+> parameterized
+> cache
+> params
+> feature collector
+> update feature
+> vector
+> async inference
+> export pre -trained mode l
+> histogram #hit
+> …
+
+…
+
+> inference
+> apply
+> predicted
+> params
+
+…Figure 4: Illustration of learning-augmented heuristics. (1) Offline pretraining (left): A foundation model is trained on a massive corpus of trace features and optimal parameter labels to learn universal caching rules. (2) Online operation (right): The system decouples the critical 
+
+data path from the control path . The data path collects lightweight workload-level features, while the control path asynchronously queries the pre-trained model to adapt the cache parameters to the current workload trace. 
+
+## 3 Learning-Augmented Heuristics (LAH) 
+
+In this section, we introduce a learning-to-configure paradigm that fundamentally rethinks how machine learning interacts with caching systems. Instead of embedding complex learning logic (e.g., neural networks) directly into the critical path, we propose a clean separation of concerns: the cache data path executes a simple, parameterized heuristic, while the control plane utilizes a pre-trained “foundation model” to choose the heuristic’s parameters , an approach we call Learning-Augmented Heuristics ( LAH ). Existing learning-based caches (e.g., GL-Cache, LeCaR) often treat learning as an online, instance-specific task and train from scratch for each new or even the same workload. This approach suffers from “catastrophic forgetting” and high retraining costs. In contrast, our approach builds upon the well-established insight that cache access patterns are gov-erned by universal characteristics: phenomena like scanning, looping, and thrashing are structural behaviors that transcend specific datasets [21, 33]. By extracting content-oblivious fea-tures rather than tracking specific object IDs, we can train a single global model that generalizes across diverse workloads. This effectively builds a foundation model for caching: knowl-edge learned from thousands of offline traces is preserved and transferred to new, unseen environments. The model does not need to relearn but recognizes the pattern and applies the op-timal configurations. This decoupled architecture offers five critical advantages over tightly coupled learned caches. 
+
+Simplicity. The data path logic remains simple and deter-ministic. It requires almost no metadata overhead (unlike LRB or 3L-Cache, which track extensive ghost histories per object) and avoids complex data structures. This “stateless” nature drastically reduces code complexity and bug surface area, making the system easier to verify and deploy in production. 
+
+Performance. By offloading the inference to an asyn-chronous control plane, the critical path for GET and PUT operations remains extremely lightweight, ensuring high throughput and low tail latency. 
+
+Efficiency. Simple static heuristics, such as 2Q, cannot achieve high efficiency compared to state-of-the-art algo-rithms. LAH can automatically optimize for different work-loads. During the cache warm-up period, LAH identifies the “golden configurations” and updates its parameters to match the workload’s patterns. 
+
+Robustness. When evaluating state-of-the-art eviction al-gorithms on thousands of production workloads, we find that most of them exhibit poor robustness—some traces exhibit a miss ratio significantly higher than a simple baseline such as FIFO. This hinders adoption because users do not know whether these algorithms will work on their workloads. LAH learns the configuration from high-level workload features, which are less susceptible to perturbations and noise. More-over, LAH selects parameters from a validated set of safe configurations. These enable LAH to achieve robustness. 
+
+Interpretability. LAH operates on aggregated metrics such as hit distributions, which align naturally with how operators already think about and understand cache behavior. These high-level signals are then mapped to a small set of heuristic parameters, so each prediction corresponds to a knob with a clear operational meaning and existing tuning intuition. Be-cause both the inputs and outputs live in this shared, cache-centric space, the resulting configurations are much more interpretable than existing learned caches. While LAH can be designed on top of different parameter-ized algorithms, we use S3-FIFO [74] as an example because it is simple, performant, and scalable. In the next section, we describe S4-FIFO, a new cache eviction algorithm that is Simple, Scalable, Smart, and only uses Static FIFO queues. S4-FIFO exposes and augments S3-FIFO’s internal parame-ters to our foundation model for learning, transforming a static heuristic into an efficient, robust, and interpretable learning-augmented heuristic. Skip           
+
+> Queue
+> Small FIFO Main FIFO
+> Ghost FIFO
+> 1a 1b
+> 2a
+> 2b 3a 3b
+> Insert: if in ghost and fulfill threshold, insert into main , else small
+> Evict(small): if fulfill threshold, insert into main , else ghost
+> Evict(main): if visited, reinsert into main , else evict
+> 1b 1a
+> 2b 2a
+> 3a 3b
+> Hits Not
+> Counted in
+> Skip Queue
+
+Figure 5: An illustration of the data path in S4-FIFO. 
+
+## 4 S4-FIFO Design and Implementation 
+
+In this section, we describe the design of S4-FIFO, detail-ing the heuristic data path, feature engineering, configuration quantization, and model training. 
+
+## 4.1 Overview 
+
+We illustrate the high-level overview as shown in Figure 4. 
+
+Heuristic Augmentation. We first augment S3-FIFO with a burst-aware parameter that virtually partitions the small queue into an additional FIFO queue, giving the parameter-ized heuristic greater flexibility to minimize the miss ratio. 
+
+Dataset Preparation. We randomly split the 5,175 traces used in this study into training and test sets to avoid data leakage. Then we perform a grid search to determine the best parameters (labels for training) for each trace. Next, we collect cache and workload-level features by running S4-FIFO using the default parameter on each trace, yielding the samples used to train the model. 
+
+Model Pretraining. We use features and labels from the previous step to train a classification model that predicts the best parameters for an unseen workload. 
+
+## 4.2 Augmenting the Parameters 
+
+Parameter prediction and request serving. The previous steps only need to be performed once offline. Once the model is trained, it will be used in different settings without retrain-ing. When a cache starts, S4-FIFO collects features online and then asynchronously makes a single prediction. Then S4-FIFO switches from the default parameters to the predicted parameters. Queue resizing is lazy: when the predicted con-figuration reduces a queue’s target size, S4-FIFO does not immediately move or evict objects. Instead, future evictions preferentially come from queues that exceed their new limits until the queue sizes converge. This allows parameter updates without pausing the cache or adding extra work to the request critical path. For simplicity, our evaluation makes a single prediction per trace. We found that substantial shifts requiring a new prediction are uncommon. In practice, S4-FIFO could be made to periodically re-predict its parameters if needed, 
+
+Table 2: Hyperparameters of the S4-FIFO.                        
+
+> Symbol Physical Meaning Default Learning range
+> ρSSmall queue size ratio 0.10 [0.05 ,0.90 ]
+> ρGGhost queue size ratio 0.90 [0.90 ,6.00 ]
+> κSmall skip ratio 0.00 {0.00 ,0.25 }
+> τSSmall-to-Main promotion threshold 2{1,2}
+> τGGhost-to-Main promotion threshold 0{0,1}
+
+for example on a weekly basis. We leave the choice of refresh policy and interval outside the scope of this work. S3-FIFO maintains three FIFO queues. A small queue, oc-cupying 10% of the cache, filters out one-hit wonders; a main queue retains popular objects via reinsertion; and a metadata-only ghost queue identifies moderately popular objects that were mistakenly evicted from the small queue. Each cached object is associated with a 2-bit saturated frequency counter that is incremented on every cache hit, and a threshold on this counter governs movement between the queues. S4-FIFO preserves the same three physical FIFO queues, but parame-terizes their behavior, as shown in Figure 5. The parameters are shown in Table 2. 
+
+Queue size. While S3-FIFO sets the small queue at 10% of the cache, S4-FIFO treats the queue sizes as tunable parame-ters. This allows the system to select the optimal ratio between the small and protected regions based on workload character-istics. In addition, S4-FIFO also makes the ghost queue size tunable to collect more information about the workload. 
+
+Promotion threshold. S3-FIFO moves an object evicted from the small queue to the main queue if the object’s fre-quency is greater than 1. S4-FIFO makes the frequency thresh-old learnable, allowing control over how strictly the small queue filters new insertions. Similarly, to handle cyclic scan patterns [33, 51], S4-FIFO learns the frequency threshold for promoting an object from the ghost queue to the main queue. 
+
+Skip ratio. To mitigate correlated references (bursty “one-hit wonders”) [35, 76], S4-FIFO does not increment the fre-quency counter for objects in the first κ fraction of the small queue. This creates a virtual probationary region inside the small queue, adding an extra filtering stage without introduc-ing a fourth physical FIFO queue. 
+
+Parameter discretization. The parameter space of S4-FIFO is continuous and high-dimensional, and its exponen-tially growing combinations make it impossible to perform a grid search to find the best parameters. Therefore, we dis-cretize the parameter ranges and choose a few values for each based on domain knowledge. Specifically, the small queue size can take up 5%, 10%, 20%, 30%, 50%, 70%, or 90% of cache capacity; the ghost queue can store the same number of objects, 3 × or 6 × that of the main queue; the small-to-main promotion threshold can be either 1 or 2; the ghost-to-main threshold can be either 0 or 1; and the skip ratio can be either 0 or 0.25. Table 3: Features used by S4-FIFO.                                                 
+
+> Features Dimension Meaning Small histogram 20 Hit-position distribution ratio in S
+> Main histogram 20 Hit-position distribution ratio in M
+> Ghost histogram 20 Hit-position distribution ratio in G
+> Small hits ratio 1Proportion of hits happening in S
+> Main hits ratio 1Proportion of hits happening in M
+> Ghost hits ratio 1Proportion of hits happening in G
+> Log cache size 1log(cache size) Utility gap 1Utility divergence between Sand M
+> Filtering efficiency 1Relative hit density of Svs. M
+> Ghost pressure 1Intensity of miss-on-eviction events Tail heaviness 1Hit concentration at the deep end of M
+> Decay rate 1Recency decay slope at the head of S
+> One-hit ratio 1Estimated fraction of one-hit wonders Unique ratio 1Workload churn rate (unique objects ratio) Scan intensity 1Effective scan pressure under capacity limits Thrashing risk 1Signal for working set exceeding capacity
+
+## 4.3 Learning the Parameters 
+
+4.3.1 Learning Objective 
+
+To enable efficient learning, we formulate the parameter learn-ing as a probabilistic classification task over a finite set of candidate parameter configurations C . We learn a conditional probability distribution P(y = c j|x; φ) over these candidates 
+
+c j ∈ C given the workload features x.Standard classification objectives (e.g., cross-entropy) treat all misclassifications symmetrically. However, in caching, er-ror costs are highly asymmetric and pairwise : mistaking a scan-heavy workload for a recency-friendly one causes catas-trophic thrashing, whereas the reverse error often yields only marginal degradation. To capture these varying penalties, we employ a data-driven cost matrix L ∈ RK×K , where K is the number of candidate parameter configurations. Each entry Lk j 
+
+quantifies the pairwise “regret” of selecting configuration ck
+
+when the true optimal is c j, normalized by the miss ratio of a baseline anchor Manchor ,
+
+Lk j = Etrain 
+
+ MR (ck) − MR (c j)
+
+Manchor 
+
+
+
+.
+
+Choice of Anchor. While the anchor can theoretically be any baseline (e.g., LRU, FIFO), we select Manchor = MR FIFO .This choice is motivated by the structural nature of our system: (1) S4-FIFO is fundamentally built upon FIFO queues, there-fore FIFO serves as the natural lower bound for robustness, and (2) normalizing by FIFO makes the cost metric invariant to the cacheability of the trace, allowing the model to learn effectively across workloads with vastly different miss ratios. During inference, we minimize the expected risk, ˆc = arg min  
+
+> ck∈C
+
+# ∑
+
+> j
+
+Pφ(c j|x) · Lk j .
+
+4.3.2 Features 
+
+To enable lightweight yet effective learning, we model the cache states and workload characteristics st using a compact feature vector (73 dimensions). The list of features used can be found in Table 3, where S, M , and G are the small queue, the main queue, and the ghost queue, respectively. 
+
+Cache metrics and workload characteristics. Cache size is critical for scale-invariant learning: the effectiveness of the small queue depends on its absolute capacity to absorb bursts, not just its relative share of the cache. For example, a 10% partition in a 100 GB cache provides ample buffer space, whereas 10% of a 100 MB cache may be insufficient for the same workload. Therefore, we track cache size using the log-transformed capacity. To capture the “shape” of local-ity beyond simple scalar averages, we maintain lightweight histograms (20 equally-sized bins each) for the small, main, and ghost queues. These histograms capture the distribution of hit position within each queue. For instance, the first bin stores the number of hits in the first 5% of the queue. Intu-itively, the histograms enable the cache to learn the queue usage. For example, many ghost hits suggest the small queue might be too small. Besides the histogram, we also include the number of hits per queue and the total number of requests. 
+
+Composite features. To avoid complex models, we use feature crossing to capture non-linear relationships between features, following common practice in traditional recommen-dation systems that rely on simple models [19, 52]. • Utility gap measures the utility divergence between the small and main queues and is defined as the absolute hit difference between them divided by total hits, Hmain −Hsmall  
+
+> Htotal
+
+.A positive gap indicates that the main queue is effectively retaining hotter items than the small queue. • Filtering efficiency quantifies how well the small queue filters one-hit, computed as the ratio of hits in the small queue to those in the main queue, Hsmall  
+
+> Hmain
+
+.• Ghost pressure measures the fraction of hits served by the ghost queue, Hghost  
+
+> Hghost +Htotal
+
+. A high ghost pressure suggests that the small queue is undersized or that the promotion threshold is too conservative. • Tail heaviness measures the dependence of the workload on long-term retention and is computed as the sum of hits in the last 10 bins of the main queue’s histogram, with larger values indicating that a substantial fraction of hits comes from long-resident objects. • Decay rate measures how quickly items lose utility in the probationary small queue and is computed as the slope between the first two bins of the small queue’s histogram, where a steep negative slope indicates that most objects become cold quickly. • Unique object ratio estimates cacheability and is computed as # insertions to small # requests .• One-hit ratio estimates the fraction of one-hit wonders in the workload and is computed as ρonehit = Nonehit  
+
+> Nunique
+
+, where 
+
+Nonehit is the number of objects evicted from the small queue without reaching the promotion threshold, and Nunique is the number of unique objects observed during the window. • Scan intensity and thrashing risk are derived by normalizing 
+
+unique object ratio and one-hit ratio by the request rate, providing the model with explicit signals to distinguish between benign scans and destructive thrashing. 
+
+4.3.3 Model and learning Inference Model. We employ a Gradient Boosting Deci-sion Tree ensemble as the predictive model φ. It accepts the 73-dimensional feature vector x and outputs a probability dis-tribution over the 18 classes. We choose GBDT over deep neural networks (DNNs) for two reasons. First, it can be easily packaged into a few portable headers for distribution, allow-ing users to use the pre-trained model in other programming languages without installing any new libraries. For example, our Cachelib [11] prototype employs the same model we trained using the libCacheSim [1] simulator. Second, GBDT excels at handling heterogeneous, nonlinear features (e.g., histograms mixed with scalar ratios) and needs no complex normalization. 
+
+Parameter search space reduction. Although we have discretized each parameter into a few options, the number of possible parameter combinations remains huge, which re-duces learning effectiveness. We employ a clustering-based strategy to reduce the search space. We use the offline grid search results to identify the most common parameter combi-nations and identify 18 representative parameter sets out of 168 candidates via greedy set cover algorithm [55]. 
+
+## 4.4 Implementation 
+
+We implement S4-FIFO in both libCacheSim for simulation-based evaluation and Meta Cachelib for prototype evaluation and production deployment. Both implementations extend S3-FIFO and employ the same pre-trained model, trained on features and labels collected in the simulator. In each system, a hash table is used for indexing, and linked lists are used to implement the queues. 
+
+4.4.1 Model implementation 
+
+We use LightGBM for our model implementation in the simulator. Because tree-based models can be compiled into sequences of conditional branches, we export the pre-trained model into simple, dependency-free libraries using m2cgen [2], targeting several common programming lan-guages, including C/C++, Go, Rust, Java, and JavaScript. This enables users to use our model directly without relying on LightGBM or other machine learning libraries. For example, our Cachelib implementation uses the C++ header files. 
+
+4.4.2 Feature collection 
+
+Most of the features are simple counters and straightforward to maintain, so we focus on the histogram features. 
+
+Small and Main FIFO queues. We use insertion time (i.e., the insertion index) to calculate the histogram bin for each object as ⌈ Tob j −Ttail  
+
+> w
+
+⌉ where T denotes the insertion time and 
+
+w is the bin width. For example, suppose the queue has a capacity of 1000, and we divide it into 20 bins, each with a width of 50. If the tail object was inserted at time Ttail = 20 and the current object at Tob j = 80, then the object should be incrementing the counter at the ⌈ 80 −20 50 ⌉ = 2nd bin. 
+
+Ghost queue. Computing histogram bin indices in the ghost queue is more involved because a hit in the ghost queue re-moves the corresponding metadata entry and shifts all sub-sequent entries forward. As a result, using insertion time alone to determine the bin index yields incorrect positions. To compensate, we maintain an additional deletion-count his-togram alongside the hit-position histogram for the ghost queue. Concretely, let i be the bin index obtained from the insertion-time-based formula. We sum the deletions recorded in bins 1 through i − 1, divide this sum by the bin width w
+
+to calculate the number of shifted bins s, and then correct the bin index as i′ = i − s. This adjusted index is used as the hit-position bin in the ghost-queue histogram. Even with the adjustment, the calculated bin is still approximate because we do not consider the deleted objects in bin i. However, the approximation has bounded error and is at most off by 1. 
+
+4.4.3 Overhead Analysis 
+
+We analyze the runtime complexity of S4-FIFO to demon-strate that it incurs almost no overhead compared to heuristics. 
+
+Inference. All cache operations, i.e., read, write (including eviction), are O(1). S4-FIFO adds two components. On the data path, it needs to collect features. However, many of the features it collects, such as the number of requests and hits, are already tracked in most production caches. The primary additional overhead introduced by S4-FIFO is the hit-position distribution histogram. This histogram is maintained as an array of counters, with exactly one counter incremented per access, yielding a strict O(1) time complexity. In Section 5.4, we show that the feature collection has a negligible impact on throughput. In deployments that are very sensitive to com-putational overhead, the feature collection can use sampled requests. On the control path, S4-FIFO performs inference, which has a time complexity of O(T · D), where T is the num-ber of trees (20 in our model) and D is the maximum depth (9 in our model). Since the inference happens rarely and asyn-chronously, and each inference call takes less than 2 ms, there is no impact on request serving. 
+
+Training. The training cost of S4-FIFO is entirely offline and consists of two stages: label generation and model fitting. Label generation is the dominant cost. For each training trace and cache-size ratio, we run S4-FIFO over a fixed grid of candidate configurations and select the configuration with the lowest miss ratio as the label. Given N training traces, R
+
+cache-size ratios, G candidate configurations, and L requests per trace, label generation costs O(N · R · G · L). In our eval-uation, G is a small constant determined by the parameter grid. Moreover, the grid search is embarrassingly parallel across traces, cache sizes, and configurations. Model fitting is substantially cheaper. Once the labels have been generated, we train a small GBDT using one compact feature vector per trace/cache-size pair. The model contains 20 trees with a maximum depth of 9 and predicts over 18 representative parameter sets. Thus, retraining is a one-time offline cost and does not affect the request-serving path. Deployments can directly use the pre-trained model. Retraining is only needed when operators want to incorporate additional training data. Further details can be found in Appendix Section A.1. 
+
+Storage. Unlike object-level learning, which requires main-taining feature vectors per object, S4-FIFO uses only 73 global features in total. Beyond the 2-bit counter inherited from S3-FIFO, no additional per-object metadata is needed. Including model parameters, the total storage overhead intro-duced by learning is on the order of only tens of kilobytes. The dominant storage overhead in S4-FIFO arises from the ghost queue. Each ghost entry requires 8 bytes to record the object ID (or fingerprint) and its insertion timestamp. For a cache holding 1 million objects, the ghost queue can therefore consume several megabytes of memory. Nonetheless, as long as objects are relatively large (e.g., larger than 200 bytes), this overhead remains small compared to the total data volume. 
+
+## 5 Evaluation 
+
+In this section, we use S4-FIFO as a case study to answer the following questions: • Do augmented heuristics expose sufficient headroom for efficiency improvement? • Can we accurately learn the optimal parameters of aug-mented heuristics to realize these efficiency gains? • Do learning-augmented heuristics improve robustness? • Do learning-augmented heuristics reduce throughput? • Is a single pre-trained model sufficient across workloads, and why? 
+
+## 5.1 Methodology 
+
+Workloads. We evaluate S4-FIFO using 5,175 production traces collected from 14 sources (Table 4). We exclude very small traces with fewer than 100,000 objects, as these typi-cally correspond to low-priority workloads (e.g., development traffic). Notably, many learned caches, such as LRB and 3L-Cache, perform extremely poorly on these short traces, which                                               
+
+> Table 4: Summary of datasets used in our evaluation. We filtered out traces with fewer than 100,000 objects. Dataset Approx time Cache type # Traces MSR [48, 49] 2007 Block 14 FIU [37] 2008-11 Block 7CloudPhysics [64] 2015 Block 104 Systor [39, 40] 2017 Block 6CDN 1 2018 Object 163 Tencent Photo [81, 82] 2018 Object 2WikiMedia CDN [66] 2016-19 Object 4Tencent CBS [78, 79] 2020 Block 3370 Alibaba [4, 43, 65] 2020 Block 552 Twitter [73] 2020 KV 50 CDN 2 2021 Object 890 Meta Storage [15] 2022 Block 5Meta KV [15] 2022 KV 5Meta CDN [15] 2023 Object 3
+
+skews both average efficiency and robustness metrics. In con-trast, S4-FIFO is insensitive to trace length because it relies on aggregated cache-level features. Consequently, including all traces would make S4-FIFO’s results even stronger. 
+
+Experiment setup. We randomly split the traces into two sets: 4140 for training and 1035 for evaluation. For each trace in the training set, we run S4-FIFO with the default parameter combinations to collect training samples of (features, label) pairs. For each trace in the test set, we start the cache using S4-FIFO with the default parameter combinations, run for 20% of the trace to collect features, then make one prediction and apply the predicted parameters to the rest of the trace. To ensure a fair comparison with the offline optimum obtained via grid search, we restrict ourselves to one prediction per trace, since the offline optimum also uses a single parameter setting for the entire trace. We compare S4-FIFO with S3-FIFO [74], LIRS [33], ARC [46], LRB [58], 3L-Cache [83], LHD [10], GL-Cache [70], and LeCaR [63]. Besides, we have also evaluated SIEVE [77], GDSF [20], and TinyLFU [24]; however, their re-sults are worse than the ones in the figure. Due to space limits and for ease of plotting, we omit them in the figure. We evalu-ate each algorithm at three cache sizes—0.1%, 1%, and 10% of the trace’s working-set size—but, for space reasons, we only present results for the smallest (0.1%) and largest (10%) caches. The results for the medium size (1%) consistently fall between these two. All miss ratio results are from libCacheSim because most state-of-the-art eviction algorithms are not available in open-source caches such as Cachelib. Because our Cachelib im-plementation uses the same model as the simulator, S4-FIFO shows almost identical miss ratios in the simulator and pro-totype. We report throughput results by comparing S4-FIFO with highly optimized LRU, 2Q, S3-FIFO, and TinyLFU us-Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 0510 15      
+
+> Miss Ratio Reduction over FIFO (%)
+> Mean Median (a) Large cache (10% of working set) Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 0510 15
+> Miss Ratio Reduction over FIFO (%)
+> Mean Median (b) Small cache (0.1% of working set)
+
+Figure 6: Mean and median miss ratio reduction from FIFO of different algorithms using the large and small cache sizes. S4-FIFO is significantly better than all state-of-the-art algorithms at the large cache size, while on par with the best of all algorithms at the small cache size. 
+
+ing CacheBench from Meta. The experiments were performed on a 20-node cluster with 32 cores and 192GB of memory. All experiments are repeated three times, and we report the mean result. 
+
+Metrics. We evaluate using the following metrics. (i) Efficiency : Following prior work [74], we report the miss ratio reduction over FIFO, computed as MR FIFO −MR algo  
+
+> MR FIFO
+
+. We present the mean reduction in miss ratio across the 1,035 traces in the test set. (ii) Robustness : We report miss ratio reduction for the worst-case workload and for the 10 th -percentile workload. (iii) Overhead : We use Cachelib throughput as our primary overhead metric. 
+
+## 5.2 Efficiency 
+
+Efficiency is the primary performance metric for cache evic-tion. Figure 6 reports the mean and median miss-ratio re-duction over FIFO for both small and large caches. Since S4-FIFO uses the first 20% of each trace to collect features before making a prediction, we evaluate two variants. In the online variant (v1, light purple), the first 20% of requests are served using the default parameters, and the remaining 80% are served using the predicted parameters. In the retrospective variant (v2, dark purple), the predicted parameters are applied to the entire trace; this isolates the quality of the learned con-figuration from the cost of the observation window. Across both cache sizes, v2 consistently outperforms v1, indicating that the predicted parameters improve efficiency and that the observation window accounts for the gap between the two variants. 
+
+Offline S4-FIFO. Unlike many learned caches, such as 3L-Cache, LRB, and LHD, which use sampling to select eviction candidates and can evict any object in the cache, learning-augmented heuristics like S4-FIFO are constrained by their underlying data structures: objects must pass through at least one queue before they can be evicted. Nevertheless, Figure 6 shows that offline S4-FIFO, which selects parameters via grid search, consistently achieves the highest efficiency. This sug-gests that the data structures used in S4-FIFO do not prevent it from attaining high efficiency. When comparing S4-FIFO with offline S4-FIFO, we find that the second variant, which runs the full trace using predicted parameters (same as offline S4-FIFO), achieves very similar miss ratio reduction as offline S4-FIFO with at most 0.2% difference in mean and median miss ratio reduction. This demonstrates the effectiveness of learning in S4-FIFO. In Section 5.5, we will show that S4-FIFO learns the best parameters most of the time, and even when it does not, the learned parameters are close to the best. 
+
+Comparison with state-of-the-art algorithms. S4-FIFO is built on top of S3-FIFO; compared to S3-FIFO, it achieves a 26% higher miss ratio reduction at the large cache size and an 8% higher reduction at the small cache size. Across all state-of-the-art algorithms, 3L-Cache consistently deliv-ers the best performance. Relative to 3L-Cache, S4-FIFO attains slightly higher or comparable miss ratio reductions. For instance, at the large cache size, S4-FIFO achieves an 8% higher reduction. Compared with ARC, S4-FIFO nearly dou-bles ARC’s improvement over FIFO at the large cache size. Relative to the large-cache setting, S4-FIFO’s performance at the small cache size is less impressive: it is slightly worse than 3L-Cache, though still substantially better than the other state-of-the-art algorithms. For instance, S4-FIFO improves LRB’s mean reduction ratio from 9.8% to 16.2%. The slight advantage of 3L-Cache at small cache sizes stems from the fact that the cached objects are all highly popular, providing rich signals for object-level learning. However, object-level learning incurs high overhead and low throughput. In our sim-ulator, 3L-Cache is 17.3 × slower than S4-FIFO on average (max 274 ×). In summary, S4-FIFO achieves a high efficiency via its superior learning methods and the pre-trained model. 
+
+## 5.3 Robustness 
+
+Historically, work on designing new cache eviction algorithms has focused on reducing miss ratio on a small set of traces or improving average performance. Far less attention has been given to the robustness of these algorithms. Yet robust-Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 20 
+
+> 10
+> 0
+> Miss Ratio Reduction over FIFO (%)
+
+(a) Worst case, large cache Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 20  
+
+> 10
+> 0
+> Miss Ratio Reduction over FIFO (%)
+
+(b) Worst case, small cache Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 5 
+
+> 05
+> Miss Ratio Reduction over FIFO (%)
+
+(c) 10 th -percentile, large cache Offline S4-FIFO S4-FIFO S3-FIFO 3L-Cache LRB LHD GL-Cache LeCaR ARC 2Q LIRS 2.5  
+
+> 0.0 2.5
+> Miss Ratio Reduction over FIFO (%)
+
+(d) 10 th -percentile, small cache 
+
+Figure 7: Efficiency on the worst case and 10 th -percentile trace. A negative value indicates the algorithm has a miss ratio higher than FIFO. S4-FIFO is more robust than all state-of-the-art algorithms. S4-FIFO S3-FIFO LRU 2Q TinyLFU 0246   
+
+> Average GET Throughput (MOps/s) S4-FIFO S3-FIFO LRU 2Q TinyLFU 0.0 0.5 1.0
+> Average SET Throughput (MOps/s)
+
+Figure 8: Set and Get throughput evaluated in Cachelib. 
+
+ness is crucial, because an algorithm can severely degrade performance when the workload is out of distribution rela-tive to its design assumptions. In this section, we evaluate the robustness of state-of-the-art algorithms using the worst trace and 10 th -percentile trace. Note that we do not consider the competitive ratio because the arbitrary workload used in competitive-ratio analysis rarely occurs in the real world, so we focus on the worst-case production trace. Figure 7a and Figure 7b show the miss ratio change relative to FIFO on the worst trace for each algorithm. We observe that all state-of-the-art eviction algorithms incur a higher miss ratio than FIFO on their worst-case trace. In particular, LRB and LIRS perform substantially worse than the others, increas-ing FIFO’s miss ratio by 20% to 72%. In contrast, S4-FIFO increases FIFO’s miss ratio by only 0.8% and 0.2% at large and small cache sizes, respectively. For comparison, the next-best algorithm at the large cache size is 2Q, which raises FIFO’s miss ratio by 4.3%. Although the single worst-case trace may be unrepresen-tative, Figure 7c and Figure 7d show results on the 10th-percentile trace. On this metric, S4-FIFO widens its lead over state-of-the-art algorithms. While some schemes, such as LRB and LIRS, still exhibit miss ratios higher than FIFO, S4-FIFO reduces FIFO’s miss ratio by 4.2% and 3.6% at large and small cache sizes, respectively. The robustness of S4-FIFO arises from three core design choices. First, S4-FIFO employs static FIFO queues and there-fore avoids the pathological behaviors that can arise in adap-tive algorithms [74]. Second, S4-FIFO leverages learning to select its parameters, enabling it to sidestep the adversar-ial workloads that often degrade the performance of fixed, heuristic-based schemes. Third, S4-FIFO’s learning objective uses FIFO as an anchor to directly optimize for robustness. 
+
+## 5.4 Throughput 
+
+To assess whether S4-FIFO preserves the high throughput of lightweight heuristic policies, we measure its throughput using CacheBench and compare it against highly optimized Cachelib implementations of S3-FIFO, LRU, LRU2Q (a mod-ified 2Q without a ghost queue), and TinyLFU. In this ex-periment, S4-FIFO collects features continuously for every request throughout the benchmark. This deliberately conser-vative configuration provides an upper bound on the overhead of feature collection. In practice, periodic or sampled feature collection could further reduce this overhead; exploring these optimizations is left to future work. We use CacheBench’s CDN workload and four Graph Cache workloads, run each benchmark with 48 threads, and report the average throughput across all five workloads in Figure 8. Even under this deliberately heavy configuration, S4-FIFO sustains throughput comparable to conventional heuristics, with only a modest slowdown from continuous feature extrac-tion. Achieving heuristic-level throughput is challenging for typical learned caches, which often require critical-path infer-ence or online training. S4-FIFO avoids these costs by collect-ing features outside the critical section and performing infer-ence infrequently and asynchronously using an offline-trained model. As a result, its critical path remains lightweight, pre-serving throughput and simplifying deployment. By contrast, TinyLFU incurs additional overhead because its count-min sketch must be updated within the critical section to ensure correctness, resulting in significant throughput degradation. 
+
+## 5.5 Why does Learning Work? 
+
+As a simple algorithm with static queue sizes, S4-FIFO achieves both higher efficiency and robustness compared to state-of-the-art algorithms. This section deep dives into how learning helps S4-FIFO achieve this and why one pre-trained model is sufficient. 
+
+Miss ratio over time. Figure 12 illustrates the effect of how learned parameters affect miss ratio over time for a represen-tative trace. The vertical dashed line marks the point at which S4-FIFO switches to the predicted parameters, which shrink the small-queue size to 5% of the cache and skip frequency-counter increments for 25% of the items at the front of the small queue. After this parameter change, S4-FIFO (solid 0 10 20 30 
+
+> Importance (%)
+> Others Ghost Pressure Thrashing Risk Small Histogram Main Histogram Ghost Histogram
+
+Figure 9: Feature importance by category. 10 2 10 3 
+
+> Number of Training Traces
+> 020 40 60 80
+> Accuracy (%)
+> Top-3 Top-2 Top-1
+
+Figure 10: Impact of training data size. 0 20 40 60  
+
+> Accuracy (%)
+> Top-1 Top-2 Top-3
+
+Figure 11: Prediction accuracy on the Twitter dataset on model pretrained on CDN2. 0 2 4 6        
+
+> Requests (Millions)
+> 010 20
+> Miss Ratio (%)  Without Learning With Learning
+> (a) Cumulative miss ratio 0246
+> Requests (Millions)
+> 010 20
+> Miss Ratio (%)  Without Learning With Learning (b) Interval miss ratio
+
+Figure 12: Miss ratio over time where the learned parameters sig-nificantly reduce the miss ratio. 
+
+line) quickly diverges from the baseline (dashed line): the in-terval miss ratio drops substantially and remains consistently lower for the remainder of the trace, and the cumulative miss ratio curve steadily widens its gap relative to the baseline. This example shows that although parameters remain static (i.e., not updated per-miss), learning a set of parameters for each workload can deliver a substantial reduction in miss ratio compared to using a fixed set of parameters. 
+
+Rank of predicted parameters. Figure 13 compares the grid-search rank distributions of the default S4-FIFO param-eters (most are inherited from S3-FIFO) with the learned parameters, where a lower rank indicates better performance (rank 1 is the best). In both small and large cache sizes, the predicted parameters from S4-FIFO are consistently close to the best configuration across traces. In contrast, the default pa-rameters have a substantially wider distribution that extends to much worse ranks, indicating that using the same parameters across traces leaves significant headroom for improvement. 
+
+Feature importance. We compute the feature-importance scores from the trained decision tree. As shown in Figure 9, the histograms of all three queues (ghost, main, and small) are the most important. Together, these histogram features account for 75% of the total importance, indicating that the shape of hit distributions within each queue (workload lo-cality) is the strongest signal for predicting good configura-tions. The remaining composite features, such as thrashing risk (working set size estimate) and ghost pressure (hits found on the ghost), account for 25% of the importance. S3-FIFO S4-FIFO 110 20 30 40 50 60 70 80     
+
+> Rank (1 = best)
+> (a) Large cache S3-FIFO S4-FIFO 110 20 30 40 50 60 70 80
+> Rank (1 = best) (b) Small cache
+
+Figure 13: Rank distribution of the default (S3-FIFO) and predicted parameters (S4-FIFO) from optimal grid search configuration. 
+
+Training data size. To understand why a single pre-trained model works, we measure how prediction accuracy changes with the number of training traces. For each training dataset size, we pre-train a new model and evaluate on the same test dataset. We measure top-1, top-2, and top-3 accuracy, which are the fractions of traces in which the predicted parame-ters are ranked top-1, top-2, or top-3, respectively. Figure 10 shows that all three metrics monotonically increase with more training data. With several thousand traces, top-1 approaches 60%, top-2 approaches 70%, and top-3 approaches 80%. Al-though performance starts to plateau, increasing the training dataset size further is likely to make the pre-trained model increasingly accurate. 
+
+Cross-dataset generalization. The training and test traces we have been using so far are generated using a random split, without considering the dataset (source). This is acceptable because each dataset contains many diverse traces, and traces within a single dataset can be more diverse than those across datasets. To verify whether pre-trained models can generalize across datasets, we train a model on the CDN2 dataset (object cache) and evaluate on the Twitter dataset (key-value cache). Figure 11 shows that the model pre-trained on one dataset can be directly used on a different one, and the knowledge learned is generalizable as long as the training dataset is large and diverse enough. 
+
+Generality across eviction algorithms. The principles of LAH can be applied to other policies that expose a small set of configuration knobs. For example, CacheLib’s LRU exposes configurable behaviors such as node-promotion frequency, (a) Explaining predicted parameters Small Cache (0.1%) Large Cache (10%) 0.0 0.2 0.4 0.6 0.8 1.0 Accuracy (b) Selecting suitable parameters  
+
+> Figure 14: LLM-based interpretability evaluation. S4-FIFO’s cache-level features and semantic parameters allow an LLM to explain predicted configurations and distinguish suitable parameter choices.
+
+whether metadata is updated on reads, writes, or contention, and the insertion position of new objects in the LRU queue. 2Q [35] exposes the relative sizes of its hot and cold queues, ARC [46] exposes the balance between its recency and fre-quency regions, and LeCaR [63] exposes the weights assigned to its eviction experts. Extending LAH to these policies re-quires policy-specific feature engineering. For example, an LRU-based instantiation could additionally track hit positions in the queue and their reuse distances. These extensions are beyond the scope of this work. 
+
+## 5.6 Is the Learned Decision Interpretable? 
+
+S4-FIFO learns from high-level cache features and predicts high-level knobs. Because both the inputs and outputs oper-ate at the cache level, the decisions it produces are far more interpretable than those of prior smart-cache designs. Unlike approaches that make opaque predictions (e.g., ranking ob-jects or estimating reuse densities), S4-FIFO expresses its de-cisions using knobs that operators already understand, such as queue sizes and promotion thresholds. The features S4-FIFO used characterize workload, capturing burstiness, one-hit ra-tios, and reuse-distance patterns, making the mapping from features to knobs easier to interpret. We use LLM-based evaluation as a proxy for semantic interpretability: if an external reasoning model can connect workload-level features to the selected cache knobs, then the learned decisions are likely expressed in a form that operators can reason about. We evaluate this with two language-model-based experiments, shown in Figure 14. First, given workload features and a predicted S4-FIFO configuration, LLMs are able to explain why the selected knobs match the workload behavior. Second, we provide an LLM with the workload features and two configurations with distinctly different miss ratios and ask it to identify the better configuration. Across 100 traces for each cache size, the LLM performs substantially above chance, achieving 83% and 86% accuracy in the small-cache and large-cache setting. While these results do not establish the correctness of the learned policy, they suggest that S4-FIFO’s feature and parameter spaces are semantically meaningful enough to support external reasoning, making the selected configurations easier to explain, justify, and debug. We provide further details in Appendix Section A.2. 
+
+## 6 Related Work 
+
+Optimizing cache efficiency. Many studies have examined the design of eviction algorithms to improve efficiency. These include static heuristics such as S3-FIFO [74], SIEVE [77], QDLP [71], LIRS [33,80], clock variants [16,32,42], 2Q [35], S4LRU [31], LRFU [22], LFU variants [5, 6, 36], greedy-dual variants [20, 34], MQ [84], Clock2Q+ [76], Hyper-bolic [13]; per-miss cache-level adaptive algorithms, such as ARC [46], CAR [8], SEQ [29], EELRU [56], Clock-Pro+ [42], LeCaR [63], CACHEUS [53], TinyLFU [24]; and object-level learning algorithms, such as LRB [58], 3L-Cache [83], LHD [10], PA-Cache [26], RL-Belady [68], Raven [30], HALP [59], Darwin [17]. Compared with these algorithms, to the best of our knowledge, this is the first work to propose learning-augmented heuristics that separate the control and data-serving planes to achieve both high efficiency and perfor-mance. S4-FIFO demonstrates this idea by using a pre-trained model to learn the parameters of S3-FIFO. 
+
+Machine learning for systems. Prior works integrate ML into systems at three distinct levels of the stack, rang-ing from replacing internal mechanisms to tuning external knobs. (1) Structural replacement: Works such as learned in-dexes [38, 60] and learned bloom filters [62] aim to replace 
+
+data structures with neural networks. (2) Policy optimization: ML replaces specific heuristics (policies) while keeping the underlying mechanism intact. Examples include RL-based flash admission [75], and language-model-based C++ mem-ory manager [44, 45]. (3) Black-box autotuning: Systems like OtterTune [3] treat the database as a black box, optimizing configuration knobs via Bayesian optimization. S4-FIFO oc-cupies a distinct point in this design space: unlike structural replacement, it preserves the mechanism’s deterministic safety (the S4-FIFO data path); unlike per-instance policy optimiza-tion, it leverages a pre-trained foundation model to generalize to unseen workloads; and unlike black-box autotuning with slow iterative search, it performs zero-shot inference, quickly selecting an optimal configuration after a brief observation window and avoiding costly online exploration. 
+
+## 7 Conclusion 
+
+We introduce Learning-Augmented Heuristics (LAH), which keeps the data path simple while using a pre-trained model to configure a few semantic knobs. Our S4-FIFO instantia-tion extends S3-FIFO with tunable parameters and selects configurations based on cache-level features. Evaluated on 1,035 production traces, S4-FIFO achieves higher average miss-ratio reduction and stronger robustness than state-of-the-art algorithms, while matching the throughput of heuristics. These results indicate that learning to configure expressive heuristics is an effective and interpretable way to bring ML into core caching systems. 
+
+## Acknowledgments 
+
+We thank the anonymous reviewers for their valuable feed-back and our shepherd for the constructive suggestions. We also would like to thank the people and organizations that have open-sourced and shared production traces. We thank Cloudlab [23] for providing infrastructure support to run ex-periments. 
+
+## References 
+
+[1] libcachesim: A high-performance cache simulator. 
+
+https://github.com/1a1a11a/libCacheSim . Ac-cessed: 2025-12-01. [2] M2cgen repository. https://github.com/ BayesWitnesses/m2cgen . Accessed: 2025-12-10. [3] Dana Van Aken, Andrew Pavlo, Geoffrey J. Gordon, and Bohan Zhang. Automatic database management system tuning through large-scale machine learning. In Semih Salihoglu, Wenchao Zhou, Rada Chirkova, Jun Yang, and Dan Suciu, editors, Proceedings of the 2017 ACM International Conference on Management of Data, SIGMOD Conference 2017, Chicago, IL, USA, May 14-19, 2017 , pages 1009–1024. ACM, 2017. [4] Alibaba Group. Alibaba block traces. https: //github.com/alibaba/block-traces , 2020. Ac-cessed: 2025-12-01. [5] Martin Arlitt, Ludmila Cherkasova, John Dilley, Rich Friedrich, and Tai Jin. Evaluating content manage-ment techniques for Web proxy caches. ACM SIG-METRICS Performance Evaluation Review , 27(4):3–11, March 2000. [6] Martin Arlitt, Rich Friedrich, and Tai Jin. Performance Evaluation of Web Proxy Cache Replacement Policies. In Perform. Eval. , volume 39, pages 149–164, NLD, February 2000. Elsevier Science Publishers B. V. [7] Nirav Atre, Justine Sherry, Weina Wang, and Daniel S. Berger. Caching with delayed hits. In Henning Schulzrinne and Vishal Misra, editors, SIGCOMM ’20: Proceedings of the 2020 Annual conference of the ACM Special Interest Group on Data Communication on the applications, technologies, architectures, and protocols for computer communication, Virtual Event, USA, Au-gust 10-14, 2020 , pages 495–513. ACM, 2020. [8] Sorav Bansal and Dharmendra S. Modha. CAR: Clock with Adaptive Replacement. In 3rd USENIX Conference on File and Storage Technologies , FAST’04, 2004. [9] Soumya Basu, Aditya Sundarrajan, Javad Ghaderi, San-jay Shakkottai, and Ramesh K. Sitaraman. Adaptive ttl-based caching for content delivery. In Bruce E. Hajek, Sewoong Oh, Augustin Chaintreau, Leana Gol-ubchik, and Zhi-Li Zhang, editors, Proceedings of the 2017 ACM SIGMETRICS / International Conference on Measurement and Modeling of Computer Systems, Urbana-Champaign, IL, USA, June 05 - 09, 2017 , pages 45–46. ACM, 2017. [10] Nathan Beckmann, Haoxian Chen, and Asaf Cidon. LHD: improving cache hit rate by maximizing hit den-sity. In Sujata Banerjee and Srinivasan Seshan, editors, 
+
+15th USENIX Symposium on Networked Systems De-sign and Implementation, NSDI 2018, Renton, WA, USA, April 9-11, 2018 , pages 389–403. USENIX Association, 2018. [11] Benjamin Berg, Daniel S. Berger, Sara McAllister, Isaac Grosof, Sathya Gunasekar, Jimmy Lu, Michael Uhlar, Jim Carrig, Nathan Beckmann, Mor Harchol-Balter, and Gregory R. Ganger. The CacheLib caching engine: Design and experiences at scale. In 14th USENIX sym-posium on operating systems design and implementa-tion , OSDI’20, pages 753–768. USENIX Association, November 2020. [12] Daniel S. Berger, Ramesh K. Sitaraman, and Mor Harchol-Balter. Adaptsize: Orchestrating the hot ob-ject memory cache in a content delivery network. In Aditya Akella and Jon Howell, editors, 14th USENIX Symposium on Networked Systems Design and Imple-mentation, NSDI 2017, Boston, MA, USA, March 27-29, 2017 , pages 483–498. USENIX Association, 2017. [13] Aaron Blankstein, Siddhartha Sen, and Michael J. Freed-man. Hyperbolic caching: Flexible caching for web applications. In 2017 USENIX annual technical con-ference , ATC’17, pages 499–511, Santa Clara, CA, July 2017. USENIX Association. [14] John W. Byers, Jeffrey Considine, Michael Mitzen-macher, and Stanislav Rost. Informed content delivery across adaptive overlay networks. In Matthew Mathis, Peter Steenkiste, Hari Balakrishnan, and Vern Paxson, editors, Proceedings of the ACM SIGCOMM 2002 Con-ference on Applications, Technologies, Architectures, and Protocols for Computer Communication, August 19-23, 2002, Pittsburgh, PA, USA , pages 47–60. ACM, 2002. [15] CacheLib. Evaluating SSD hardware for Facebook workloads: Running cachebench with the trace workload. https://cachelib.org/docs/Cache_ Library_User_Guides/Cachebench_FB_HW_eval ,n.d. Accessed: 2025-12-01. [16] Richard W. Carr and John L. Hennessy. WSCLOCK: a simple and effective algorithm for virtual memory man-agement. In Proceedings of the eighth ACM symposium on Operating systems principles , SOSP’81, pages 87– 95, New York, NY, USA, December 1981. Association for Computing Machinery. [17] Jiayi Chen, Nihal Sharma, Tarannum Khan, Shu Liu, Brian Chang, Aditya Akella, Sanjay Shakkottai, and Ramesh K Sitaraman. Darwin: Flexible Learning-based CDN Caching. In Proceedings of the ACM SIGCOMM 2023 Conference , SIGCOMM ’23, pages 981–999, New York, NY, USA, September 2023. Association for Com-puting Machinery. [18] Tianqi Chen and Carlos Guestrin. Xgboost: A scal-able tree boosting system. In Balaji Krishnapuram, Mohak Shah, Alexander J. Smola, Charu C. Aggarwal, Dou Shen, and Rajeev Rastogi, editors, Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining, San Francisco, CA, USA, August 13-17, 2016 , pages 785–794. ACM, 2016. [19] Heng-Tze Cheng, Levent Koc, Jeremiah Harmsen, Tal Shaked, Tushar Chandra, Hrishi Aradhye, Glen Ander-son, Greg Corrado, Wei Chai, Mustafa Ispir, Rohan Anil, Zakaria Haque, Lichan Hong, Vihan Jain, Xiaobing Liu, and Hemal Shah. Wide & deep learning for recom-mender systems. In Alexandros Karatzoglou, Balázs Hidasi, Domonkos Tikk, Oren Sar Shalom, Haggai Roit-man, Bracha Shapira, and Lior Rokach, editors, Pro-ceedings of the 1st Workshop on Deep Learning for Recommender Systems, DLRS@RecSys 2016, Boston, MA, USA, September 15, 2016 , pages 7–10. ACM, 2016. [20] Ludmila Cherkasova. Improving WWW proxies perfor-mance with greedy-dual-size-frequency caching policy .Citeseer, 1998. [21] Peter J. Denning. The working set model for program behavior. In Proceedings of the First ACM Sympo-sium on Operating System Principles , SOSP ’67, page 15.1–15.12, New York, NY, USA, 1967. Association for Computing Machinery. [22] Donghee Lee, Jongmoo Choi, Jong-Hun Kim, S.H. Noh, Sang Lyul Min, Yookun Cho, and Chong Sang Kim. LRFU: a spectrum of policies that subsumes the least recently used and least frequently used policies. IEEE Transactions on Computers , 50(12):1352–1361, Decem-ber 2001. [23] Dmitry Duplyakin, Robert Ricci, Aleksander Mar-icq, Gary Wong, Jonathon Duerig, Eric Eide, Leigh Stoller, Mike Hibler, David Johnson, Kirk Webb, Aditya Akella, Kuangching Wang, Glenn Ricart, Larry Landwe-ber, Chip Elliott, Michael Zink, Emmanuel Cecchet, Snigdhaswin Kar, and Prabodh Mishra. The design and operation of CloudLab. In Proceedings of the USENIX Annual Technical Conference (ATC) , pages 1–14, July 2019. [24] Gil Einziger, Roy Friedman, and Ben Manes. Tinylfu: A highly efficient cache admission policy. ACM Trans. Storage , 13(4):35:1–35:31, 2017. [25] Bin Fan, Hyeontaek Lim, David G. Andersen, and Michael Kaminsky. Small cache, big effect: provable load balancing for randomly partitioned cluster services. In Jeffrey S. Chase and Amr El Abbadi, editors, ACM Symposium on Cloud Computing in conjunction with SOSP 2011, SOCC ’11, Cascais, Portugal, October 26-28, 2011 , page 23. ACM, 2011. [26] Qilin Fan, Xiuhua Li, Jian Li, Qiang He, Kai Wang, and Junhao Wen. PA-Cache: Evolving Learning-Based Popularity-Aware Content Caching in Edge Networks, December 2020. [27] Qilin Fan, Xiuhua Li, Jian Li, Qiang He, Kai Wang, and Junhao Wen. Pa-cache: Evolving learning-based popularity- aware content caching in edge networks. 
+
+IEEE Trans. Netw. Serv. Manag. , 18(2):1746–1757, 2021. [28] Jerome H Friedman. Greedy function approximation: a gradient boosting machine. Annals of statistics , pages 1189–1232, 2001. [29] Gideon Glass and Pei Cao. Adaptive page replacement based on memory reference behavior. ACM SIGMET-RICS Performance Evaluation Review , 25(1):115–126, June 1997. [30] Xinyue Hu, Eman Ramadan, Wei Ye, Feng Tian, and Zhi-Li Zhang. Raven: belady-guided, predictive (deep) learn-ing for in-memory and content caching. In Proceedings of the 18th International Conference on emerging Net-working EXperiments and Technologies , CoNEXT’22, pages 72–90, New York, NY, USA, November 2022. Association for Computing Machinery. [31] Qi Huang, Ken Birman, Robbert van Renesse, Wyatt Lloyd, Sanjeev Kumar, and Harry C. Li. An analysis of Facebook photo caching. In Proceedings of the Twenty-Fourth ACM Symposium on Operating Systems Princi-ples , SOSP’13, pages 167–181, New York, NY, USA, November 2013. Association for Computing Machinery. [32] Song Jiang, Feng Chen, and Xiaodong Zhang. CLOCK-Pro: an effective improvement of the CLOCK re-placement. In Proceedings of the annual conference on USENIX Annual Technical Conference , ATC’05, page 35, USA, April 2005. USENIX Association. [33] Song Jiang and Xiaodong Zhang. LIRS: an efficient low inter-reference recency set replacement policy to improve buffer cache performance. In Richard R. Muntz, Margaret Martonosi, and Edmundo de Souza e Silva, editors, Proceedings of the International Conference on Measurements and Modeling of Computer Systems, SIGMETRICS 2002, June 15-19, 2002, Marina Del Rey, California, USA , pages 31–42. ACM, 2002. [34] Shudong Jin and A. Bestavros. Popularity-aware greedy dual-size Web proxy caching algorithms. In Proceed-ings 20th IEEE International Conference on Distributed Computing Systems , pages 254–261, 2000. [35] Theodore Johnson and Dennis E. Shasha. 2q: A low overhead high performance buffer management replace-ment algorithm. In Jorge B. Bocca, Matthias Jarke, and Carlo Zaniolo, editors, VLDB’94, Proceedings of 20th International Conference on Very Large Data Bases, September 12-15, 1994, Santiago de Chile, Chile , pages 439–450. Morgan Kaufmann, 1994. [36] George Karakostas and D Serpanos. Practical LFU implementation for web caching. Technical Report TR-622-00 , 2000. [37] Ricardo Koller and Raju Rangaswami. I/O deduplica-tion: Utilizing content similarity to improve I/O perfor-mance. ACM Trans. Storage , 6(3):13:1–13:26, 2010. [38] Tim Kraska, Alex Beutel, Ed H. Chi, Jeffrey Dean, and Neoklis Polyzotis. The case for learned index struc-tures. In Gautam Das, Christopher M. Jermaine, and Philip A. Bernstein, editors, Proceedings of the 2018 International Conference on Management of Data, SIG-MOD Conference 2018, Houston, TX, USA, June 10-15, 2018 , pages 489–504. ACM, 2018. [39] Chunghan Lee, Tatsuo Kumano, Tatsuma Matsuki, Hi-roshi Endo, Naoto Fukumoto, and Mariko Sugawara. Systor ’17 traces (SNIA IOTTA trace set 4931). In Geoff Kuenning, editor, SNIA IOTTA Trace Repository . Stor-age Networking Industry Association, February 2016. [40] Chunghan Lee, Tatsuo Kumano, Tatsuma Matsuki, Hi-roshi Endo, Naoto Fukumoto, and Mariko Sugawara. Understanding storage traffic characteristics on enter-prise virtual desktop infrastructure. In Doron Chen, Peter Desnoyers, and Eyal de Lara, editors, Proceedings of the 10th ACM International Systems and Storage Con-ference, SYSTOR 2017, Haifa, Israel, May 22-24, 2017 ,pages 13:1–13:11. ACM, 2017. [41] Cong Li. Dlirs: Improving low inter-reference recency set cache replacement policy with dynamics. In Pro-ceedings of the 11th ACM International Systems and Storage Conference , pages 59–64, 2018. [42] Cong Li. CLOCK-pro+: improving CLOCK-pro cache replacement with utility-driven adaptation. In Proceed-ings of the 12th ACM International Conference on Sys-tems and Storage , SYSTOR’19, pages 1–7, New York, NY, USA, May 2019. Association for Computing Ma-chinery. [43] Jinhong Li, Qiuping Wang, Patrick P. C. Lee, and Chao Shi. An in-depth analysis of cloud block stor-age workloads in large-scale production. In IEEE In-ternational Symposium on Workload Characterization, IISWC 2020, Beijing, China, October 27-30, 2020 , pages 37–47. IEEE, 2020. [44] Martin Maas, David G. Andersen, Michael Isard, Mo-hammad Mahdi Javanmard, Kathryn S. McKinley, and Colin Raffel. Learning-based memory allocation for C++ server workloads. In James R. Larus, Luis Ceze, and Karin Strauss, editors, ASPLOS ’20: Architectural Support for Programming Languages and Operating Systems, Lausanne, Switzerland, March 16-20, 2020 ,pages 541–556. ACM, 2020. [45] Martin Maas, David G. Andersen, Michael Isard, Mo-hammad Mahdi Javanmard, Kathryn S. McKinley, and Colin Raffel. Combining machine learning and lifetime-based resource management for memory allocation and beyond. Commun. ACM , 67(4):87–96, 2024. [46] Nimrod Megiddo and Dharmendra S. Modha. ARC: A self-tuning, low overhead replacement cache. In Jeff Chase, editor, Proceedings of the FAST ’03 Conference on File and Storage Technologies, March 31 - April 2, 2003, Cathedral Hill Hotel, San Francisco, California, USA . USENIX, 2003. [47] Kianoosh Mokhtarian and Hans-Arno Jacobsen. Caching in video cdns: building strong lines of defense. In Dick C. A. Bulterman, Herbert Bos, Antony I. T. Rowstron, and Peter Druschel, editors, Ninth Eurosys Conference 2014, EuroSys 2014, Amsterdam, The Netherlands, April 13-16, 2014 , pages 13:1–13:13. ACM, 2014. [48] Dushyanth Narayanan, Austin Donnelly, and Antony Rowstron. MSR Cambridge traces (SNIA IOTTA trace 386). In Geoff Kuenning, editor, SNIA IOTTA Trace Repository . Storage Networking Industry Association, March 2007. [49] Dushyanth Narayanan, Austin Donnelly, and Antony I. T. Rowstron. Write off-loading: Practical power man-agement for enterprise storage. ACM Trans. Storage ,4(3):10:1–10:23, 2008. [50] Erik Nygren, Ramesh K. Sitaraman, and Jennifer Sun. The akamai network: a platform for high-performance internet applications. ACM SIGOPS Oper. Syst. Rev. ,44(3):2–19, 2010. [51] Elizabeth J. O’Neil, Patrick E. O’Neil, and Gerhard Weikum. The LRU-K page replacement algorithm for database disk buffering. In Peter Buneman and Sushil Jajodia, editors, Proceedings of the 1993 ACM SIG-MOD International Conference on Management of Data, Washington, DC, USA, May 26-28, 1993 , pages 297–306. ACM Press, 1993. [52] Steffen Rendle. Factorization machines with libfm. 
+
+ACM Trans. Intell. Syst. Technol. , 3(3):57:1–57:22, 2012. [53] Liana V. Rodriguez, Farzana Yusuf, Steven Lyons, Eysler Paz, Raju Rangaswami, Jason Liu, Ming Zhao, and Giri Narasimhan. Learning Cache Replacement with CACHEUS. In 19th USENIX Conference on File and Storage Technologies , FAST’21, pages 341–354. USENIX Association, February 2021. [54] Kyle Schomp, Onkar Bhardwaj, Eymen Kurdoglu, Mashooq Muhaimen, and Ramesh K. Sitaraman. Aka-mai DNS: providing authoritative answers to the world’s queries. In Henning Schulzrinne and Vishal Misra, edi-tors, SIGCOMM ’20: Proceedings of the 2020 Annual conference of the ACM Special Interest Group on Data Communication on the applications, technologies, ar-chitectures, and protocols for computer communication, Virtual Event, USA, August 10-14, 2020 , pages 465–478. ACM, 2020. [55] Peter Slavík. A tight analysis of the greedy algorithm for set cover. J. Algorithms , 25(2):237–254, 1997. [56] Yannis Smaragdakis, Scott Kaplan, and Paul Wilson. EELRU: simple and effective adaptive page replacement. 
+
+ACM SIGMETRICS Performance Evaluation Review ,27(1):122–133, May 1999. [57] Hyunsub Song, Shean Kim, J. Hyun Kim, Ethan J. H. Park, and Sam H. Noh. First responder: Persistent mem-ory simultaneously as high performance buffer cache and storage. In Irina Calciu and Geoff Kuenning, edi-tors, Proceedings of the 2021 USENIX Annual Technical Conference, USENIX ATC 2021, July 14-16, 2021 , pages 839–853. USENIX Association, 2021. [58] Zhenyu Song, Daniel S. Berger, Kai Li, and Wyatt Lloyd. Learning relaxed belady for content distribution network caching. In Ranjita Bhagwan and George Porter, editors, 
+
+17th USENIX Symposium on Networked Systems De-sign and Implementation, NSDI 2020, Santa Clara, CA, USA, February 25-27, 2020 , pages 529–544. USENIX Association, 2020. [59] Zhenyu Song, Kevin Chen, Nikhil Sarda, Deniz Al-tinbuken, Eugene Brevdo, Jimmy Coleman, Xiao Ju, Pawel Jurczyk, Richard Schooler, and Ramki Gummadi. HALP: Heuristic Aided Learned Preference Eviction Policy for YouTube Content Delivery Network. In 20th USENIX Symposium on Networked Systems Design and Implementation , NSDI’23, pages 1149–1163, 2023. [60] Mihail Stoian, Andreas Kipf, Ryan Marcus, and Tim Kraska. PLEX: towards practical learned indexing. 
+
+CoRR , abs/2108.05117, 2021. [61] Aditya Sundarrajan, Mingdong Feng, Mangesh Kas-bekar, and Ramesh K. Sitaraman. Footprint descrip-tors: Theory and practice of cache provisioning in a global CDN. In Proceedings of the 13th International Conference on emerging Networking EXperiments and Technologies, CoNEXT 2017, Incheon, Republic of Ko-rea, December 12 - 15, 2017 , pages 55–67. ACM, 2017. [62] Kapil Vaidya, Eric Knorr, Michael Mitzenmacher, and Tim Kraska. Partitioned learned bloom filters. In 9th International Conference on Learning Representations, ICLR 2021, Virtual Event, Austria, May 3-7, 2021 . Open-Review.net, 2021. [63] Giuseppe Vietri, Liana V. Rodriguez, Wendy A. Mar-tinez, Steven Lyons, Jason Liu, Raju Rangaswami, Ming Zhao, and Giri Narasimhan. Driving cache replacement with ml-based lecar. In Ashvin Goel and Nisha Tala-gala, editors, 10th USENIX Workshop on Hot Topics in Storage and File Systems, HotStorage 2018, Boston, MA, USA, July 9-10, 2018 . USENIX Association, 2018. [64] Carl A. Waldspurger, Nohhyun Park, Alexander Garth-waite, and Irfan Ahmad. Efficient mrc construction with shards. In Proceedings of the 13th USENIX Confer-ence on File and Storage Technologies , FAST’15, page 95–110, USA, 2015. USENIX Association. [65] Qiuping Wang, Jinhong Li, Patrick P. C. Lee, Tao Ouyang, Chao Shi, and Lilong Huang. Separating data via block invalidation time inference for write amplifica-tion reduction in log-structured storage. In Dean Hilde-brand and Donald E. Porter, editors, 20th USENIX Con-ference on File and Storage Technologies, FAST 2022, Santa Clara, CA, USA, February 22-24, 2022 , pages 429–444. USENIX Association, 2022. [66] Wikimedia Foundation. Analytics/Data Lake/Traf-fic/Caching. https://wikitech.wikimedia.org/ wiki/Analytics/Data_Lake/Traffic/Caching ,n.d. Accessed: 2025-12-01. [67] Kan Wu, Zhihan Guo, Guanzhou Hu, Kaiwei Tu, Ram-natthan Alagappan, Rathijit Sen, Kwanghyun Park, An-drea C. Arpaci-Dusseau, and Remzi H. Arpaci-Dusseau. The storage hierarchy is not a hierarchy: Optimizing caching on modern storage devices with orthus. In 19th USENIX conference on file and storage technologies ,FAST’21, pages 307–323. USENIX Association, Febru-ary 2021. [68] Gang Yan and Jian Li. RL-Bélády: A Unified Learning Framework for Content Caching. In Proceedings of the 28th ACM International Conference on Multimedia ,MM’20, pages 1009–1017, Seattle WA USA, October 2020. ACM. [69] Gang Yan and Jian Li. Towards latency awareness for content delivery network caching. In Jiri Schindler and Noa Zilberman, editors, Proceedings of the 2022 USENIX Annual Technical Conference, USENIX ATC 2022, Carlsbad, CA, USA, July 11-13, 2022 , pages 789– 804. USENIX Association, 2022. [70] Juncheng Yang, Ziming Mao, Yao Yue, and K. V. Rashmi. Gl-cache: Group-level learning for efficient and high-performance caching. In Ashvin Goel and Dalit Naor, editors, 21st USENIX Conference on File and Storage Technologies, FAST 2023, Santa Clara, CA, USA, February 21-23, 2023 , pages 115–134. USENIX Association, 2023. [71] Juncheng Yang, Ziyue Qiu, Yazhuo Zhang, Yao Yue, and K. V. Rashmi. FIFO can be Better than LRU: the Power of Lazy Promotion and Quick Demotion. In Proceed-ings of the 19th Workshop on Hot Topics in Operating Systems , HOTOS’23, pages 70–79, New York, NY, USA, June 2023. Association for Computing Machinery. [72] Juncheng Yang, Anirudh Sabnis, Daniel S. Berger, K. V. Rashmi, and Ramesh K. Sitaraman. C2DN: how to harness erasure codes at the edge for efficient content delivery. In Amar Phanishayee and Vyas Sekar, editors, 
+
+19th USENIX Symposium on Networked Systems De-sign and Implementation, NSDI 2022, Renton, WA, USA, April 4-6, 2022 , pages 1159–1177. USENIX Associa-tion, 2022. [73] Juncheng Yang, Yao Yue, and K. V. Rashmi. A large scale analysis of hundreds of in-memory cache clusters at twitter. In 14th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2020, Virtual Event, November 4-6, 2020 , pages 191–208. USENIX Association, 2020. [74] Juncheng Yang, Yazhuo Zhang, Ziyue Qiu, Yao Yue, and Rashmi Vinayak. Fifo queues are all you need for cache eviction. In Proceedings of the 29th Symposium on Operating Systems Principles , SOSP ’23, page 130–149, New York, NY, USA, 2023. Association for Computing Machinery. [75] Tzu-Wei Yang, Seth Pollen, Mustafa Uysal, Arif Mer-chant, and Homer Wolfmeister. CacheSack: Admis-sion optimization for google datacenter flash caches. In 
+
+2022 USENIX Annual Technical Conference (USENIX ATC 22) , pages 1021–1036, Carlsbad, CA, July 2022. USENIX Association. [76] Yiyan Zhai, Bintang Dwi Marthen, Sarath Balivada, Vamsi Sudhakar Bojji, Eric Knauft, Jitender Rohilla, Jiaqi Zuo, Quanxing Liu, Maxime Austruy, Wenguang Wang, and Juncheng Yang. Clock2Q+: A simple and efficient replacement algorithm for metadata cache in VMware vSAN, 2025. [77] Yazhuo Zhang, Juncheng Yang, Yao Yue, Ymir Vig-fusson, and K.V. Rashmi. SIEVE is simpler than LRU: an efficient Turn-Key eviction algorithm for web caches. In 21st USENIX Symposium on Networked Systems De-sign and Implementation (NSDI 24) , pages 1229–1246, Santa Clara, CA, April 2024. USENIX Association. [78] Yu Zhang, Ping Huang, Ke Zhou, Hua Wang, Jianying Hu, Yongguang Ji, and Bin Cheng. Tencent block stor-age traces (SNIA IOTTA trace 27920). In Geoff Kuen-ning, editor, SNIA IOTTA Trace Repository . Storage Networking Industry Association, September 2018. [79] Yu Zhang, Ping Huang, Ke Zhou, Hua Wang, Jianying Hu, Yongguang Ji, and Bin Cheng. OSCA: an online-model based cache allocation scheme in cloud block storage systems. In Ada Gavrilovska and Erez Zadok, editors, Proceedings of the 2020 USENIX Annual Tech-nical Conference, USENIX ATC 2020, July 15-17, 2020 ,pages 785–798. USENIX Association, 2020. [80] Chen Zhong, Xingsheng Zhao, and Song Jiang. LIRS2: an improved LIRS replacement algorithm. In Proceed-ings of the 14th ACM International Conference on Sys-tems and Storage , SYSTOR’21, pages 1–12, Haifa Is-rael, June 2021. ACM. [81] Ke Zhou, Si Sun, Hua Wang, Ping Huang, Xubin He, Rui Lan, Wenyan Li, Wenji Liu, and Tianming Yang. Ten-cent photo cache traces (SNIA IOTTA trace set 27479). In Geoff Kuenning, editor, SNIA IOTTA Trace Reposi-tory . Storage Networking Industry Association, Febru-ary 2016. [82] Ke Zhou, Si Sun, Hua Wang, Ping Huang, Xubin He, Rui Lan, Wenyan Li, Wenjie Liu, and Tianming Yang. Demystifying cache policies for photo stores at scale: A tencent case study. In Proceedings of the 32nd In-ternational Conference on Supercomputing, ICS 2018, Beijing, China, June 12-15, 2018 , pages 284–294. ACM, 2018. [83] Wenbin Zhou, Zhixiong Niu, Yongqiang Xiong, Juan Fang, and Qian Wang. 3l-cache: Low overhead and precise learning-based eviction policy for caches. In Haryadi S. Gunawi and Vasily Tarasov, editors, 23rd USENIX Conference on File and Storage Technologies, FAST 2025, Santa Clara, CA, February 25-27, 2025 ,pages 237–254. USENIX Association, 2025. [84] Yuanyuan Zhou, James Philbin, and Kai Li. The multi-queue replacement algorithm for second level buffer caches. In Proceedings of the annual conference on USENIX Annual Technical Conference , ATC’01, pages 91–104, USA, 2001. USENIX Association. 
+
+## A Appendix A.1 Pre-training Workflow 
+
+Unlike online learning approaches that train a model from scratch, S4-FIFO utilizes a “foundation model” approach. In this section, we introduce how to pre-train the model offline on a massive corpus of diverse traces in detail. 
+
+Trace simulation & feature collection. We run the sim-ulation with default parameters of S4-FIFO, which aligns with the behavior of S3-FIFO to collect features. Specifically, S4-FIFO warms up with requests until the cache is full. Af-terward, the feature collector starts working, continuously monitors the trace, and exports features after a preset number of requests. We set the request number as 20% of the total requests in the trace. For each epoch, we simulate the cache behavior and record the feature vector xt at the decision point. This ensures the model learns to associate runtime signals with future performance. 
+
+Oracle labeling To generate the ground truth, we perform an exhaustive brute-force simulation over the entire parameter grid for every trace epoch. (1) Best Configuration ( y∗): The configuration that yields the lowest Miss Ratio (MR) for the upcoming epoch is marked as the target label. (2) Cost Ma-trix Construction: Crucially, we compute the regret for every 
+
+candidate class relative to the optimal one. This data popu-lates the cost matrix L, enabling the risk-aware loss function described in Section 4.3.1. 
+
+Supervised training. We train a GBDT classifier using LightGBM on the collected pairs of (xt , y∗ 
+
+> t
+
+). The model is optimized to minimize the multi-class Log-Loss, calibrating the output probabilities. By training on a diverse dataset cov-ering block I/O, KV, and CDN workloads, the model learns to identify workload patterns and maps them to a configuration that reduces the miss ratio. 
+
+Request Serving. After a prediction, we decode the predic-tion as the new tuned parameters and set it with the configu-ration interfaces from S4-FIFO. S4-FIFO will automatically handle the change for different queue sizes and promotion thresholds. 
+
+## A.2 Model Interpretability 
+
+Given a context prompt and a feature-label pair, summarized explanations given by the language model include: • Workload 1. A very high one-hit ratio and a small cache ratio indicate that most objects are not reused and capacity is tight. The model, therefore, selects a very small small queue (low s) to aggressively filter one-hit objects, and an easy promotion threshold (low m) so that the rare reusable objects can be promoted quickly before they are evicted. • Workload 2. The hit histograms show strong burstiness (most small-queue hits concentrated near the head) and a large effective working set. In this case, the model expands the small queue (high s) to absorb bursts, raises the promo-tion threshold (higher m) to prevent burst pollution of the main queue, and enables skip behavior (higher k) to ignore noisy early hits. • Workload 3. A high fraction of ghost hits and deep ghost histograms indicate significant long-distance reuse. The model responds by enlarging the ghost queue (higher g)to track more evicted objects and by raising the ghost-promotion threshold (higher t) to separate long-range reuse from scans. 
+
+A.2.1 Feature-Label Reasoning Prompt 
+
+S3-FIFO is a cache eviction algorithm that, instead of main-taining complex recency or frequency structures like LRU, uses FIFO queues as its core mechanism. The cache contains a small queue that acts as a filter for “one-hit wonders,” and a main queue that stores objects deemed useful for longer-term reuse. Objects first enter the small queue; if they are not accessed again shortly, they are evicted to free space. If an object receives a second access, it is lazily promoted—only upon eviction—into the main queue, where it benefits from longer residency. Frequently accessed objects in the main queue are reinserted into the head of the queue. The algorithm also maintains a ghost queue , which tracks metadata of recently evicted objects without storing their contents. If such an object reappears, this ghost history allows it to bypass probation and be inserted directly into the main queue. Our work focuses on tuning S3-FIFO through the following parameters: 1. s_param (small-queue size ratio). Controls the propor-tion of cache devoted to short-term recency. It may in-crease up to 100%. Lower values imply aggressive filtering of new objects, while higher values retain more recently accessed items. 2. g_param (ghost-queue size). Specifies the size of the ghost queues relative to total cache capacity. Larger ghost queues track more evicted objects, improving long-range reuse detection. Smaller values reduce overhead but risk missing ghost-based promotion opportunities. 3. k_param (small-queue skip factor). Indicates the per-centage of accesses in the small queue that are not recorded. Higher values help tolerate bursty workloads; lower values suggest the workload is less bursty. 4. m_param (promotion threshold from small to main). 
+
+Defines how many accesses an object must receive in the small queue before being promoted to the main queue. Higher values (e.g., 2) make promotion more difficult, allowing the cache to tolerate more two-hit objects before admitting them to the main queue. Lower values promote objects quickly; higher values protect the main queue. 5. t_param (ghost-to-main promotion threshold). Sets the required number of ghost hits for an object to be pro-moted from ghost to main. Setting this to 1 requires one ghost hit before promotion, useful for mitigating cyclic scan patterns. Higher settings are rarely used and are workload-specific. We also introduce the following workload features: • Feature 1: ratio , log_ratio (cache size ratio). Indi-cates the relative size of the cache compared to dataset or system demand. Higher ratios imply ample capacity and easier caching; lower ratios reflect greater memory pressure and stricter eviction requirements. • Feature 2: H_s , H_m , H_g (fractional hits). Show where hits originate: the small queue, main queue, or ghost queue. High H_s implies bursty or short-term reuse; high H_m im-plies stable reuse; high H_g implies long reuse distance. • Feature 3: Raw hit counts. hits_small , hits_main ,
+
+hits_ghost capture the absolute distribution of demand across queues. • Feature 4: hist_small , hist_main , hist_ghost .
+
+Histogram-based reuse-distance distributions showing where hits occur within queue positions. Front buckets im-ply short reuse distances; deep buckets indicate long reuse distances. • Feature 5: rho_onehit (one-hit ratio). Fraction of ob-jects accessed only once. High values reflect streaming or scan-like behavior, suggesting smaller small-queue sizes for rapid eviction. • Feature 6: rho_unique (uniqueness ratio). Indicates working-set size relative to request stream. High values reflect churn-heavy behavior with weak locality; low values indicate strong reuse. • Feature 7: total_hits , total_misses ,
+
+total_reqs . Provide global performance and re-quest intensity measurements. Given these features, the task is as follows: 
+
+Given: 
+
+Feature: X, Output: Y
+
+For each parameter ( s_param , g_param , k_param , m_param ,
+
+t_param ), explain why the given feature(s) would lead to selecting that particular parameter setting. Provide: 1. A paragraph-length explanation for each parameter, rea-soning from features to knob selection. 2. A short “key takeaway” summarizing why the knob was chosen and which feature supports the decision. 
+
+A.2.2 Prompt for Pairwise Configuration-Selection Eval-uation 
+
+We use the following prompt to evaluate whether a language model can reason about the semantic relationship between workload features and S4-FIFO configurations. The model is given the measured features of a real workload and two candidate configurations. It must select the more appropriate configuration and provide a brief justification. 
+
+You are an expert in modern cache-eviction algorithms, specifi-cally the S4-FIFO algorithm. The S4-FIFO eviction algorithm is built on three physical queues: • SMALL queue: Filters one-hit wonders; new objects land here first. • MAIN queue: Serves as a long-residency store for objects that prove useful. • GHOST queue: Maintains metadata-only records of objects evicted from SMALL. A hit here allows an object to skip pro-bation and go directly to MAIN. S4-FIFO exposes the following tunable knobs: • s_param (small-queue size ratio). Fraction of the total cache devoted to the SMALL queue. Lower values provide more ag-gressive filtering of new objects, which is useful for scan-heavy workloads with many one-hit wonders. Higher values retain more recently accessed objects, which is useful when the SMALL queue would otherwise discard reused objects too early. Grid: 0.05, 0.1, 0.2, 0.3, 0.5, 0.7, 0.9 .• m_param (SMALL-to-MAIN promotion threshold). Required number of hits in SMALL before an evicted object moves to MAIN. Setting m_param = 1 promotes an object that receives a second access and is therefore relatively lenient. Setting m_param = 2 requires one additional confirming hit and protects MAIN from bursty objects. Grid: 1, 2 .• t_param (GHOST-to-MAIN promotion threshold). Required number of hits in GHOST before an object skips probation and moves to MAIN. Setting t_param = 0 enables immediate pro-motion upon the first ghost hit. Setting t_param = 1 delays pro-motion until a second ghost hit, which can help with cyclic-scan patterns in which objects repeatedly enter and leave the cache without being truly hot. Grid: 0, 1 .• g_param (ghost-queue size as a multiple of MAIN). Setting 
+
+g_param = 0.9 maintains a relatively small ghost queue, which captures short-range reuse at low cost. Setting g_param = 3.0 or 
+
+g_param = 6.0 maintains a larger ghost queue, which captures long-reuse-distance workloads in which evicted objects reappear much later. Grid: 0.9, 3.0, 6.0 .The workload features are collected during a 20% warm-up period using the default S4-FIFO configuration. The original 20-bin his-togram for each queue has been aggregated into four depth buckets for readability. Each bucket value is the sum of five underlying bins. Therefore, the four buckets for each queue sum to approximately 1, and each value directly represents the share of hits falling within that depth range: • hist_X_0-5 : share of hits in bins 0–4, representing the front, head, or most-recent portion of the queue. • hist_X_5-10 : share of hits in bins 5–9. • hist_X_10-15 : share of hits in bins 10–14. • hist_X_15-20 : share of hits in bins 15–19, representing the tail or about-to-be-evicted portion of the queue. Here, X is one of small , main , or ghost . A front-heavy histogram indicates short reuse distances, while a tail-heavy histogram indi-cates long reuse distances or queue churn. The ghost histogram is particularly useful: hits in deeper ghost buckets indicate that evicted objects return after longer intervals and may therefore justify a larger ghost queue. The histogram features are presented depth-first across queues: SMALL, MAIN, and GHOST at depth 0–5, followed by SMALL, MAIN, and GHOST at depth 5–10, and so on. The scalar features are: • log_C : logarithm of the cache capacity, providing a scale signal. • ratio : cache size divided by working-set size. • H_s , H_m , and H_g : fractions of all hits served by SMALL, MAIN, and GHOST, respectively. • rho_onehit : one-hit-wonder ratio. A high value indicates scan-like behavior. • rho_unique : unique-object ratio. A high value indicates churn or weak locality. • hits_small , hits_main , and hits_ghost : raw hit counts for the three queues. • total_hits , total_misses , and total_reqs : global counters. If MAIN already serves most hits, as indicated by a high H_m 
+
+value and many MAIN hits across depths, expanding SMALL is risky. A larger SMALL queue reduces the MAIN budget and may evict useful MAIN objects. In this regime, prefer keeping SMALL modest. When asked to choose between two options labeled A and B, note that the labels are assigned randomly: A is no more likely to be correct than B. Evaluate both options on their merits. Do not equivocate. Given Workload features X, and Two candidate S4-FIFO con-figurations: A and B , which configuration is more appropriate for this workload? Answer A or B. 
+
+## A.3 Artifact Appendix 
+
+This artifact contains the implementation and evaluation infrastruc-ture for S4-FIFO. The artifact includes a libCacheSim -based im-plementation for miss-ratio evaluation, a Meta CacheLib integration for throughput benchmarking, model-training and analysis scripts, a Docker-based environment, and documentation for reproducing the experiments. 
+
+Scope. The artifact can be used to validate the following claims: • Miss-ratio evaluation. The libCacheSim -based simulator can compare S4-FIFO against S3-FIFO and other cache-eviction algo-rithms, including FIFO, LRU, 2Q, ARC, LeCaR, LIRS, SIEVE, and LFU, on supported traces. • Learning pipeline. The artifact includes scripts for parameter search, feature collection, representative-configuration selection, model training, model evaluation, feature-importance analysis, and cross-dataset analysis. • Throughput evaluation. The CacheLib integration can be used to evaluate the throughput overhead of S4-FIFO and compare it against optimized heuristic implementations using CacheBench. • Extensibility. The artifact can be used to evaluate custom traces, inspect the predicted configuration, and manually modify S4-FIFO parameters. The paper evaluates S4-FIFO using 5,175 production traces from 14 sources. Some of these traces contain proprietary data and are not distributed publicly. Contents. The repository contains the following main compo-nents: • libCacheSim/ : simulator-based implementation of S4-FIFO and baseline algorithms; • CacheLib/ : CacheLib integration for throughput evaluation; • analysis/ : scripts for parameter search, feature analysis, model training, and result analysis; • doc/ : detailed reproduction instructions; • Dockerfile : containerized environment; and • Makefile : convenience commands for building and testing. 
+
+Hosting. The artifact is publicly hosted on GitHub: 
+
+https://github.com/cacheMon/osdi26-s4-fifo 
+
+The artifact version corresponding to this paper is: • Branch: osdi26 
+
+• Commit: 000095fc3c96a95ff1b9a19d101fb1411c7f4d54

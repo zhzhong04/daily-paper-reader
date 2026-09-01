@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-30</span>
+      <span class="dpr-home-dashboard-kicker">2026-08-31</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
     <strong class="dpr-home-dashboard-count">共 5 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-08-30 21:36:31 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 00:48:44 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读2篇、速读3篇，聚焦AI智能体的工具路由与记忆管理架构。</p>
-<p>最值得关注：CacheRouter以双路径缓存隔离攻克长尾工具发现，记忆分层演化策略平衡共享与个性化。</p>
-<p>普通读者可优先了解KV缓存淘汰的注意力机制改进，对新架构实践更有启发。</p>
+<p>今日精读3篇、速读2篇，聚焦AI智能体上下文管理与训练效率。最值得关注《ContextPilot》用细粒度RL实现主动上下文管理，以及《psRL》通过前缀共享降低训练成本。建议普通读者优先追踪智能体长上下文与高效训练方向。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="CacheRouter: A Dual-Path Tool Routing Architecture with Cache-Preserving Main-Model Isolation for Long-Tail Tool Discovery">CacheRouter: A Dual-Path Tool Routing Architecture with Cache-Preserving Main-Model Isolation for Long-Tail Tool Discovery</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning What to Share and What to Personalize: Hierarchical Strategy Co-Evolution for Agent Memory">Learning What to Share and What to Personalize: Hierarchical Strategy Co-Evolution for Agent Memory</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ContextPilot: Teaching Agents for Proactive Context Management via Fine-grained RL">ContextPilot: Teaching Agents for Proactive Context Management via Fine-grained RL</span></li><li><span class="dpr-home-dashboard-paper-title" title="psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing">psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction">Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction">Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="SKILL.state: Scalable Long-Horizon Agent Skills">SKILL.state: Scalable Long-Horizon Agent Skills</span></li><li><span class="dpr-home-dashboard-paper-title" title="PolyMemDB: A Polyglot Database System for AI Memory Management">PolyMemDB: A Polyglot Database System for AI Memory Management</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Read Less, Solve More: Token-Efficient Sparse Reading for AI Agents">Read Less, Solve More: Token-Efficient Sparse Reading for AI Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction">Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 </div>
 
