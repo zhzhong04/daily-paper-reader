@@ -1,0 +1,340 @@
+Title: Adaptive KV Retention for LLM Agents at Human-Approval Timescales
+
+URL Source: https://arxiv.org/pdf/2608.30830v1
+
+Published Time: Tue, 01 Sep 2026 02:45:32 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# Adaptive KV Retention for LLM Agents at Human-Approval Timescales 
+
+Minseo Choi 
+
+Johns Hopkins University 
+
+mchoi46@jhu.edu 
+
+Ananya Joshi 
+
+Johns Hopkins University 
+
+aajoshi@jhu.edu 
+
+## Abstract 
+
+Unlike the seconds-scale tool-call pauses targeted by prior agent-serving systems, agentic LLM requests can be suspended for minutes or hours while waiting for human approval. We study how suspension and resumption affect GPU serving performance and develop a retention policy that balances active-serving capacity against future recomputation under uncertain approval waits. The central tension is severe because retaining suspended KV preserves fast resume but can consume enough GPU capacity to reduce active-serving goodput by 41%, while evicting it avoids that residency cost at the expense of nearly 10 × higher resume latency when the request returns. We develop a tiered retention controller around GPU opportunity cost , which expresses the serving capacity consumed by preserving or reconstructing a suspended request’s KV state in a common GPU-time cost. Within host memory, the controller selects between indefinite retention and load-indexed expiration using calibration wait samples, without requiring per-request wait prediction. On human-scale approval workloads, our controller improves active-request goodput by 23–51% over the vLLM baselines, 22–29% over MORI, and 41–52% over Continuum. 
+
+## 1 Introduction 
+
+Agentic LLM pipelines increasingly pause before consequential actions such as sending email, changing files, or running user commands. Coding assistants already wait for human approval when they request permission for such actions [2, 14, 5], and orchestration frameworks expose human approval as an interrupt primitive [8, 18]. Still, existing agent-serving systems, like MORI and Continuum, mainly study tool-call pauses on the scale of seconds [10, 19]. 1 Human approvals, however, can last minutes to hours. This longer idle regime creates a retain-or-release tradeoff similar to serverless keep-alive policies, which preserve idle functions to avoid cold starts while limiting their resource footprint [16, 4]. A suspended request is not generating tokens, but retaining its key–value (KV) cache, the attention state computed for prior tokens, can still take resources away from active requests. Keeping the cache in GPU high-bandwidth memory (HBM) consumes serving capacity. Moving it to host dynamic random-access memory (DRAM) avoids that GPU holding cost but incurs transfer overhead, while discarding it eliminates the memory cost at the expense of recomputation when the request resumes. We summarize these tradeoffs as GPU opportunity cost : the active-serving capacity forgone to preserve or restore suspended KV state. At human-approval timescales, this tradeoff shifts substantially. Large-scale email data reports human-response latencies on the order of tens of minutes [6], while human review of AI-agent-generated      
+
+> 1Continuum explicitly targets tool calls as short as ≤2s, and MORI’s coding-agent traces report median and 90% tool-call durations of 1.10 s and 2.03 s, respectively, while listing human approval as an example of a longer idle phase. Preprint. arXiv:2608.30830v1 [cs.OS] 31 Aug 2026 Calibrate
+> held-out waits
+> Replay
+> both branches
+> before serving
+> Suspend
+> agent waits
+> Select
+> host policy
+> Retain
+> t2=∞
+> Expire
+> t2(λ)
+> Resume
+> β2
+> β3
+> branch frozen
+
+Figure 1: Regime-aware retention controller. Held-out waits select host-retain ( t2 = ∞) or load-indexed expiration t2(λ) before serving; resume costs β2 from host or β3 after expiration (§3). pull requests can extend to hours [20]. We therefore use 30 minutes as a reference wait scale for asynchronous approval, rather than as a fixed wait assumption. At this timescale, the resume latency 
+
+becomes secondary (1s stall is 0.06% of the wait), while the GPU opportunity cost of retaining suspended state continues to accumulate throughout the wait. It then follows that there is no single best host-retention timer for all approval workloads. If we were to model this regime using memoryless waits, such as an exponential distribution, the elapsed time is uninformative and expiration only adds churn. For heterogeneous short- and long-waiting populations, age can help separate contexts likely to resume soon from those likely to remain suspended. Thus, our approach selects between indefinite host retention and load-indexed expiration using a calibration sample, then fixes the choice before the held-out serving run. Our contributions are: (i) we quantify the cost of suspended-KV residency, showing a 41% goodput loss from enforced residency and a roughly 10 × resume latency increase after eviction; (ii) we formulate a regime-aware retention policy using GPU opportunity cost to choose among HBM, host DRAM, and recomputation without per-request wait prediction; and (iii) under host-memory pressure, our controller improves active-request goodput by 23–51% over the vLLM baselines, 22–29% over MORI, and 41–52% over Continuum. 
+
+## 2 System-level characterization of human approval suspension 
+
+We first characterize the two quantities that determine the retention decision at an approval gate: 
+
+(i) how much reusable KV state remains when the agent pauses, and (ii) how much active-serving capacity is lost by keeping that state resident. 
+
+Approval-gated workload. To measure the state left behind at an approval gate, we construct approval-gated requests from τ 2-bench [3], which records multi-turn interactions between tool-using agents, simulated users, and task environments. Its retail and airline policies require explicit user confirmation before state-changing database actions. From the 2,624 released retail and airline runs, we retain trajectories containing a tool the environment marks ToolType.WRITE (e.g., order and reservation changes, cancellations, and returns) and truncate each immediately before the first such call, yielding 2,161 approval-gated prefixes. The median suspended context contains 8.4K tokens: 5.4K shared system prefix and ∼3.0K private suffix. Prefix caching reuses the shared prefix [17], so only the private suffix contributes per-request suspended state. Retaining this state is potentially valuable because 93–96% of gates are approved by the benchmark’s simulated user. 2
+
+The cost of KV residency. The remaining question is what it costs the serving system to preserve this state during an approval wait. We call suspended KV resident when its blocks remain allocated in HBM. In vLLM, suspended requests have no per-request residency guarantee: under memory pressure, their KV blocks may be evicted , allowing that memory to be reclaimed [7]. To characterize this behavior, we sweep N = 25 to 72 suspended contexts, occupying 31–89% of the KV pool. Under 3 req/s of background load, which is the lowest rate at which eviction engages at all, 
+
+> 296.6% over rule-classifiable requests; a manual audit of 50 unclassified requests yields a blended estimate of 93–96%.
+
+2residency falls from 100% at N = 25 to 10–14% for N ≥ 50 (Table 1). Because vLLM changes residency automatically under pressure, stock behavior cannot isolate the serving cost of residency. We therefore add victim exclusion to vLLM’s BlockPool and run a closed-loop experiment with 48 concurrent active clients, sufficient to saturate the node, while increasing the suspended set. Under saturation, capacity occupied by suspended KV appears directly as lost goodput. The patch is disabled for all unmodified-vLLM runs. Appendix A gives the residency measurement procedure, sweep selection, saturation test, and patch details. Figure 2 shows the tradeoff. Unmodified vLLM keeps active-request goodput , the rate of completed active requests, nearly flat by evicting most suspended KV, whereas enforced residency reduces goodput by 41% at N = 72 . The cost instead appears at resume, where resident contexts have a time to first token (TTFT) of 66–75 ms, compared with 687–705 ms after eviction. 0 25 50 72    
+
+> suspended contexts held resident, N
+> 01234
+> active-request goodput (req/s)
+> stock vLLM enforced residency
+> ¡41%
+> (a) what retention costs
+> resident evicted 0200 400 600 800
+> resume TTFT (ms)  »9£
+> (b) what it buys
+
+Figure 2: Suspended-KV residency tradeoff. (a) Enforced residency reduces goodput by 41% at 
+
+N = 72 . (b) Eviction increases resume TTFT from 66–75 ms to 687–705 ms ( ∼ 10 ×). 
+
+## 3 Method 
+
+3.1 Retention cost model 
+
+Section 2 shows that retaining suspended KV trades active-serving capacity for faster resume. We place both costs on the same scale using GPU opportunity cost , measured in GPU-seconds. A suspended context can be kept in HBM, moved to host DRAM, or discarded and recomputed when the request resumes. For state j ∈ { 1 = GPU HBM , 2 = host DRAM , 3 = discard }, let αj denote its holding cost per second and βj its one-time resume cost. If a request remains in state j for ℓ seconds, its cost is 
+
+Cj (ℓ) = αj ℓ + βj . (1) HBM incurs holding cost α1 while resident and has β1 = 0 . A host-resident copy pays restore cost 
+
+β2 at resume, while discarded state pays recomputation cost β3.
+
+Uncongested regime. When host DRAM has spare capacity, α2 = α3 = 0 : host DRAM consumes no direct GPU holding capacity, while discarded state occupies no serving memory. 
+
+Congested regime. Once host DRAM becomes scarce, retaining a host copy imposes an opportunity cost on other suspended contexts. We capture this with a nonzero, load-dependent holding price 
+
+α2(λ), where λ is the offered rate of suspended requests. Section 3.3 derives this price from λ and the finite host capacity. Thus, the cost model requires calibrating only three platform-specific coefficients: the HBM holding cost α1, host-resume cost β2, and recomputation cost β3. The remaining holding costs are either zero or derived from load. For the HBM tier, two reference points determine when continued GPU residency is no longer worthwhile. In the uncongested regime, host offload becomes cheaper than HBM retention at 
+
+t1 = β2
+
+α1
+
+, t∗ = β3
+
+α1
+
+, (2) 3where t1 is the HBM–DRAM break-even and t∗ is the HBM–discard break-even. Host congestion is handled separately through the load-dependent DRAM–discard threshold t2(λ) in Section 3.3. Figure 3 summarizes the resulting cost structure: platform calibration determines the HBM holding and resume costs, while host congestion introduces the load-dependent DRAM holding price α2(λ).t1 t ¤ t2(¸)Wait length ` ⟶         
+
+> GPU opportunity cost  ⟶
+> HBM preferred Host DRAM preferred Discard
+> HBM Discard + Recompute
+> DRAM, ®2>0 (at 2 ¸crit )
+> Host DRAM
+> Cj(`) = ®j`+¯j
+
+Figure 3: GPU opportunity cost across HBM, host DRAM, and discard; congestion introduces α2(λ)
+
+and the DRAM–discard threshold t2(λ).
+
+3.2 Calibrating the price vector 
+
+The policy is calibrated to the serving platform rather than tied to fixed timing constants. We obtain the three opportunity-cost parameters from measurements of the state that is preserved or reconstructed at an approval gate: (i) HBM holding cost α1, derived from the fraction of the serving KV pool occupied by one suspended context and converted to node-level GPU-seconds; (ii) host-resume cost 
+
+β2, which captures GPU-side scheduling and synchronization overhead when restoring a host-resident copy, rather than DMA transfer time that can overlap GPU execution [13]; and (iii) recomputation cost β3, measured by re-prefilling the request-specific suffix with the shared prefix already cached. These measurements produce the platform-specific price vector (α1, β 2, β 3) used by the break-even rules above. Appendix B gives full measurement protocol; Appendix C repeats the calibration on H100 NVL, A100 SXM, and L40S, showing how the calibrated parameters vary across hardware. 
+
+3.3 Host-memory congestion 
+
+Host DRAM has negligible GPU holding cost while capacity is available. Once the tier is full, admitting a new suspended context requires discarding an existing host-resident copy, which later incurs the recomputation cost β3.Little’s law relates the average number of resident requests N to the arrival rate λ and mean residence time W : N = λW [11]. Here, it lets us translate a human-approval residence timescale into the offered load at which the finite host tier becomes saturated. Let C2 denote the number of suspended contexts that fit in host DRAM and Wref the reference residence scale. By Little’s law, host saturation occurs at λcrit = C2/W ref . Above this threshold, we use a mean-field congestion price. Excess arrivals occur at rate λ − λcrit under the reference normalization, and each overflow incurs recomputation cost β3. Amortizing this cost across the C2
+
+occupied host slots gives 
+
+α2(λ) = max(0 , λ − λcrit ) β3
+
+C2
+
+, t2(λ) = 
+
+
+
+∞, λ ≤ λcrit ,β3 − β2
+
+α2(λ) , λ > λ crit . (3) This yields a load-indexed host expiration policy, cpu_ttl (λ), which discards host-resident KV after 
+
+t2(λ). Because the congestion price is a mean-field approximation rather than an exact occupancy model, we evaluate the resulting policy directly with finite-capacity replay in Appendix F.3. 43.4 Regime-aware controller 
+
+The cost model yields a simple two-stage retention policy. When a request suspends, its KV state moves to host DRAM; the HBM–DRAM break-even t1 ≈ 1s is short enough that we offload at suspension. The remaining decision is how long to keep the host copy. A single host policy is not uniformly best across wait distributions. Host-retain keeps the DRAM copy until the request resumes, whereas cpu_ttl (λ) discards it after the load-dependent threshold 
+
+t2(λ). The latter can free scarce host capacity under heterogeneous long waits, but can also discard state that would have resumed soon. We therefore select the host policy from an independent calibration sample before serving. We replay the same calibration waits under both modes, compute their total GPU opportunity cost, and freeze the lower-cost branch for the held-out run. At runtime the controller requires only the offered load λ
+
+to evaluate t2(λ).
+
+## 4 Evaluation 
+
+4.1 Experimental setup 
+
+All live measurements use Llama-3.1-70B (BF16, TP4) on 4×H100 NVL GPUs with vLLM and a 375–380 GB host-memory budget. We use live serving for end-to-end measurements and measured-cost replay for broader workload sweeps. Replay conditions contain 4,000 requests with Poisson arrivals at multiples of λcrit . We evaluate three human-scale wait families: a lognormal distribution (σ = 1 ), an exponential distribution, and a mixture of short approvals (exponential, mean 60 s, weight 0.5) and long waits (lognormal, σ = 0 .7, mean 3,540 s). Each family is scaled to have mean wait 
+
+Wref = 1 ,800 s. All end-to-end systems receive identical traces, and controller selection uses an independent calibration sample disjoint from the held-out serving trace. Under our reference load normalization, host capacity is not binding below λcrit , so congestion-driven retention decisions are largely inactive. We therefore evaluate live serving at 2λcrit , where the reference suspended load is twice the host-tier capacity ( λW ref = 2 C2), making retention decisions consequential. Appendix F.3 evaluates the controller against fixed host timers over a range of 
+
+0.5–3 × λcrit .
+
+4.2 End-to-end serving performance 
+
+We first ask whether retention policy improves active-serving goodput. We compare our regime-aware controller with unmodified vLLM [7], vLLM with host offload enabled, MORI [19], and Continuum [10]. 3 Figure 4 reports live measurements at 2λcrit .
+
+Retention policy matters. Unmodified vLLM retains only 0.4% and 0.3% of suspended KV at resume on the lognormal and mixture workloads, respectively. Enabling 380 GB of host offload raises retention to only 0.6% on both workloads, whereas our controller retains 38.1% and 17.6%. The difference is policy rather than capacity: under recency-based eviction [7], contexts suspended for long human waits become natural eviction candidates. Our controller instead preserves suspended state selectively, yielding 23–51% higher active-request goodput than the two vLLM configurations and 41–52% higher goodput than Continuum. 
+
+More retention does not necessarily improve serving. On the mixture workload, MORI retains more suspended KV than our controller (21.9% versus 17.6%) but achieves only 0.83 req/s versus 1.07 req/s, giving our controller 29% higher goodput. MORI places its host-tier boundary at available capacity [19], whereas our controller can expire a host copy at t2(λ) once its retention cost exceeds the cost of recomputation. The result is the intended behavior of the pricing model: retain enough state to avoid unnecessary recomputation without sacrificing active-serving capacity merely to maximize KV retention. 
+
+> 3MORI has no released implementation, so we evaluate its published policy through a port on vLLM. For Continuum, we use the first author’s public fork [9], whose README states that it omits the paper’s pause-duration estimator.
+
+50.1 1 10                
+
+> retained (%, log scale)
+> lognormal exponential mixture
+> 38.1 35.4 17.6 24.1 21.5 21.9 0.4 0.2 0.1 0.6 0.3 0.6 0.4 0.1 0.3
+> (a) KV retained at resume
+> 0.0 0.5 1.0
+> goodput (req/s)
+> (b) active-request goodput
+> 0.0 0.5 1.0
+> TTFT (s), p50 + p95
+> (c) resume TTFT
+> 0.0 0.1 0.2 0.3 0.4 0.5
+> P(W∙t¤)
+> -20 -10 010
+> TTL gain over host-retain (%)
+> lognormal exponential mixture
+> crossover 0.39
+> (d) When does the timer help? [measured-coefficient replay]
+> systems in (a)-(c) Ours MORI †
+> Continuum ‡
+> vLLM+offload vLLM
+
+Figure 4: End-to-end serving at 2λcrit : (a) KV retained at resume, (b) active-request goodput, and 
+
+(c) resume TTFT (p50; p95 whiskers). (d) Measured-coefficient replay of cpu_ttl (λ) gain over host-retain; positive favors expiration, with crossover at P (W ≤ t∗) = 0 .39 . Appendix F gives exact values. †MORI policy port; ‡Continuum implementation details in Appendix F.1. 
+
+4.3 Controller selection 
+
+The end-to-end results show that neither retaining more KV nor expiring it aggressively is uniformly best. We therefore ask when cpu_ttl (λ) is preferable to host-retain. Using P (W ≤ t∗) to summarize the fraction of waits below the platform-calibrated break-even timescale, Figure 4(d) shows the gain of cpu_ttl (λ) over host-retain at fixed load. Expiration hurts when few requests resume before t∗, but becomes beneficial as the workload contains more short waits. The crossover occurs at P (W ≤ t∗) = 0 .39 in this setup. 
+
+## 5 Discussion 
+
+Related work. Prior paused-agent systems use request-level signals such as reload cost, predicted pause duration, idleness, or workflow position [1, 10, 19, 15]. We instead target minute-to-hour approval waits and price retention by system load and finite host capacity; Appendix E gives a detailed comparison. 
+
+Limitations. Our experiments use the configured offered load λ, so a production deployment would require online load estimation and periodic recalibration under changing approval-wait distributions. Approval outcomes are LLM-simulated and wait durations are synthetic, and we do not yet have a production trace showing how often deployments cross λcrit . MORI is evaluated through a policy port rather than its native serving stack. Our Continuum comparison uses the first author’s public scheduling fork, which omits the paper’s pause-duration estimator, and therefore does not constitute a full-system evaluation of Continuum. Our model-level measurements use a single model family. These results therefore establish a measurement-backed retention policy, rather than a complete production controller. Overall, human-approval suspension turns KV retention into a capacity-allocation problem: residency consumes active-serving capacity, while eviction slows resume. Our results show that platform-calibrated, load-aware retention can navigate this tradeoff without per-request wait prediction, outper-forming vLLM and prior agent-serving baselines in active-request goodput. 6References 
+
+[1] Reyna Abhyankar, Zijian He, Vikranth Srivatsa, Hao Zhang, and Yiying Zhang. InferCept: Efficient intercept support for augmented large language model inference. In Proceedings of the 41st International Conference on Machine Learning (ICML) , 2024. arXiv:2402.01869. [2] Anthropic. Claude code. https://claude.com/product/claude-code , 2025. Product page; accessed 2026-08-23. [3] Victor Barres, Honghua Dong, Soham Ray, Xujie Si, and Karthik Narasimhan. τ 2-bench: Evaluating conversational agents in a dual-control environment, 2025. arXiv:2506.07982. [4] Alexander Fuerst and Prateek Sharma. FaasCache: Keeping serverless computing alive with greedy-dual caching. In Proceedings of the 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , pages 386–400, 2021. [5] GitHub. Configuring github copilot cli. https://docs.github.com/en/copilot/how -tos/copilot-cli/set-up-copilot-cli/configure-copilot-cli , 2026. Accessed 2026-08-27. [6] Farshad Kooti, Luca Maria Aiello, Mihajlo Grbovic, Kristina Lerman, and Amin Mantrach. Evolution of conversations in the age of email overload. In Proceedings of the 24th International Conference on World Wide Web , 2015. [7] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th ACM Symposium on Operating Systems Principles (SOSP) , pages 611–626, 2023. [8] LangChain. Interrupts. https://docs.langchain.com/oss/python/langgraph/inte rrupts , 2026. LangGraph documentation; accessed 2026-08-23. [9] Hanchen Li. vllm with continuum scheduling. https://github.com/Hanchenli/vllm-c ontinuum , 2026. Commit 316a587, accessed August 2026. [10] Hanchen Li, Runyuan He, Qiuyang Mang, Qizheng Zhang, Huanzhi Mao, Xiaokun Chen, Hangrui Zhou, Alvin Cheung, Joseph Gonzalez, and Ion Stoica. Continuum: Efficient and robust multi-turn LLM agent scheduling with KV cache time-to-live, 2025. arXiv:2511.02230. [11] John D. C. Little. A proof for the queuing formula: L = λW . Operations Research , 9(3): 383–387, 1961. [12] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E. Gonzalez, and Ion Stoica. Autellix: An efficient serving engine for LLM agents as general programs, 2025. arXiv:2502.13965. [13] NVIDIA Corporation. CUDA Programming Guide , 2026. URL https://docs.nvidia.co m/cuda/cuda-programming-guide/ . Accessed: 2026-08-29. [14] OpenAI. Introducing the codex app. https://openai.com/index/introducing-the-c odex-app/ , 2026. Accessed 2026-08-27. [15] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. KVFlow: Efficient prefix caching for accelerating LLM-based multi-agent workflows, 2025. arXiv:2507.07400. [16] Mohammad Shahrad, Rodrigo Fonseca, Íñigo Goiri, Gohar Chaudhry, Paul Batum, Jason Cooke, Eduardo Laureano, Colby Tresness, Mark Russinovich, and Ricardo Bianchini. Serverless in the wild: Characterizing and optimizing the serverless workload at a large cloud provider. In 
+
+2020 USENIX Annual Technical Conference (USENIX ATC 20) , pages 205–218, 2020. [17] vLLM Project. Automatic Prefix Caching. https://docs.vllm.ai/en/latest/feature s/automatic_prefix_caching/ , 2026. Accessed: 2026-08-29. 7[18] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Hassan Awadallah, Ryen W. White, Doug Burger, and Chi Wang. Autogen: Enabling next-gen llm applications via multi-agent conversation. In 
+
+Conference on Language Modeling (COLM) , 2024. [19] Tian Xia, Hanchen Li, Zhifei Li, Xiaokun Chen, Hao Kang, Yifan Qiao, Yi Xu, and Ion Stoica. Idleness is relative: Exploiting tool-call idle windows for offloading in agentic systems with MORI, 2026. arXiv:2606.00866. [20] Haoran Yu, Lifei Liu, Xiaochong Jiang, Yuwen Jia, Su Wang, Pin Qian, and Yihang Chen. Habituation at the gate: Rising approval and declining scrutiny in human review of ai agent code. arXiv preprint arXiv:2606.22721 , 2026. 
+
+## A Residency-enforcement instrument 
+
+Table 1: Realized HBM residency of N suspended Llama-3.1-70B contexts under 3 req/s background load (TP4, 4×H100 NVL).               
+
+> Residency (%) N=25 N=50 N=65 N=72
+> unmodified vLLM 100 10–14 enforced residency 100 100 98 93
+
+Residency measurement and sweep range. Each entry in Table 1 is the fraction of suspended contexts whose KV state remains in HBM when the request resumes. We determine residency from resume TTFT, using per-context resident and evicted reference measurements, rather than from internal engine counters. We choose N = {25 , 50 , 65 , 72 } to span the usable KV-capacity range. A full gate context occupies 2.75 GB, so these points correspond to approximately 31%, 62%, 80%, and 89% of the measured 680,768-token KV pool. N = 25 provides an uncontended anchor where unmodified vLLM retains all contexts, while N = 72 is near the largest suspended set that still leaves capacity for active requests. Around N ≈ 81 , suspended state alone fills the pool. We use 3 req/s of background load because it is the lowest tested rate at which eviction becomes visible; at 1.5 req/s, both arms retain 97–100% suspended contexts across the sweep. Under pressure, unmodified vLLM residency drops to 10–14%, whereas victim exclusion maintains 93–100% residency. The small shortfall at N = 72 reflects admission throttling as free KV capacity approaches zero, rather than eviction of pinned contexts. 
+
+Victim-exclusion patch. To vary residency independently of memory pressure, we modify vLLM’s 
+
+BlockPool so that selected suspended contexts cannot be chosen as eviction victims. Pinning removes their blocks from the doubly linked LRU free queue in O(1) time, and unpinning returns them to the eviction tail. Pinned blocks therefore remain unavailable to active requests, allowing their capacity cost to appear naturally through the serving scheduler. The patch is disabled for all unmodified-vLLM runs, and a regression run confirms equivalence with the stock engine when victim exclusion is disabled. 
+
+Choosing the active load. The closed-loop experiment must operate near saturation; otherwise, KV held by suspended requests can consume unused headroom without reducing measured goodput. We therefore sweep the number of concurrent active clients C at N = 0 before fixing the load used in Figure 2. Each point uses a 90 s window, 64-token completions, and the same active-request prompt pool. Table 2 reports this sweep. Goodput peaks at C = 48 and declines at C = 64 while tail latency continues to increase, indicating that the node has entered the saturated regime. We therefore fix C = 48 for the residency-cost sweep in Figure 2. At this operating point, KV capacity withheld by suspended contexts competes directly with active requests and can therefore be measured as lost goodput. 8Table 2: Concurrency sweep used to select the closed-loop operating point.                   
+
+> Cgoodput (req/s) TTFT p50 (s) TTFT p95 (s) 81.70 0.68 1.8 16 2.01 0.85 2.5 32 2.27 1.11 14.8
+> 48 2.42 1.67 28.1 64 2.32 2.31 39.4
+
+## B Price-vector calibration 
+
+We calibrate the price vector on Llama-3.1-70B (bf16, TP4) running on 4×H100 NVL GPUs, using an exclusive server with no background load. Per-token KV occupies 80 × 8 × 128 × 2 × 2 = 327 ,680 
+
+bytes, so the median 3.0K-token private suffix occupies 0.98 GB, compared with 2.75 GB for the full 8.4K-token gate context. 
+
+α1: HBM holding cost. α1 is a capacity-accounting price rather than a timing measurement. The median suffix occupies 3,000 /680 ,768 of the measured TP4 KV pool. Charging this fraction across four GPU ranks gives 
+
+α1 = 4 × 3,000 680 ,768 = 0 .0176 GPU-s/s .
+
+The end-to-end engine reports a 667,632-token KV pool, 1.9% below the calibration run. Indepen-dently, the closed-loop experiment in Section 2 gives an empirical slope of 0.023 –0.030 GPU-s/s, bracketing this accounting price from above. 
+
+β2: host-resume cost. We benchmark the larger 2.75 GB full-context payload to upper-bound transfer interference, although the state attributable to one suspended request is the 0.98 GB private suffix. Copies use page-locked host memory and torch.Tensor.copy_(non_blocking=True) ,with synchronization before and after each measurement. Across 10 repetitions, median device-to-host and host-to-device times are 0.0480 s (57.3 GB/s) and 0.0478 s (57.5 GB/s), respectively. Because these transfers are DMA-driven, transfer wall time is not charged one-for-one as GPU opportunity cost. We assign β2 = 0 .02 GPU-s as a conservative allowance for GPU-side scheduling and synchronization overhead. Setting this allowance to zero changes β3 − β2 by about 1%; charging the full 0.0478 s H2D interval across all four GPUs ( 0.19 GPU-s) changes it by under 10%. 
+
+β3: recomputation cost. We measure suffix re-prefill through the serving API. For 30 gate prompts sampled with a fixed seed (lengths ≤ 32 K), we reset the prefix cache, warm the shared system prefix, and then issue the full gate prompt with no competing traffic. Each prompt is repeated three times (90 measurements). With the shared prefix cached, the median suffix-resume TTFT is 0.479 s and a cold full-context run takes 1.366 s. Because TTFT is measured client-side, it also includes API and tokenization overhead. We therefore use it as a conservative end-to-end charge rather than a pure GPU timing measurement. Charging the observed 0.479 s interval across four TP ranks gives 
+
+β3 = 0 .479 × 4 = 1 .91 GPU-s .
+
+Full-context sensitivity. The main HBM price charges only the private suffix because the shared prefix is reused. Charging the full 8.4K-token context instead gives αfull 1 = 0 .0494 GPU-s/s; we use this only as a sensitivity bound. 
+
+## C Cross-platform ablation 
+
+To test whether the calibration recipe transfers across hardware, we repeat the measurements from Appendix B on H100 NVL, A100 SXM, and L40S platforms, then replay the controller using each platform’s own calibrated price vector. All experiments use Llama-3.1-70B in bf16 with TP4. 9For each platform, we measure host-to-device bandwidth, suffix re-prefill cost β3, and KV-pool capacity, then derive α1, t1, and t∗ using the same procedure as in Appendix B. We replay host-retain and cpu_ttl (λ) at 2λcrit using the same wait families and a fixed host-tier capacity of C2 = 425 .Table 3: Cross-platform calibration and replay at 2λcrit . Each platform uses its own measured price vector and derived break-even times. The replay columns report the relative cost of cpu_ttl (λ)
+
+versus host-retain; negative values favor expiration.                                                 
+
+> measured derived replay: TTL vs. retain Platform PCIe GB/s
+> β3
+> GPU-s KV pool tokens HBM GB
+> α1
+> GPU-s/s
+> t1
+> s
+> t∗
+> slognormal exponential mixture crossover
+> P(W≤t∗)
+> H100 NVL (Gen5) 57.5 1.91 680,768 4×94 0.0176 1.13 109 +8 .7% +12 .9% −3.1% 0.39 A100 SXM (Gen4) 26.2 2.61 516,976 4×80 0.0232 0.86 112 +8 .8% +14 .0% −3.1% 0.39 L40S (Gen4) ∗27.0 5.14 101,504 4×48 0.118 0.17 43.5 +9 .1% +15 .0% −3.1% 0.23
+> ∗On L40S, compute becomes limiting before KV capacity over part of the measured range; the reported α1therefore corresponds to the KV-bound regime. We hold C2= 425 fixed across platforms to isolate GPU platform effects.
+
+The calibrated constants vary substantially across platforms: α1 changes by nearly 7×, while t∗
+
+ranges from 43.5 s to 112 s. Despite these shifts, the policy ordering is unchanged: host-retain remains preferred for the lognormal and exponential waits, while cpu_ttl (λ) remains preferred for the mixture. The result suggests that the calibration procedure transfers across platforms, while the resulting thresholds themselves should be re-measured rather than reused across hardware. 
+
+## D Exact semantics of cpu_ttl (λ)
+
+The main text uses Wref = 1 ,800 s to define λcrit = C2/W ref , and every evaluated wait family is scaled to mean Wref so that " 2λcrit " denotes the same load for all three. For a wait distribution W ,host-retain has mean DRAM occupancy λE[W ], while a TTL policy has occupancy λE[min( W, t 2)] .Replay enforces the finite C2 host slots directly using the sampled waits. The TTL decision is one-shot. On suspension, a context moves to host DRAM and receives t2(λ). If the request has not resumed when the timer fires, the host copy is discarded and the request is not subsequently re-scored from elapsed wait. In our experiments, λ is the configured offered rate for the condition. Host capacity is enforced at admission. In replay, a suspended context that arrives when a host slot is available is admitted; one that finds the tier full is not admitted and recomputes at resume, and residents are never displaced. In the live controller the tier admits every new context and evicts by priority: blocks whose timer has expired, then transient blocks of active requests, then least-recently-used suspended blocks. Both rules are identical under host-retain and cpu_ttl (λ).The two branches differ only in proactive expiration: cpu_ttl (λ) may discard a resident context when its t2(λ) timer fires, while host-retain does not. TTL expiration can therefore free host capacity before a later arrival would otherwise trigger replacement. 
+
+## E Extended related work 
+
+MORI. MORI uses the same broad placement choices (GPU, host memory, and recomputation) but ranks requests using relative idleness over a short history window [19]. In our 2,161 approval-gated trajectories, the p5–p95 spread of this statistic contracts from 0.359 at tool-call-scale waits to 0.018 at half-hour waits. This motivates using system pressure rather than request-level idleness as the control signal at human-approval timescales. 
+
+Continuum. Continuum indexes retention on a predicted pause-duration bound [10]. Its published system primarily targets seconds-scale tool calls. We evaluate its implementation under the same human-scale wait workloads used in our end-to-end experiments. 
+
+InferCept. InferCept chooses among preserving, swapping, and recomputing intercepted KV using expected GPU-memory waste [1]. Its measurements target seconds-scale interceptions. At longer 10 Table 4: Retention signals in prior systems. Prior agent-serving policies primarily use request-level signals, whereas ours indexes retention on system load. †Autellix names human input as an interrupt type but scopes it out of serving.                             
+
+> System Idle source Design scale Retention signal vLLM [7] memory pressure –recency (LRU) InferCept [1] tool call seconds reload cost Autellix [12] tool call, human †seconds none KVFlow [15] tool call seconds workflow position MORI [19] tool call seconds idleness rank Continuum [10] tool call ≤2spredicted duration
+> cpu_ttl (λ)(ours) approval gate minutes–hours system load λ
+
+waits, continuous GPU retention becomes increasingly expensive, leaving the additional question studied here: when a finite host tier should itself release suspended state under load. 
+
+Serverless keep-alive. Serverless systems face a related retain-or-release decision, using per-function idle-time distributions or reuse value to choose container keep-alive behavior [16, 4]. Our setting instead prices retention against shared accelerator and host-memory capacity. 
+
+## F Extended evaluation 
+
+F.1 Serving configuration 
+
+All requests use greedy decoding ( temperature=0 ). A gate request generates one token at suspension and eight tokens at resume. Each of the C = 48 closed-loop active clients draws a prompt uniformly from a 1,160-prompt background pool and generates 64 tokens per request. Gate contexts are drawn from a disjoint 1,000-prompt pool. For the vLLM-based systems, we use vLLM v0.27.1 with --tensor-parallel-size 4, --max-m odel-len 32768, and --gpu-memory-utilization 0.92. The host tier uses OffloadingConnec tor with kv_role=kv_both , offload_prompt_only=false , and cpu_bytes_to_use = 380 ×
+
+10 9 bytes ( 375 × 10 9 for the exponential workload). These settings are identical across unmodified vLLM, vLLM+offload, the MORI policy port, and our controller; only eviction_policy and 
+
+cache_policy_module_path differ where applicable. Continuum uses the public fork released by the first author (vLLM 0.10.2 base) [9], which implements Continuum scheduling without the paper’s pause-duration estimator, so we use its shipped 2 s pin TTL. 
+
+F.2 Exact end-to-end measurements 
+
+Table 5 reports the values underlying Figure 4. For each resumed context, we normalize its TTFT between context-specific resident and evicted references: 
+
+f = TTFT − TTFT hit 
+
+TTFT cold − TTFT hit 
+
+,
+
+clipped to [0 , 1] . Retained is the fraction of contexts with f ≤ 0.15 , while Recomputed is the mean 
+
+f , used as a normalized estimate of recomputation at resume. The two columns measure different statistics and are not expected to sum to 100%. 11 Table 5: Exact live end-to-end measurements underlying Figure 4. Retained, recomputed, and resume TTFT are measured after draining the serving window. 
+
+System Waits Goodput Retained Recomputed Resume TTFT (req/s) (%) (%) (ms) Ours lognormal 0.95 38.1 61.4 435 exponential 0.96 35.4 63.8 455 mixture 1.07 17.6 81.8 628 MORI † lognormal 0.78 24.1 75.9 590 exponential 0.77 21.5 78.5 588 mixture 0.83 21.9 77.5 606 Continuum ‡ lognormal 0.63 0.4 98.6 625 exponential 0.63 0.2 98.8 620 mixture 0.76 0.1 98.8 620 vLLM+offload lognormal 0.70 0.6 95.4 626 exponential 0.73 0.3 96.1 630 mixture 0.87 0.6 95.5 633 vLLM lognormal 0.63 0.4 94.4 619 exponential 0.66 0.1 96.0 630 mixture 0.77 0.3 96.1 628  
+
+> †Policy port on the same serving engine. ‡First author’s public fork (vLLM 0.10.2 base) as shipped, fixed 2 s pin TTL; scored against its own resident/evicted references.
+
+F.3 Load-sweep replay 
+
+To test whether the controller requires per-load tuning, we replay 12 conditions spanning 0.5–3×λcrit 
+
+at C2 = 425 . We compare cpu_ttl (λ) against fixed host-retention policies that offload at suspension and discard after 10, 30, or 60 minutes, or never ( ∞, host-retain). The controller is calibrated once per wait family, after which the selected branch is fixed across all loads. Table 6 reports the resulting GPU opportunity cost. The controller matches the best fixed policy throughout the lognormal and exponential workloads. On the mixture workload, it remains within 0.2% of the best fixed policy at 2λcrit and outperforms it by 3.6% at 3λcrit . Thus, the calibration-selected branch remains competitive across load without per-load TTL tuning. Table 6: Load-sweep replay at C2 = 425 . Entries are GPU opportunity cost per request (GPU-s; lower is better). The controller entry shows the calibration-selected branch in parentheses. Gain is relative to the best fixed policy for each condition; positive favors the controller. Bold marks the lowest cost in each row. 
+
+Waits λ/λ crit cpu_ttl (λ) ∞ 10 min 30 min 60 min Controller Gain lognormal 0.5 0.020 0.020 1.374 0.598 0.243 0.020 (retain) 0.0% 1 0.065 0.065 1.374 0.598 0.243 0.065 (retain) 0.0% 2 0.851 0.787 1.374 0.868 0.834 0.787 (retain) 0.0% 3 1.239 1.081 1.375 1.199 1.138 1.081 (retain) 0.0% exponential 0.5 0.020 0.020 1.373 0.737 0.278 0.020 (retain) 0.0% 1 0.132 0.132 1.373 0.737 0.278 0.132 (retain) 0.0% 2 0.993 0.877 1.373 0.999 0.937 0.877 (retain) 0.0% 3 1.307 1.145 1.373 1.266 1.229 1.145 (retain) 0.0% mixture 0.5 0.020 0.020 0.957 0.728 0.363 0.020 (ttl) 0.0% 1 0.072 0.072 0.957 0.728 0.363 0.072 (ttl) 0.0% 2 0.759 0.785 0.957 0.758 0.789 0.759 (ttl) −0.2%3 0.923 1.073 0.957 1.082 1.126 0.923 (ttl) +3 .6%
+
+## G Compute resources 
+
+Hardware. Live experiments use a single node with 4×NVIDIA H100 NVL GPUs (94 GB HBM each), 128 vCPUs, and 1.5 TiB host DRAM. The available shared-memory budget limits the host tier 12 to 375–380 GB. The closed-loop residency experiment uses identically configured nodes. Replay, trace generation, and plotting are CPU-only and complete within minutes. Table 7: Approximate compute for the experiments reported in the paper.                
+
+> Experiment Wall-clock GPU-hours Price-vector calibration 0.5 h 2Residency characterization 2.6 h 10.3 Capacity and calibration probes 0.7 h 2.6 Live end-to-end serving (15 runs) 14 h 55 Replay and trace generation CPU only —Total reported ∼18 h∼70
+
+The full project, including exploratory and invalidated runs not reported in the paper, consumed approximately 250–300 GPU-hours. 
+
+## H Licenses for external assets 
+
+We use four primary external research assets. The τ 2-bench code and released benchmark materials are distributed under the MIT License [3]. vLLM, used as the serving engine in our experiments, is dis-tributed under the Apache License 2.0 [7]. Continuum, used as an agent-serving baseline, is distributed under the Apache License 2.0 and evaluated using the first author’s public fork [9] ( vllm-continuum ,commit 316a587 , 2026-03-20; vLLM v0.10.2 base, no tagged release) as shipped, with its fixed 2 s pin TTL [10]. MORI has no public artifact; we evaluate a policy port of its published placement rule on our serving engine [19]. Llama-3.1-70B is provided by Meta under the Llama 3.1 Community License. We use these assets for research and evaluation in accordance with their respective license terms and do not redistribute modified model weights or third-party benchmark data as part of this work. 13

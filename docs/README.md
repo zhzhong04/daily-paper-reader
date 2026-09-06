@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-08-31</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 5 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-01 00:48:44 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 22:31:59 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读3篇、速读2篇，聚焦AI智能体上下文管理与训练效率。最值得关注《ContextPilot》用细粒度RL实现主动上下文管理，以及《psRL》通过前缀共享降低训练成本。建议普通读者优先追踪智能体长上下文与高效训练方向。</p>
+<p>今日聚焦 LLM 智能体的长时记忆与内存管理，12 篇论文中精读 2 篇高分工作。最值得关注的是「人类审批时间尺度下的自适应 KV 保留」与「跨回合记忆失效合约」，均获 9.0 分，直击长期运行效率瓶颈。建议优先精读这两篇，再顺藤摸瓜扫读速读列表中的门控路由与在线修订机制。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">8 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ContextPilot: Teaching Agents for Proactive Context Management via Fine-grained RL">ContextPilot: Teaching Agents for Proactive Context Management via Fine-grained RL</span></li><li><span class="dpr-home-dashboard-paper-title" title="psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing">psRL: Efficient Training for Agentic AI via Training-Time Prefix Sharing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction">Learning-Augmented Heuristics: Simple, yet Smart, Robust and Interpretable Cache Eviction</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive KV Retention for LLM Agents at Human-Approval Timescales">Adaptive KV Retention for LLM Agents at Human-Approval Timescales</span></li><li><span class="dpr-home-dashboard-paper-title" title="Invalidation Contracts for Cross-Episode Agent Memory">Invalidation Contracts for Cross-Episode Agent Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents">ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Read Less, Solve More: Token-Efficient Sparse Reading for AI Agents">Read Less, Solve More: Token-Efficient Sparse Reading for AI Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction">Sigmoid Attention as a Better Substrate for Learned KV Cache Eviction</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems">Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows">REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="mzCache: On-Device LLM Memory Management under Multitasking">mzCache: On-Device LLM Memory Management under Multitasking</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span></div>
 </section>
 </div>
 

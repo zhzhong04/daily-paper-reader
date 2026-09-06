@@ -1,0 +1,399 @@
+Title: ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents
+
+URL Source: https://arxiv.org/pdf/2609.00749v1
+
+Published Time: Wed, 02 Sep 2026 00:45:44 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents 
+
+## Peng Xu Zuyu Zhang Yuze Sun Feng Tian Long Wang Chen Zhang 
+
+MatrixOrigin Tsinghua University 
+
+{xupeng; zuyuzhang; sunyuze }@matrixorigin.cn 
+
+{tianfeng; wanglong }@matrixorigin.io fortunelink chris@163.com 
+
+# Abstract 
+
+Long-horizon large language model (LLM) agents require context assembly: the runtime must decide what to in-clude in each prompt, in what order, and when to com-pact history under a hard context-window budget and a byte-sensitive prompt cache. In production agentic sys-tems, this logic is scattered across prompt builders, ad hoc compaction routines, cache-break workarounds, and per-provider shims. We argue that context assembly is structurally isomorphic to query execution in a relational database: both execute under a hard budget, exploit a tiered cache, and leverage statistics. We adopt this dis-cipline in ContextPipe : a five-phase pipeline (Plan →
+
+Bind → Optimize → Execute → Feedback) backed by a structured data-source catalog, a deterministic cache-aware optimizer, and an EXPLAIN ANALYZE trace. We show the context in ContextPipe is auditable, re-playable, and failure-isolated. A preliminary evaluation using the SWE-bench Pro Qutebrowser subset shows that, compared to the append-only context construction policy, 
+
+ContextPipe reduces total token volume by 31%, LLM calls by 23%, and response time by 9% at a cost in lower KV cache-hit ratio. 
+
+VLDB Workshop Reference Format: Peng Xu, Zuyu Zhang, Yuze Sun, Feng Tian, Long Wang, Chen Zhang. ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents. VLDB 2026 Workshop: ADS 2026: The Joint Workshop on Agentic Data Systems and Data-Centric AI (The 1st ADS & 3rd DATAI). 
+
+# 1 Introduction 
+
+A large language model (LLM) agent runs in a loop: it receives a user message, assembles a prompt, calls the model, interprets the response (often a tool call), executes any tools, and feeds the result into the next turn [21, 27]. Each turn is fundamentally a request-assembly problem: the runtime must collect system prompts, tool schemas, conversation history, retrieved memory, skill instructions, and runtime identity into one API call whose input size cannot exceed the model’s context window, under latency and cost pressure from providers that charge per token and cache byte-identical prefixes [2, 19]. Raw concatena-tion works for short exchanges, but it fails once histories or tool results dominate the prompt; beyond that point the runtime must actively decide what remains, what is summarized, and what is deferred [20], and it must do so again on every turn of a long-horizon task. In practice, production agentic systems have accumu-lated a large set of context-handling components to make these decisions: prompt builders per session, compaction routines for history, provider-specific cache markers, and attachment injection for tool output. The result resem-bles a pre-optimizer database inside the agent runtime: each site makes local decisions that are individually rea-sonable but collectively opaque, and two of those decisions carry outsized risk. First, caching imposes a byte-stability constraint: automatic prefix caching [19, 29] reuses the longest byte-identical prefix shared with a prior request, so appending after a cached prefix is inexpensive but a one-byte change anywhere in a stable block invalidates the suffix and forces full recomputation of the prefix [14]. Second, ordering is consequential even where caching is unaffected: long-context models do not attend uniformly across the prompt, and content placed in the middle is systematically under-attended relative to content near the beginning or end [16], so section order affects output qual-ity as well as cost—putting volatile memory late can pro-tect the cache while also changing whether the model uses that memory in the current turn. Typical runtimes can-not explain why the assembler chose a particular con-text, what a better choice would have cost, or whether a cache broke because of a tool-schema edit, a session-header change, or compacted placeholder drift; there is no catalog of context sources by lifecycle, no determinis-tic policy that jointly handles cache placement and com-paction, and no trace explaining what happened and why. We observe that this resembles the problem that rela-tional database systems solved half a century ago [10, 22]. A database optimizer takes a declarative intent (a SQL query) and a catalog (tables, indexes, statistics), produces a physical plan that respects hard resource limits (mem-ory and I/O), exploits a tiered cache (buffer pool), and exposes its reasoning (EXPLAIN ANALYZE). A context assembler has a declarative intent (the user input mes-1arXiv:2609.00749v1 [cs.AI] 1 Sep 2026 sage), an implicit catalog (session states, available sources and their lifecycles and costs), a hard resource limit (the context window), and a tiered cache (the prompt prefix cache). However, it typically lacks a formal structure that makes these analogues visible. This paper presents ContextPipe , a runtime that plans, optimizes, and executes LLM context construction using database-inspired execution principles. Its contri-butions are: 
+
+• A pipeline abstraction for LLM context assembly with five explicit phases: Plan, Bind, Optimize, Execute, and Feedback. These phases mirror the shape of a query executor and unify functionality that is often dis-tributed across many scattered modules (Section 2). 
+
+• A deterministic, cache-aware optimizer that frames con-text assembly as an ordered, budget-constrained place-ment problem and solves it using cache-aware ordered placement: a fixed ascending-volatility sort and tier-gated, individually-gated compaction transforms, every one of which is recorded for audit whether applied or skipped (Section 3). 
+
+• A structured data-source catalog ( ContextSources )that organizes the session states in a typical agent loop into eight lifecycle tiers, two of which are Session-Latches and EmergentContext , to make otherwise implicit behaviors first-class (Section 4). 
+
+• Two mechanisms that let the pipeline adapt across turns instead of reacting only to the current prompt: predictive context pressure in Plan, which sizes the next response from historical percentiles rather than a fixed reserve, and TTL-guarded emergent context across Bind and Feedback, which safely carries mid-turn discoveries (e.g., a tool result that triggers a new skill) into the next turn without staleness or duplication (Sections 2, 4). The rest of this paper is organized as follows. Section 2 presents the architecture. Section 3 presents the opti-mizer, Section 4 describes the catalog design, Section 5 presents the trace format, and Section 6 examines the im-plementation techniques. Section 7 reports the empirical evaluation between ContextPipe and append-only con-text construction on long-horizon agent tasks. Section 8 covers previous work on context assembly, and Section 9 concludes. 
+
+# 2 The ContextPipe Runtime 
+
+This section describes the ContextPipe runtime and its five-phase execution model. ContextPipe treats one LLM turn as a single invocation of a staged pipeline: Plan → Bind → Optimize → Execute → Feedback .
+
+Each phase has a well-defined input type, output type, and purity constraint, and the phases together are the only path by which an LLM call is produced. There are no parallel payload builders for subruns, skill runs,      
+
+> User message + session state
+> ↓
+> Plan — pressure, reserves; compaction tier; section budgets; cache strategy
+> ↓
+> Bind — history, memory, tools; skills, runtime identity; emergent context
+> ↓
+> Optimize — order; compact, prune, spill; cache markers; EXPLAIN
+> ↓
+> Execute — serialize; call provider; ANALYZE trace
+> ↓
+> Feedback — update statistics; detect cache breaks; populate emergent context
+
+Figure 1: ContextPipe routes every LLM call through one auditable five-phase assembly path. Plan is pure; Bind is the only phase that performs external I/O; Exe-cute is the only phase that contacts the model. Feedback populates emergent context for the next turn. compaction agents, or forked children; all of these invoca-tions run through the same pipeline with different Con-textSources inputs. 
+
+## 2.1 Overview 
+
+Figure 1 sketches the data flow. Plan is pure computa-tion over the catalog and accumulated statistics: it de-cides what the turn should contain, how much of each section’s budget to allocate, which compaction tier to se-lect, and which cache policy to apply. Bind performs all I/O, concurrently where possible: memory retrieval, his-tory loading, tool schema resolution, skill loading, and consumption of emergent context carried over from the previous turn. Optimize transforms bound content into a cache-aligned, budget-fitted, provider-specific arrange-ment, following the deterministic cache-aware policy of Section 3 and constrained by an explicit budget of allowed transformations (reorder, clear, prune, spill, drop). Exe-cute serializes and calls the provider. Feedback records actual input, output, and cache usage in the statistics ta-bles so that future Plan phases are better informed. 
+
+## 2.2 Phase 1: Plan 
+
+Plan is a pure function of the catalog snapshot. Its central quantity is context pressure, 
+
+Praw = Tused 
+
+Leff 
+
+, Ppred = Tused + Ro + Rt + Rs
+
+Leff 
+
+, (1) where Leff is the model’s effective input limit and Ro,
+
+Rt, Rs are reserves for the expected model response, ex-tended thinking, and tool-schema growth. The response reserve Ro is not an average but a per-bucket percentile (p75 in steady state, p95 after a recovery event) read from 
+
+PipelineStats buckets keyed by (model, query source); 2Rt and Rs are typed reserve slots that the current estima-tor leaves at zero (Section 3). This is the direct analogue of histogram-based cardinality estimation [22]: averages are too optimistic for long-tail coding turns and invite 
+
+prompt too long recovery loops, whereas a percentile in a typed bucket is robust to workload mix. 
+
+Ppred drives a compaction tier from Normal to Trim-Schemas, CompactHistory, and AggressivePrune. A gat-ing rule prevents over-compaction: predictive pressure may escalate the tier that raw pressure would select, but never de-escalate. A non-empty RecoveryState (e.g., a recent prompt too long error), however, escalates fur-ther. Plan also produces a section manifest: the list of sec-tions, their cache scopes (Global / Session / None), their individual token budgets, and the cache strategy. Every input is a reference into the catalog, which makes Plan deterministic and easy to test independently of the rest of the pipeline. 
+
+## 2.3 Phase 2: Bind 
+
+Bind fetches the concrete content for each planned sec-tion. Because the planned sections are independent, bind-ings can run concurrently: memory retrieval against an external service, history loading from in-memory state, tool schema resolution, skill loading, and consumption of emergent items from the previous turn all share no write state. The slow bindings are the few that touch network or disk (memory, cloud snapshots, spilled tool results); the remaining bindings are local and inexpensive. Bind’s output is a list of typed artifacts: system-section artifacts, message artifacts, tool-schema artifacts, attachment artifacts, memory artifacts, and spill refer-ences. Typing matters because later stages must preserve provider invariants such as tool-call/tool-result pairing, thinking blocks, and media placeholders. String-first as-sembly hides exactly these invariants. Bind also respects per-section token budgets assigned by Plan. 
+
+## 2.4 Phase 3: Optimize 
+
+Optimize consists of cache alignment, compaction, and spill decisions. It operates on bound artifacts and pro-duces a fully serializable request and a trace. When the compaction tier selected by Plan calls for it, Optimize has several ways to reduce what is sent: dropping stale tool output, pruning unused schemas, summarizing older his-tory with another model call, or spilling large artifacts behind stable references. These actions differ in cost, re-versibility, and risk—dropping a tool result is inexpensive but lossy, summarization preserves intent but may erase details, and spilling keeps bytes out of the prompt while adding retrieval obligations—so a robust optimizer needs not only a current token count but a policy for choosing the least damaging tier, which Section 3 formalizes. It is constrained by an OptimizeLimits struct that gates each allowed transformation (reorder, clear, prune, spill, LLM summary, round dropping), caps the number of reorder moves per turn, and sets a circuit-breaker on total tokens cleared. Whenever a gate blocks a transfor-mation, the trace records the missed opportunity with its reason, making the optimizer auditable. Optimize follows the deterministic, cache-aware pol-icy formalized in Section 3. Cache marker placement is delegated to a ProviderCachePolicy declared per backend (prefix-only, Anthropic-style control, Bedrock, OpenAI-compatible), which determines maximum marker count, marker granularity (system block, message, con-tent block), whether global scope is supported, and whether cached tool results can be referenced rather than re-sent. This makes “how to mark for cache” a policy decision rather than logic scattered across providers. 
+
+## 2.5 Phases 4–5: Execute and Feedback 
+
+Execute serializes the optimized artifacts through the provider adapter, optionally stops at EXPLAIN-only mode (returning the trace without calling the model), and otherwise sends the request. Separating Execute from Op-timize preserves the property that you can inspect what would have been sent without side effects, in the same way EXPLAIN (without ANALYZE) does for SQL. Feedback records the actual result: input tokens, cache read, cache creation, output tokens, whether truncation occurred, and an attribution for any cache break. These statistics are kept in PipelineStats buckets that the next Plan phase will read. PipelineStats is the only mutable object during a turn, while the catalog itself is not mutated by the pipeline. 
+
+# 3 Context Optimization 
+
+This section states the placement problem that the op-timizer solves, the deterministic heuristic ContextPipe 
+
+actually runs, and the invariants that make the output safe for serialization and replay. We deliberately describe the mechanism here rather than an idealized objective, as the optimizer is not a utility-maximizing search but a se-quence of gated, order-preserving transforms where every decision, applied or skipped, is recorded in the trace. 
+
+## 3.1 Problem Statement 
+
+Informally, the optimizer decides which sections to keep, in what order, and where to place cache-marker bound-aries, under a hard token budget and a set of sections that should never be dropped. 
+
+Inputs. Let S = {s1, . . . , s n} be the sections produced by Bind. Each section si carries an estimated token cost 
+
+ti, a cache scope ci ∈ { Global , Session , None } ordered by volatility (Global is most stable), and a compression pri-ority pi. The priority is either First, Normal, LastResort, or Never, where First sections (the emergent tiers) are 3compressed before others, while Never sections (Identity, Constraints) are never compressed. 
+
+Decision variables and constraints. The optimizer makes three decisions: a section order π, a compaction mask 
+
+μ ∈ { 0, 1}n (which sections survive), and a set of cache-marker positions M , with |M | ≤ Mmax set by the provider policy. Writing B for the effective input budget (model window minus reserves), the decisions must satisfy four constraints: 
+
+• budget: retained sections fit, P 
+
+> i:μi=1
+
+ti ≤ B;
+
+• precedence: fixed anchors (Identity, Constraints) keep their positions; 
+
+• protection: μi = 1 whenever pi = Never; 
+
+• pairing: every tool-result stays adjacent to its tool-call, as providers require. Maximizing retained utility under a budget with prece-dence is a precedence-constrained knapsack and is NP-hard in general; adding order-sensitive cache effects fur-ther complicates the objective. ContextPipe therefore does not search this space. Instead it applies a fixed, de-terministic policy that exploits the structural fact that makes the problem tractable in practice: cost (cache in-validation) and the natural ordering of sections are both governed by the same volatility signal. We choose a sta-ble, auditable cache layout policy that places sections in ascending volatility order. 
+
+## 3.2 Predictive Context Pressure 
+
+The quantity that drives every compaction decision is con-text pressure. Given current input tokens T and effective limit L,
+
+Praw = TL , Ppred = T + RL , (2) where R = Ro + Rt + Rs aggregates reserves for the expected model response, extended thinking, and tool-schema growth. By construction Ppred ≥ Praw , and a zero or invalid limit saturates pressure to 1.0 rather than dividing by zero. The reserve R is estimated from history (Section 3.8); in the current implementation the response reserve Ro is filled from observed completion lengths while 
+
+Rt and Rs are typed but default to zero, a conservative choice we revisit in Section 9. Predictive pressure is analogous to histogram-based cardinality estimation in a query optimizer [22]: it lets Plan provision for the turn’s likely output before the input is even sent, so the request is compacted before it would have triggered a prompt too long error rather than after. 
+
+## 3.3 Tier-Gated Compaction 
+
+Predictive pressure selects a discrete compaction tier by three fixed thresholds: 0.00 ≤ P < 0.60 : Normal ,
+
+0.60 ≤ P < 0.75 : TrimSchemas ,
+
+0.75 ≤ P < 0.90 : CompactHistory ,
+
+0.90 ≤ P : AggressivePrune .
+
+The tier is selected from both raw and predictive pres-sure and the more aggressive of the two is taken, so prediction may only escalate the tier, never relax it (select tier gated ). A non-empty RecoveryState 
+
+(e.g., a recent prompt too long ) escalates the tier fur-ther still. This monotone, escalate-only rule prevents the oscillation an averaging estimator would produce on long-tailed coding turns. Each tier unlocks a specific transform, and each trans-form is additionally guarded by a boolean in Optimize-Limits :
+
+• Normal: no compaction. 
+
+• TrimSchemas: prune tool schemas that the turn is un-likely to use. 
+
+• CompactHistory: clear the oldest tool results, replac-ing each with a provider-shaped placeholder, under a 
+
+max clear tokens circuit breaker that caps how much can be cleared in one turn; spill oversized results to disk (Section 3.5). 
+
+• AggressivePrune: in addition, drop the oldest whole conversation rounds, with the drop fraction scaling with pressure and a floor of at least four droppable rounds before any drop occurs. System messages are never dropped. When a tier would permit a transform but its Opti-mizeLimits gate is closed, the optimizer emits a Skippe-dOptimization trace record naming the step and the rea-son. The closed-gate case is thus as observable as the applied case, which is the property the audit guarantee below depends on. 
+
+## 3.4 Cache-Aware Ordered Placement 
+
+The reordering step ( cache align sections ) is a pure sort, not a search. Reorderable sections are sorted by as-cending cache-scope volatility, Global < Session < None, with a stable section identifier breaking ties so the result is a total, deterministic function of S. The fixed anchors Identity and Constraints are excluded from the sort and keep their leading positions. To bound churn, the new order is adopted only if it differs from the current order by at most max reorder moves transpositions; otherwise the sort is skipped and logged. Ascending volatility is central to the cache design. Cache markers are then placed at scope boundaries, the point where a run of Global/Session sections gives way to None. Because every byte before the deepest marker is stable across the session, the marked prefix is byte-identical turn over turn and is served from the provider’s prefix cache [2, 14, 29]. A single volatile section placed early would push the boundary backward and shrink the cacheable prefix; the sort guarantees this never happens. Marker placement respects three further constraints: a4Algorithm 1: ContextPipe Optimize (deterministic, gated) Input: bound sections S, plan P (tier, budget), provider policy Π, limits L, latches Λ                                 
+
+> Output: optimized request R, trace τ
+> 1. Order. If L.reorder: sort reorderable sections by (volatility( ci),id( si)), anchoring Identity and Constraints; adopt only if moves ≤ L .max moves, else skip and log. 2. Compact. By P. tier and the matching gate in L: prune schemas (TrimSchemas); clear oldest tool results under the
+> max clear tokens breaker (CompactHistory); drop oldest rounds (AggressivePrune). Log every applied and skipped transform. 3. Spill. For each section with ti≥10 ,000 and a backend present (never Identity/Constraints/WorkingMemory): persist and insert a SpillReference. 4. Mark. Place ≤Π.M max markers at scope boundaries, honoring Π (prefix-only ⇒none) and Λ (suppress None markers on a flipped latch). 5. Serialize. Serialize ( π, μ, M ) through Π; append pressure, tier, budget, markers, and all skipped steps to τ. Return (R, τ ).
+
+prefix-only provider policy emits no markers at all; if a SessionLatches value flipped this turn, None-scope markers are suppressed to avoid caching content that changed in the current turn; and the total marker count is capped at Mmax .
+
+## 3.5 Spill 
+
+When a single section exceeds a fixed threshold (10,000 tokens) and a spill backend is configured, its content is persisted to the backend and replaced in-place by a lightweight SpillReference that frees the token budget while preserving a recovery path. Identity, Constraints, and Working Memory are never spilled. Rehydration is fail-open: if the backend cannot return spilled content, the optimizer substitutes a placeholder and records a skipped-rehydration trace entry rather than aborting the turn, keeping the reference for a later retry. 
+
+## 3.6 The Heuristic End-to-End 
+
+Algorithm 1 describes how the Optimizer works, where the sort costs O(n log n) and compaction, marking, and serialization O(n); with n ≤ 30 sections and a few dozen messages the optimizer is negligible beside one LLM call. The optimization should be a total, deterministic, fully-audited function of its inputs, resulting in three properties formalized below. 
+
+## 3.7 Invariants and Guarantees 
+
+The optimizer is safe because it preserves a small set of invariants that the serializer and providers rely on. We state them over the output of Algorithm 1. 
+
+Lemma 1 (Anchor and precedence). Identity and Con-straints retain their leading positions, and no reorder crosses a cache-scope class boundary. 
+
+Proof. Step 1 excludes the anchors from the sort and sorts the remainder by a key whose primary component is the scope class; no other step changes π. □
+
+Lemma 2 (Protection). For every i with pi = Never, μi =1. 
+
+Proof. The mask starts at 1; each compaction trans-form in step 2 guards against clearing Never sections, and step 3 excludes Identity/Constraints/WorkingMem-ory from spill. □
+
+Lemma 3 (Pairing and recoverability). Every serialized tool-result is preceded by its tool-call, and every cleared oversized result leaves a recoverable reference. 
+
+Proof. Compaction carries tool-call/result pairs as atoms; the serializer rejects an unpaired result. Spill writes the backend before replacing content, and a back-end failure downgrades to a logged placeholder rather than data loss. □
+
+Property 1 (Audit completeness). For every turn, τ
+
+records each applied transform and each skipped trans-form with its reason, so the final ( π, μ, M ) is recon-structable from τ and the inputs. 
+
+Proof. Steps 1–4 write to τ on both the applied and the gated-skip branch; the only unlogged steps (the initial sort key, the identity mask) are deterministic functions of the inputs. □
+
+Property 2 (Replay determinism). Given the same Con-textSources snapshot, the same PipelineStats snap-shot, the same OptimizeLimits and provider policy, Al-gorithm 1 produces a byte-identical R and τ .
+
+Proof. The algorithm has no randomness: the sort key is a total order, tier selection is a pure function of pressure and limits, and marker placement follows a deterministic policy. Statistics are read-only during the turn. Feedback writes only after Execute (Section 3.8), so the snapshot read at Plan time is immutable throughout. Serialization is a function of ( π, μ, M, Π). □
+
+Property 3 (Failure isolation). If Execute of turn N fails, the persistent state, consisting of PipelineStats , the spill store, and the EmergentContext queue for turn 
+
+N + 1, is unchanged except for an explicit failure record. 
+
+Proof. Feedback is the only writer of usage statistics and runs only after a successful Execute; on failure it writes a single diagnostic record and no usage sample, so percentile buckets are not poisoned by a non-response. Spill writes are atomic, and EmergentContext for N +1 is populated only on success. □
+
+5We state these as properties rather than theorems: each follows directly from the pipeline construction, and their value is as tested specifications of the implementation, not as mathematical results. Property 1 makes the pipeline auditable; Property 2 makes shadow-rollout diffing and post-mortem replay well-defined; Property 3 makes retry safe without bespoke cleanup. Crucially, determinism here is stronger than it would be under a utility-search op-timizer, precisely because the policy is a fixed sort rather than a data-dependent search. 
+
+## 3.8 The Statistics Subsystem 
+
+PipelineStats plays the role of the catalog statistics store in a query optimizer: read-only to Plan, write-only to Feedback, with no read–write interleaving inside a turn. 
+
+Reserve estimation. Response reserves are estimated per bucket keyed by (model, query source ), so a chat work-load does not distort the reserves a coding agent uses. Each bucket holds a PercentileDigest: a sorted sample list capped at 512 entries that, once full, evicts the me-dian on each insert so that the tail quantiles driving re-serves stay accurate. Plan reads p75 in steady state and p95 while in recovery; an empty bucket returns a fixed floor (500 tokens). We use an exact sorted digest rather than an approximate streaming sketch because per-turn sample volume is small and the implementation is simpler to audit; the digest exposes an is saturated flag so that a future migration to a streaming quantile estimator can be triggered by observed data. 
+
+Cache and section tracking. A single exponentially weighted moving average of the cache-hit ratio (seeded on turn one, then λ = 0 .1) summarizes how well the prefix cache is performing. Per-section token usage is tracked by a separate EMA ( α = 0 .3) and feeds the next turn’s bud-get allocation. Each section’s rendered content is finger-printed, and a per-kind churn counter increments when-ever a kind’s content changes; this is how the runtime learns which nominally stable sections are unexpectedly volatile and therefore poor cache anchors. Cache breaks and compaction events are kept in 64-entry ring buffers; a compaction cascade (two events in three turns, or three in ten) is surfaced as an alert so operators can see a context that is growing faster than compaction can stabilize it. 
+
+Failed-turn and concurrency semantics. Following Prop-erty 3, a failed Execute contributes a failure record but never a usage sample, so an aborted turn cannot poison the percentile buckets. Bind performs all I/O concur-rently but reads only an immutable snapshot; Feedback mutates statistics after Execute returns, outside the con-current fan-out. The pipeline therefore exhibits turn-level serializability: Plan of turn observes exactly the writes of Feedback of the previous turn and nothing else. Table 1: Context data sources by lifecycle. The two em-phasized tiers are novel in ContextPipe ; production sys-tems typically handle them ad hoc.                      
+
+> Tier Examples Bind cost Immutable core rules, output format free Per-agent tool schemas, skill catalog free
+> Latched beta headers, cache scope free Per-session edge profile, project rules, self-model free/I/O Per-turn messages, facts, active skills free External memory, spill, cloud snapshots remote I/O
+> Emergent prefetched memory, skill discovery, tool-use summaries, attachments free Feedback cache stats, token histograms free
+
+Table 2: Catalog record schema. Every data source regis-ters a record with these fields; Plan reads the schema to decide what to bind.              
+
+> Field Meaning
+> tier one of eight lifecycle tiers (Table 1)
+> kind section kind (e.g., Identity, Memory, History)
+> scope cache scope: Global / Session / None
+> priority compression priority: Never, LastResort, Nor-mal, First
+> est tokens predicted bind cost (per-kind usage EMA)
+> bind latency measured I/O time, recorded per bound section
+> recoverable whether the source could be re-fetched if lost
+> provider markerable whether the section could host a cache marker
+> dependencies other catalog kinds this source reads
+
+# 4 ContextSources: The Pipeline Catalog 
+
+This section describes ContextSources , the catalog ab-straction used by the pipeline to reason about available context (Table 1). A query optimizer is only as good as its catalog. In most agentic runtimes, the implicit catalog is a flat struct that has accumulated roughly 200 fields mixing per-turn ephemera, per-session state, per-agent configuration, and cross-session learning. Plan cannot reason about what to fetch because there is no enumeration of sources. 
+
+ContextSources classifies every data source by life-cycle (how often it changes), location (where it lives), and bind cost (how expensive it is to fetch). Plan queries the stable tiers to decide what to fetch, while Bind incurs the I/O cost only for the tiers Plan selects. Each catalog entry carries a fixed schema (Table 2), so Plan could enumer-ate what is available without reflection. This schema is the direct analogue of information schema.columns in a relational catalog that makes the data queryable. Two tiers deserve emphasis because they are the main source of hard-to-trace behaviors in existing runtimes. 
+
+SessionLatches. A latch is a value that is evaluated lazily on the first trigger and then frozen for the session. Beta headers, cache-scope eligibility, and provider feature flags are the usual examples. Latches exist precisely to pre-vent cache breaks: if a header could toggle mid-session, it would invalidate the KV cache prefix, and rolling that back would be expensive. This is the context analogue of a one-shot DDL committed inside a transaction. By model-6Table 3: Pipeline stages ↔ optimizer state.                            
+
+> Stage State read/written Invariants Plan reserves Ro, pressure Ppred , tier, Mmax —Bind per-section actual ti, skips by budget —Optimize order π, mask μ, markers M, limits LL1–L3, P1–P2 Execute serializes (π, μ, M )via canonical serial-izer L3 Feedback cache-hit EMA, percentile samples, churn, breaks P3
+
+ing latches as a dedicated tier, the Optimizer could reason about whether a latch has already fired, whether the pre-fix hash has therefore changed, and whether a cache break this turn is attributable to the latch. 
+
+EmergentContext. Although the pipeline is staged, con-text discovery could continue after Plan. Tool execution produces new context that was not predictable at Plan time: writing file X may trigger discovery of skill Y ; a small-model auxiliary call may generate a tool-use sum-mary; memory prefetches may complete during streaming. These items are queued at the end of the current turn and consumed at the start of the next turn. This is the con-text analogue of adaptive query execution [3, 28], where the executor discovers mid-flight that row estimates were wrong. Because emergent items are produced after the current Plan but consumed by the next Bind, they carry a safety triple: a per-turn TTL (default: consumed on the immedi-ately next turn only), a content hash for deduplication at write time, and a per-list cap. Without these guardrails, resume/replay could silently double-inject stale attach-ments. 
+
+## 4.1 Runtime Introspection 
+
+At runtime, the system needs to return catalog schemas (Table 2). Together these form the context analogue of EXPLAIN, and EXPLAIN (COSTS ON) in a relational system. An operator debugging a regressed session could ask “what would the pipeline do right now?” without waiting for the next user turn. This gives an operator a procedure for introspecting the pipeline without redeploy-ing or attaching a debugger. 
+
+## 4.2 How Stages Use the Optimizer State 
+
+Table 3 binds the pipeline stages (Section 2) to the op-timizer state of Section 3. Each stage reads or writes a specific, disjoint subset, which makes the pipeline unit-testable: a synthetic snapshot of reserves and a section list is enough to drive any stage in isolation, without a live provider. 
+
+# 5 Explain Analyze 
+
+This section describes the EXPLAIN ANALYZE trace emitted by ContextPipe and how it supports auditabil-ity, replay, and feedback. 
+
+> -- EXPLAIN ---------------------ContextPlan pressure: 0.72 (raw: 0.65) reserves: out=480 think=0 sch=0 tier: CompactHistory cache: AnthropicCacheControl (2) Sections (plan to actual tok) (1) Identity [G] 480 (keep) (2) SelfModel [S] 320 (last) (3) ProjectContext [S] 150 (last) (4) Memory [-] 890/1200 (4) (5) History [-] 3200/5000 (12) (6) Constraints [G] 280 (keep) Skills:code_review [S] 650 RuntimeIdentity [-] 120 Compaction tier=CompactHistory, keep=2, budget=4000 cleared 5 results (3200 to 850), 3 spilled Cache markers m[0]: after (1)+(6) G ( 760) m[1]: after (2)+(3)+Sk S (1880) Total: 6090 / 8500 eff (71.6% util) -- ANALYZE (post-execution) ----Actual input: 6234 (err +2.4%) Cache read: 1880 (m[0]+m[1] hit) Cache creation: 0 (full prefix hit) Cache hit ratio: 100% (avg: 87%) Output tokens: 520 (est 480, +8.3%)
+
+Figure 2: EXPLAIN ANALYZE exposes both planning decisions and post-execution cache behavior for one turn. EXPLAIN is the pre-execution trace; ANALYZE is the post-execution feedback joined back in. Region tags: G=Global, S=Session, -=None. Every turn produces a structured trace (Figure 2). The pre-execution part mirrors EXPLAIN: it shows the pressure decomposition, the selected tier, per-section planned and actual tokens, compaction decisions, and cache marker positions. The post-execution part mirrors ANALYZE: it records actual input and output tokens, cache read and creation tokens, and deltas against the plan’s estimates. This trace is not merely an auxiliary debugging artifact, but also the pipeline’s audit log: every optimizer decision, every skipped transformation, every cache marker, every emergent injection, and every recovery escalation is visi-ble on the turn it happens. Eight alert rules run against each trace: explicit prompt-cache break (with attribu-tion), cache cold-start on turn > 1, cache-hit regression over a moving window, predictive miss above 20%, com-paction cascade, recovery loop, pressure spike in one turn, and emergent-list overflow. A plan/execute mismatch is additionally reported as a validation event at the stage boundary rather than as an alert rule. Warnings surface in the REPL/admin UI; errors could escalate into the next Plan (e.g., a recovery loop forces AggressivePrune). Thus unexpected behavior is recorded in the trace rather than appearing as silent degradation. Figure 2 illustrates an unedited excerpt; a real exported trace appears in Ta-ble 5, where each compaction-tier crossing is visible as a one-call cache-break dip. 76 Implementation 
+
+This section describes how ContextPipe is grounded in an implementation while preserving the properties in Sec-tion 3.7. 
+
+Components. There are two main components: pipeline data types, and runtime orchestration that reads live agent state, performs I/O, and dispatches tool calls. The pipeline data types include pressure, reserves, catalog snapshots, provider cache policy, trace records, and typed artifacts. The runtime takes the pipeline inputs and feeds ContextFeedback and EmergentContext back into the next pipeline invocation. 
+
+Typed artifacts. Internally, every section is a typed arti-fact rather than a String. A SystemSectionArtifact car-ries its kind, cache scope, priority, and content; a Mes-sageArtifact preserves tool-call identifiers and role meta-data; a ToolSchemaArtifact carries the schema plus a sta-ble hash for cache-break attribution; a SpillReference car-ries the tool-call id, byte size, and disk path. Serializa-tion to the provider’s wire format happens exactly once, at the Execute boundary. This single-serializer ownership discharges Lemma 3 (pairing and recoverability) and pre-vents an optimizer pass from accidentally dropping think-ing blocks, orphaning tool results, or reshaping media placeholders. 
+
+Stage-boundary validation. The implementation treats ev-ery stage boundary as a contract, not just as a function call. Execute receives both the optimized request and the trace record emitted by Optimizer, then checks that the serialized request still matches the selected tier, cache-marker count, compaction actions, and protected-section set. A mismatch is recorded as a first-class trace event and blocks provider dispatch in shadow mode. This catches the failure class where a planner or the Optimizer makes a decision that is silently ignored downstream, collapsing a staged pipeline back into a flat assembler while leaving aggregate metrics ambiguous. 
+
+Failure and recovery matrix. Every known failure mode maps to a pipeline response. A prompt too long error es-calates RecoveryState and forces a harder tier on the next Plan. A max output tokens retry bumps the output reserve for that (model, query-source) bucket. A sudden cold cache causes Feedback to diff the prompt/tool/mod-el/latch hashes against the previous turn and record the attribution before any reordering is attempted. A sum-marizer overflow falls back to drop the oldest compactable rounds and then truncation, each step recorded in the trace. Memory retrieval failure surfaces as missing mem-ory in the trace rather than as an empty success. Each of these is one table row in the pipeline’s failure matrix, not scattered across the runtime. 
+
+## 6.1 ForkPrefix: Cache-Prefix Sharing for Parent-Child Agents 
+
+Multi-agent delegation exposes the cache-alignment prob-lem at a higher level: a parent agent spawns a child, and both agents should share the cache prefix they have in common (system rules, tool schemas, project context). Without sharing, the child’s first turn is a full cache miss. ForkPrefix solves this by capturing a frozen, byte-identical snapshot of the parent’s cacheable request prefix at the moment of spawn. The snapshot carries (i) the canonical wire bytes of the prefix region (the frozen sys-tem blocks plus tool schemas), produced by the runtime’s own serializer rather than by an SDK so that SDK ver-sion drift cannot perturb the hash; (ii) a per-tool canoni-cal schema with its own SHA-256, so a later cache break could be attributed to exactly which tool’s description churned; and (iii) the elements that the provider folds into its cache key: the thinking-config slice, the provider/-model identity, and the sorted beta headers. A single SHA-256 over the canonical prefix bytes is the authorita-tive record of whether anything drifted between capture and use. A first-turn cache probe compares the child’s observed cache read tokens against the parent-side es-timate carried on the resolved snapshot and emits one au-dit event per spawn, so a cache-sharing failure is visible even before an executor fully consumes the snapshot. Full child-side consumption through the same pipeline’s Bind phase—the step that turns an inherited snapshot into the child’s actual first-turn prefix, rather than only an audited estimate—is not yet wired in our default server executor, which runs delegated children fresh today; by design, an executor that skips this field degrades to pre-ForkPrefix behavior rather than failing. Three properties of the mechanism as designed echo structures from query optimization; each holds once an executor consumes the snapshot. First, the snapshot is immutable after capture: the system blocks are read-only with no public mutation API, so content the par-ent adds after spawn (for example, a microcompaction) does not retroactively change the child’s prefix, and a skill that needs extra guidance must append it as a user-message suffix that sits after the cached prefix. Second, a 
+
+validate spawn step is a precondition for cache sharing: it rejects a spawn whose provider, model, thinking bud-get, or prefix size would break the captured cache identity (e.g., a child max output tokens that clamps the think-ing budget to a different value), returning a typed error so the caller could fall back rather than silently miss. Third, the snapshot supports a skip-cache-write mode for side-queries: forked children that are auxiliary (e.g., a small-model summarization call) reuse the prefix without writ-ing a fresh cache entry at their own tail, by shifting the final marker one position upstream. This is the context analogue of a shared plan cache across concurrent queries, and it generalizes naturally to peer-to-peer sibling sharing as future work. 
+
+Shadow-pipeline rollout. Any change to context assem-8Table 4: Context optimizer on SWE-bench Pro Qute-browser (DeepSeek-V4-Pro; 3 instances × 3 repeats per condition, interleaved matched pairs; per-cell means). Changes is (Flat − Structured) /Flat.                     
+
+> Flat Structured Changes Total prompt tokens 1,045,222 730,978 30.1% Fresh (uncached) tokens 46,581 99,967 −114 .6% Cache-hit rate 95.3% 86.2% −9.1% Duration (s) 204 188 7.8% LLM calls 30.2 25.0 17.2% Optimizer actions 02,417 —
+
+bly risks breaking KV-cache alignment, so changes can-not be rolled out with a single feature-flag switch. Con-textPipe ships with a mandatory shadow mode: the new pipeline runs alongside the active assembly path on every turn, but only the active path sends a request. A diff checker compares system-block byte hashes, tool schema hashes, message count and role sequence, cache marker positions, and total token estimates. Rollout proceeds in four steps: shadow-only, shadow-verified (zero diff for N
+
+turns), flip (new path serves, old becomes shadow, catch-ing regressions), and retire (old path removed after M
+
+sessions with zero diff). The shadow pipeline is how an optimizer becomes safe to iterate on. 
+
+# 7 Evaluation 
+
+This section evaluates ContextPipe using the backbone model DeepSeek-V4-Pro [26]. We compare two context construction policies: Struc-tured is the full ContextPipe pipeline, while Flat forces every optimizer gate closed ( all closed ): sections keep binding order that keeps a stable prefix, without prun-ing, compaction, or spills. Tier selection is still computed in both, due to the shared planner, so any tier that Flat reports is a label, not an action, which gives a per-call record of when the mechanism would have engaged. 
+
+Workload. We choose the Qutebrowser subset of SWE-bench Pro [8], the same subset used by Tressoir [18]. SWE-bench Pro is a contamination-resistant successor to SWE-bench [13], and the subset is long-horizon and touches multiple files, where each instance pairs a bug report with the codebase state before the fix and a test suite that validates a correct patch. We preliminarily eval-uated 3 of 79 instances in the subset to stress the context window, the prompt cache, and the compaction ladder at once, and plan to run more instances as future work. Each instance runs three times. 
+
+Structured acts, at the tradeoff of lower cache-hit ratio. 
+
+Table 4 demonstrates token usage and other metrics be-tween Structured and Flat. Comparing to Flat, Struc-tured reduces 30% total tokens, 39% repeated cache reads, 23.5% completion tokens, 23.1% LLM calls, and 8.7% re-sponse time. These reductions come at a cost in lower cache-hit ratio: fresh (uncached) input token doubles, and the per-cell cache-hit median drops from 95.6% to 86.3%, Table 5: Real EXPLAIN ANALYZE trace excerpt (Struc-tured, highest-pressure instance, repeat 1; per-call cache-hit from post-response feedback).                                     
+
+> Call Praw Ppred Cache hit Tier 10.05 0.06 24% Normal 20.06 0.06 98% Normal
+> · · ·
+> 12 0.20 0.20 99% Normal 13 0.20 0.20 8% TrimSchemas 14 0.20 0.20 100% TrimSchemas
+> · · ·
+> 23 0.29 0.29 96% TrimSchemas 24 0.31 0.32 11% CompactHistory 25 0.32 0.32 99% CompactHistory
+
+because every compaction changes the sent prefix. De-composing billed cost as 
+
+E(r) = fresh + r · cached , (3) where r is the provider’s cached-token price ratio, the break-even is r∗ = 0 .145: at a DeepSeek-like r ≈ 0.1the Flat baseline incurs approximately 11% lower billed cost despite sending 43% more total context, while Struc-tured incurs the lower billed cost wherever cached tokens cost more than 14.5% of fresh (e.g., −13% at r = 0 .25). Structured’s advantage in this regime therefore lies in con-text volume, calls, response time, and window headroom rather than unconditionally in billed cost. 
+
+A debugging case study, from the same trace. Table 5 is an unedited excerpt of the exported per-session trace of one Structured cell (the highest-pressure instance, repeat 1), and it illustrates the operator-facing diagnosis the trace is designed to support. The cold start is visible (call 1: 24% hit). The TrimSchemas crossing at call 13 appears as a one-call cache-break (8% hit, because schema pruning changed the prefix bytes), followed by immediate recovery to 93–100% for the next ten calls. The CompactHistory escalation at call 24 shows the same signature (11%), re-covering to 99% on the very next call, while Praw stays bounded at 0.33 through the end of the session. Every dip is attributable to a specific, logged optimizer deci-sion; in Flat’s trace of the same instance the hit column stays at 77–100% after the cold start and the pressure col-umn climbs monotonically until the run hits the max-turn limit. 
+
+Metrics. We report quality as resolve rate with evaluator validity gates (patch applies, tests complete, no test files modified); cost as prompt/completion tokens, provider-normalized fresh/miss and cache-read tokens, API-call counts, and wall-clock duration; and mechanism as per-call tier decisions, schema prunes, message compactions, spills, and per-call cache-hit from post-response feedback, all exported from the session trace (Section 5). Cache fields are provider-normalized because protocols differ; cross-provider counters are comparable diagnostics, not accounting identities. 
+
+Ablation status. The Structured-vs-Flat comparison above is the first of the mechanism ablations we plan. Still 9open, each holding the rest of ContextPipe fixed: (A1) predictive vs. reactive pressure (the two signals differ by at most 1.7% of the window here, so separating them re-quires a knob where tier decisions sit near a threshold); (A2) SessionLatches vs. per-turn re-evaluation; (A3) TTL+dedup+cap on EmergentContext vs. append-only; and (A4) ProviderCachePolicy vs. fixed marker placement. 
+
+Limitations and threats to validity. (i) The experiments cover only 3 of 79 instances in the Qutebrowser subset, which limits broad implications of ContextPipe . (ii) The token cost model per LLM also significantly impacts the cost effectiveness of this work. (iii) Cache counters are provider-normalized. (iv) Mechanism ablations A1– A4 remain open. 
+
+# 8 Related Work 
+
+Prior work touches pieces of the context-assembly prob-lem without addressing the composition step directly: re-trieval and long-context modeling decide what content is available, prompt caching and serving systems determine what a given byte layout costs, and agent loops and or-chestration frameworks generate the state that must be assembled each turn. ContextPipe composes selected content onto that priced substrate under a hard window budget, every turn, and borrows its discipline from rela-tional query evaluation, discussed last. 
+
+Retrieval-augmented generation and long context. Clas-sical RAG [12, 15] and its learned variants (Self-RAG [4], adaptive retrieval, FiD, RAG-Token, Gepa [1]) de-cide what to retrieve; query-rewriting approaches such as HyDE [9] and Causal Prompt Optimization [6] improve the query itself before dispatch. Long-context models [5] push how much context can be consumed, and recent work explores RL- or RLHF-guided selection of what to include in a long-context window [4, 15]. ContextPipe 
+
+does not train such a policy; it records the optimizer’s raw signals—per-section token usage, per-boundary cache hit/miss, context pressure, and tier decisions—in the per-turn trace, so a learned policy could consume them offline without changing the runtime contract. These techniques plug into Bind’s memory sources: they decide candidates, while ContextPipe decides how the candidates fit to-gether under a cache budget. 
+
+Agent memory and compaction. MemGPT [20] is the most direct antecedent: it formalizes tiered memory be-tween a “main context” and an external store, paging on token thresholds. ContextPipe catalogs eight life-cycle tiers rather than one store, drives tier selection from predictive, percentile-based pressure rather than re-active thresholds, and treats cache alignment and provider policy as first-class planning concerns, which MemGPT does not. Production agent runtimes also embed be-spoke compaction routines (micro-compact, snippet, re-active); ContextPipe subsumes these under one gated optimizer with an audit trail. PEEK [11] approaches similar pressure from an operating-systems angle, using a context map as an orientation cache for long-context agents; ContextPipe instead frames context manage-ment as a database-style execution problem, with a cat-alog, optimizer, provider cache policy, and per-turn EX-PLAIN trace. Both recognize that long-horizon agents need structured state beyond flat transcript concatena-tion, and differ mainly in the systems abstraction used to organize it. 
+
+Prompt caching and LLM serving. Automatic prefix caching [19, 29] and explicit cache control [2] provide the underlying mechanism; PagedAttention [14] man-ages the KV memory, and attention kernels [7] set the raw serving cost. These systems price a byte layout; 
+
+ContextPipe chooses it—where to place stable content, where to place breakpoints, and how to shape placeholders so byte-prefixes survive compaction—parameterized by a ProviderCachePolicy rather than provider-specific glue. 
+
+Agent loops and benchmarks. ReAct [27], Reflexion [23], Toolformer [21], LATS [30], and Voyager [24] define what the agent should do; evaluation suites such as SWE-Bench [13], AgentBench [17], and SWE-bench Pro [8] drive the tasks these loops are judged on. Both are orthogonal to 
+
+ContextPipe , which runs inside any such loop on ev-ery API call; end-to-end agent-success ablations on these benchmarks are future work (Section 9). 
+
+Agent frameworks and orchestration. Application toolk-its such as LangChain, LlamaIndex, and Haystack make it easy to build an agent quickly, not to optimize the per-turn request under a cache and pressure budget; an appli-cation built on any of them could adopt ContextPipe 
+
+as its request-assembly layer without changing its topol-ogy. Multi-agent orchestration layers such as AutoGen [25] and CrewAI focus on how agents talk to each other, not on what each agent sees per turn; their abstractions sit above our pipeline, and ForkPrefix-style cache sharing (Section 6) lets participating agents cooperate without 
+
+O(agents) cache creation. Tressoir [18] similarly stud-ies long-running multi-agent systems through an inter-pretable blueprint for designing and evolving agent ar-chitectures, prompts, tools, and knowledge, but leaves the per-turn context-assembly problem implicit: it exposes no database-style catalog, optimizer, provider cache policy, or EXPLAIN trace. ContextPipe occupies that nar-rower layer instead of proposing a new multi-agent design language. 
+
+Query optimization. Classical query optimization [10, 22] and adaptive query execution [3, 28] give our pipeline its vocabulary and shape. The context problem differs in two ways: we cannot precisely quantify “information value per token,” so the optimizer is heuristic and feedback-driven rather than cost-based in the Selinger sense, and the con-sumer (the LLM) is intelligent enough to partially com-pensate for suboptimal context. ContextPipe respects 10 both differences by making decisions auditable, reversible, and gated, while still borrowing staged planning, statis-tics, buffer pools, and EXPLAIN. 
+
+# 9 Conclusion and Future Work 
+
+We presented ContextPipe , constructing context for long-horizon LLM agents as a query execution problem: a five-phase pipeline binds session states from a lifecycle-indexed catalog, a deterministic cache-aware optimizer places and compacts the bound content under explicit gates, and an EXPLAIN ANALYZE tracker records the result. We showed that this construction makes prompt assembly auditable, replayable, and failure-isolated. Future work follows directly from the measured total-token vs. fresh-token/cache-hit-ratio tradeoff on more benchmark cases. Finer-grained compaction targets its cause: the tier-gated policy compacts a whole eligible chunk once a threshold is crossed, so each escalation ap-pears in the exported trace as a single large cache break; compacting smaller increments earlier would spread the same savings over smaller breaks, and the predictive-vs-reactive pressure ablation (A1) provides a direct test of whether anticipated pressure enables this. Adap-tive cache-marker placement targets its impact: mark-ers are currently placed by a fixed ProviderCacheP-olicy at scope boundaries, and learning positions from per-boundary hit/miss history could keep a compaction from invalidating stable markers upstream of it, reducing the fraction of the prefix that each break resends. Beyond this tradeoff, we plan to close the remaining mechanism ablations (A2–A4) using the shadow-pipeline infrastructure; to run larger task panels, drawn from additional benchmarks and repositories beyond SWE-bench Pro Qutebrowser, that turn the exploratory qual-ity tie into a powered non-inferiority comparison and test whether the measured effects hold outside a single codebase; to compare open-source and production coding harnesses under matched budgets with the same model, retry, and caching policies; and, longer term, to general-ize ForkPrefix from parent-to-child prefix reuse to peer-to-peer sharing among sibling sub-agents. 
+
+# References 
+
+[1] Lakshya A. Agrawal, Shangyin Tan, Dilara Soylu, Noah Ziems, Rishi Khare, Krista Opsahl-Ong, Arnav Singhvi, Herumb Shandilya, Michael J. Ryan, Meng Jiang, Christopher Potts, Koushik Sen, Alexandros G. Di-makis, Ion Stoica, Dan Klein, Matei Zaharia, and Omar Khattab. 2026. GEPA: Reflective Prompt Evolution Can Outperform Reinforcement Learning. arXiv:2507.19457 [cs.CL]. https://arxiv.org/abs/2507.19457 
+
+[2] Anthropic. 2024. Prompt Caching with Claude. https: //docs.anthropic.com/en/docs/build-with-claude/ prompt-caching 
+
+[3] Michael Armbrust, Reynold S. Xin, Cheng Lian, Yin Huai, Davies Liu, Joseph K. Bradley, Xiangrui Meng, Tomer Kaftan, Michael J. Franklin, Ali Ghodsi, and Matei Zaharia. 2015. Spark SQL: Relational Data Pro-cessing in Spark. In Proceedings of the ACM SIGMOD International Conference on Management of Data , 1383– 1394. https://doi.org/10.1145/2723372.2742797 
+
+[4] Akari Asai, Zeqiu Wu, Yizhong Wang, Avi Sil, and Han-naneh Hajishirzi. 2024. Self-RAG: Learning to Retrieve, Generate, and Critique through Self-Reflection. In Inter-national Conference on Learning Representations .[5] Iz Beltagy, Matthew E. Peters, and Arman Co-han. 2020. Longformer: The Long-Document Trans-former. arXiv:2004.05150 [cs.CL]. https://arxiv.org/ abs/2004.05150 
+
+[6] Wei Chen, Yanbin Fang, Shuran Fu, Fasheng Xu, and Xuan Wei. 2026. Optimizing Prompts for Large Language Models: A Causal Approach. arXiv:2602.01711 [cs.AI]. 
+
+https://arxiv.org/abs/2602.01711 
+
+[7] Tri Dao, Dan Fu, Stefano Ermon, Atri Rudra, and Christopher R´ e. 2022. FlashAttention: Fast and Memory-Efficient Exact Attention with IO-Awareness. Advances in Neural Information Processing Systems 35, 16344– 16359. [8] Xiang Deng, Jeff Da, Edwin Pan, Yannis Yiming He, Charles Ide, Kanak Garg, Niklas Lauffer, Andrew Park, Nitin Pasari, Chetan Rane, et al. 2025. SWE-Bench Pro: Can AI Agents Solve Long-Horizon Software Engineering Tasks? arXiv:2509.16941 [cs.SE]. https://arxiv.org/ abs/2509.16941 
+
+[9] Luyu Gao, Xueguang Ma, Jimmy Lin, and Jamie Callan. 2023. Precise Zero-Shot Dense Retrieval without Rele-vance Labels. In Proceedings of the 61st Annual Meeting of the Association for Computational Linguistics , 1762– 1777. [10] Goetz Graefe. 1994. Volcano—An Extensible and Par-allel Query Evaluation System. IEEE Transactions on Knowledge and Data Engineering 6, 1, 120–135. https: //doi.org/10.1109/69.273032 
+
+[11] Zhuohan Gu, Qizheng Zhang, Omar Khat-tab, and Samuel Madden. 2026. PEEK: Con-text Map as an Orientation Cache for Long-Context LLM Agents. arXiv:2605.19932 [cs.AI]. 
+
+https://arxiv.org/abs/2605.19932 
+
+[12] Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasu-pat, and Ming-Wei Chang. 2020. REALM: Retrieval-Augmented Language Model Pre-Training. In Interna-tional Conference on Machine Learning , 3929–3938. [13] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-World GitHub Issues? In International Conference on Learning Representations .[14] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao 
+
+11 Zhang, and Ion Stoica. 2023. Efficient Memory Manage-ment for Large Language Model Serving with PagedAt-tention. In Proceedings of the 29th Symposium on Op-erating Systems Principles , 611–626. https://doi.org/ 10.1145/3600006.3613165 
+
+[15] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich K¨ uttler, Mike Lewis, Wen-tau Yih, Tim Rockt¨ aschel, Sebastian Riedel, and Douwe Kiela. 2020. Retrieval-Augmented Generation for Knowledge-Intensive NLP Tasks. In Advances in Neural Information Processing Sys-tems .[16] Nelson F. Liu, Kevin Lin, John Hewitt, Ashwin Paran-jape, Michele Bevilacqua, Fabio Petroni, and Percy Liang. 2024. Lost in the Middle: How Language Mod-els Use Long Contexts. Transactions of the Association for Computational Linguistics 12, 157–173. [17] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu, Hangliang Ding, Kaiwen Men, Kejuan Yang, et al. 2024. AgentBench: Evaluating LLMs as Agents. In International Conference on Learning Rep-resentations .[18] Amadou Latyr Ngom, Ziniu Wu, Jason Mohoney, James Moore, Alex Zhang, Samuel Madden, and Tim Kraska. 2026. Tressoir: Unifying Online, Offline, and HIL Design and Evolution of Multi-Agent Systems via Interpretable Blueprints. In Proceedings of the ACM Conference on AI and Agentic Systems , 46–60. https://doi.org/10.1145/ 3786335.3813143 
+
+[19] OpenAI. 2024. Prompt Caching. https://platform. openai.com/docs/guides/prompt-caching 
+
+[20] Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G. Patil, Ion Stoica, and Joseph E. Gon-zalez. 2024. MemGPT: Towards LLMs as Operating Systems. arXiv:2310.08560 [cs.AI]. https://arxiv.org/ abs/2310.08560 
+
+[21] Timo Schick, Jane Dwivedi-Yu, Roberto Dess` ı, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. 2023. Tool-former: Language Models Can Teach Themselves to Use Tools. Advances in Neural Information Processing Sys-tems 36, 68539–68551. [22] P. Griffiths Selinger, M. M. Astrahan, D. D. Chamberlin, R. A. Lorie, and T. G. Price. 1979. Access Path Selection in a Relational Database Management System. In Pro-ceedings of the ACM SIGMOD International Conference on Management of Data , 23–34. https://doi.org/10. 1145/582095.582099 
+
+[23] Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. 2023. Reflexion: Language Agents with Verbal Reinforcement Learning. 
+
+Advances in Neural Information Processing Systems 36, 8634–8652. [24] Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan, and Anima Anand-kumar. 2023. Voyager: An Open-Ended Embodied Agent with Large Language Models. arXiv:2305.16291 [cs.AI]. 
+
+https://arxiv.org/abs/2305.16291 
+
+[25] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Ahmed Awadallah, Ryen W. White, Doug Burger, and Chi Wang. 2024. AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conver-sation. In COLM 2024 . Microsoft Research publication page. [26] Anyi Xu, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chenchen Ling, et al. 2026. DeepSeek-V4: Towards Highly Efficient Million-Token Context Intel-ligence. arXiv:2606.19348 [cs.CL]. https://arxiv.org/ abs/2606.19348 
+
+[27] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2023. Re-Act: Synergizing Reasoning and Acting in Language Models. In International Conference on Learning Repre-sentations .[28] Ning Zhang, Junichi Tatemura, and Hakan Hacig¨ um¨ us. 2014. Adaptive Query Processing: A Survey. Data Engi-neering Bulletin 37, 1, 1–11. [29] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Bar-rett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems .[30] Andy Zhou, Kai Yan, Michal Shlapentokh-Rothman, Haohan Wang, and Yu-Xiong Wang. 2024. Language Agent Tree Search Unifies Reasoning, Acting, and Plan-ning in Language Models. In Proceedings of the 41st In-ternational Conference on Machine Learning .
+
+12

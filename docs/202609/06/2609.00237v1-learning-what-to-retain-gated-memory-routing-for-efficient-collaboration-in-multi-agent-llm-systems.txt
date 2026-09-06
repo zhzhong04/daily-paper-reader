@@ -1,0 +1,664 @@
+Title: Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems
+
+URL Source: https://arxiv.org/pdf/2609.00237v1
+
+Published Time: Wed, 02 Sep 2026 00:11:23 GMT
+
+Number of Pages: 18
+
+Markdown Content:
+# Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems 
+
+Rakibul Hasan Rajib and Mengxin Zheng and Qian Lou 
+
+University of Central Florida 
+
+Abstract 
+
+Large language model (LLM)–based multi-agent systems tackle complex reasoning by orchestrating how multiple agents are config-ured and how they collaborate. A central chal-lenge is to adapt orchestration to the evolving collaboration state. Routing from the query alone cannot adapt to intermediate progress or errors, which hurts accuracy. Routing from the complete execution history supplies this missing context, but forces later decisions to process every prior step, including redundant or low-utility ones. This creates an execution-history overload that inflates cost. Effective orchestration instead requires a compact state that captures useful progress without accumu-lating redundant context. We propose Gated-Memory Routing , which conditions each de-cision on the query and a learned execution memory. A learned Memory Write Gate com-mits only non-redundant reasoning steps, and a learned Retrieval Gate supplies each agent a compact, relevant subset, so every decision conditions on a clean, informative state. At each step, the system selects the next role and backbone from this memory, while an Adap-tive Halting Controller stops execution once the memory contains sufficient evidence for answering. Across five reasoning and code-generation benchmarks, our framework is both effective and efficient: it attains the best av-erage accuracy, exceeding the strongest base-line by 2.44 points, while reducing HumanEval inference cost by 31 .9% relative to that base-line. Code is available at https://github. com/rajibrhasan/gated-memory-routing .
+
+1 Introduction 
+
+Large language model (LLM)–based multi-agent systems have become a powerful paradigm for complex reasoning: by decomposing a problem across agents that specialize, critique, or extend one another’s reasoning, they achieve strong per-formance on reasoning and code-generation bench-marks (Chen et al., 2024c; Liang et al., 2024; Zhang et al., 2024; Qian et al., 2025). Their effectiveness depends not only on the underlying LLMs but on how execution is orchestrated : how many agents to invoke, which roles to assign, which backbone powers each agent, and what each agent may see. These decisions constitute the routing problem, and how well they are made determines whether collab-oration yields genuine reasoning gains or redundant computation. Early multi-agent systems address routing through fixed, hand-engineered designs, instanti-ating predetermined agents with manually speci-fied roles and static collaboration patterns that re-main constant across queries (Hong et al., 2024; Qian et al., 2024; Li et al., 2023; Du et al., 2024; Wu et al., 2024). To relax this rigidity, later work makes the interaction structure adaptive by optimiz-ing or pruning the communication graph (Zhuge et al., 2024; Zhang et al., 2025a; Wang et al., 2025; Liu et al., 2024), and end-to-end routers configure agent count, roles, and backbones directly from the query (Yue et al., 2025). These query-only 
+
+routers commit routing decisions before any agent produces reasoning, so they cannot respond to par-tial progress, errors, or emerging gaps in the solu-tion. A recent alternative conditions routing on the unfolding execution, sequencing agents over the evolving task state (Dang et al., 2025). When that evolving state is carried forward with little filtering, however, each decision must reason over an undif-ferentiated, ever-growing context that mixes useful evidence with redundant or erroneous reasoning; this full-history routing exposes downstream agents to low-value context and inflates inference cost. These two approaches have opposite limitations: conditioning on the query alone observes too little, committing before execution begins, which hurts accuracy, while conditioning on the full execution history (Figure 1a) observes too much, forcing each decision to process an unfiltered and growing tra-arXiv:2609.00237v1 [cs.AI] 31 Aug 2026 Execution   
+
+> History
+> Read full history
+> Read full history
+> Read full history
+> Router
+> Write
+> Write
+> Write
+> Cost Context overload (a) Full-History Routing Gated
+> Execution
+> Memory
+> Router
+> Retriever
+> Writer
+> Relevant context Cost
+> Halt Controller
+> (b) Gated-Memory Routing
+
+Figure 1: Full-history routing feeds each decision the entire trajectory, raising context length and cost. Gated-memory routing instead maintains a selective memory through write and retrieval gates and halts when further collaboration is unlikely to add value, keeping context relevant and cost low. 
+
+jectory, which inflates cost. A router should instead learn what to retain, what to surface, and how to act on the resulting state. This motivates condition-ing routing on a structured, selective memory (Fig-ure 1b): the system dynamically routes based on a gated memory, exposes only step-relevant context to downstream agents, and commits only the rea-soning steps worth preserving. These decisions are tightly coupled: low-quality writes pollute later re-trieval, overly broad retrieval distracts downstream agents, and fixed-depth execution either stops pre-maturely or continues spending computation after additional reasoning is unlikely to help. Based on this view, we introduce Gated-Memory Routing , a framework in which a learned, gated execution memory serves as the shared state that every routing decision conditions on. A single jointly trained router acts on it through comple-mentary components: a History-Aware Role Allo-cator and an LLM Router choose the agent and its backbone, a Retrieval Gate surfaces a compact, step-relevant subset of memory, a Memory Write Gate commits only high-utility, non-redundant rea-soning steps, and an Adaptive Halting Controller 
+
+decides when the gated state is sufficient to stop. Because routing is driven by this gated memory rather than the raw history, the interaction structure emerges dynamically during execution. 
+
+Contributions. 
+
+• Routing over a learned gated memory. We recast multi-agent orchestration as routing over a learned, selective execution memory: each step conditions on a filtered task-relevant state rather than the query alone (query-only) or the raw execution history (full-history). • Memory curation and budget-aware halt-ing. Learned write and retrieval gates control what memory stores and surfaces, keeping the state compact and high-signal, while a budget-aware halting policy consumes that clean state to control reasoning depth and thus cost, all trained end-to-end with role and backbone routing under a group-relative, cost-aware ob-jective. • Empirical effectiveness and efficiency. 
+
+Across MATH, GSM-Hard, MBPP, Hu-manEval, and MMLU-Pro, Gated-Memory Routing attains the best average accuracy, ex-ceeding the strongest baseline by 2.44 points while cutting HumanEval inference cost by 
+
+31 .9% relative to that baseline. 
+
+2 Related Work 
+
+Fixed and Role-Based Multi-Agent Systems. 
+
+Representative LLM-based multi-agent systems de-sign collaboration through predefined roles and static interaction graphs. MetaGPT (Hong et al., 2024) enforces role-based workflows through Stan-dard Operating Procedures, while ChatDev (Qian et al., 2024) models software development as a fixed linear chain. These systems demonstrate the value of specialization, but their communication patterns are fixed before execution begins and can-not adapt the participating agents, context, or depth as execution unfolds. Adaptive Topology and Graph Optimization. 
+
+Several methods make workflows more flexi-ble by adapting interaction structures or optimiz-ing communication graphs. GPTSwarm (Zhuge et al., 2024) optimizes orchestration through learnable prompting, and AFlow (Zhang et al., 2025b) searches over executable workflows. AgentPrune (Zhang et al., 2025a) and Agent-Dropout (Wang et al., 2025) induce sparsity by pruning connections or agents from predefined tem-plates. DyLAN (Liu et al., 2024) goes further by pruning low-contribution agents during infer-ence using peer evaluation and consensus, and OMAC (Li et al., 2026) jointly optimizes agent functionality and collaboration structure. These methods improve flexibility by optimizing which agents participate and how they are connected, but they do not learn which intermediate information subsequent orchestration decisions should condi-tion on; DyLAN, for example, adapts by removing agents while still forwarding the unfiltered outputs of the remaining ones. 
+
+Query-Level LLM and MAS Routing. LLM routing optimizes the trade-off between model cost and capability. RouteLLM (Ong et al., 2025), RouterDC (Chen et al., 2024b), R2-Router (Xue et al., 2026), HW-Router (Kabir et al., 2026), Securerouter (Zhang et al., 2026) and Frugal-GPT (Chen et al., 2024a) route each query to a cost-effective model. In multi-agent systems, MAS-Router (Yue et al., 2025) trains an RL policy to configure execution components, including agent count, role assignment, and backbone selection, from the input query. These methods make rout-ing more cost-aware and task-adaptive, but their decisions are primarily conditioned on the query rather than on the unfolding execution trajectory. They therefore cannot revise orchestration based on the quality, novelty, or redundancy of intermediate trajectory elements. 
+
+Routing over the Execution History. Recent work addresses the query-only routing limitation by conditioning orchestration on the unfolding exe-cution state. Evolving Orchestration (Dang et al., 2025) uses RL to train a centralized orchestrator that selects agents from the evolving execution state and terminates through a designated stopping ac-tion. This makes routing responsive to execution, but the state retains the accumulated trajectory with limited filtering, so intermediate elements are car-ried forward to later decisions. Such full-history routing can lead to execution-history overload as execution deepens, forcing later decisions to pro-cess redundant, noisy, or low-utility intermediate content. Our framework instead routes through a gated execution memory, conditioning each de-cision on a filtered state rather than the unfiltered history, and outperforms Evolving Orchestration by 
+
+2.44 average points across the benchmarks in Ta-ble 1. Our adaptive halting also relates to adaptive computation (Graves, 2016) and early-exit infer-ence, which learn when to stop computing within a single model; in contrast, it halts multi-agent collaboration based on the gated memory state. 
+
+Memory-Optimized Agent Architectures. 
+
+Memory management is a core component of agent systems. MemGPT (Packer et al., 2023) pages information in and out of context through a virtual memory hierarchy, AIOS (Mei et al., 2025) manages memory as a shared OS-level resource for agents, and systems such as A-mem (Xu et al., 2025) and MM (Hatalis et al., 2023) organize memory through categorization and retrieval. Memory-R1 (Yan et al., 2026) uses reinforcement learning to train a single agent’s policies for writing to and retrieving from a long-term memory over an external store. These systems primarily treat memory as a storage and retrieval substrate, optimizing what information should be preserved or recalled under a context budget. In contrast, Gated-Memory Routing treats the within-query execution memory of a multi-agent trajectory as an active control signal: write and retrieval decisions are trained jointly with role allocation, backbone routing, and halting under the task-level reward, so memory not only supplies context but also determines who acts next, what they read, and when collaboration stops. 
+
+3 Methodology 
+
+3.1 Problem Definition 
+
+We formalize gated-memory routing as a sequential decision process over a set of agent specializations 
+
+R, a pool of heterogeneous LLM backbones M,and an execution memory St maintained within a single query execution. At step t, the observable state is st = ( q, S t−1), where St−1 holds the re-tained execution records from prior steps. The sys-tem selects a specialization rt ∈ R and a backbone 
+
+mt ∈ M , retrieves a context subset Ct ⊆ St−1,generates a reasoning step yt, and decides whether History-aware          
+
+> Role Allocator
+> Retrieval
+> Gate
+> Role r 2LLM m 2Resp y 2
+> Execution Memory S
+> Query q
+> Adaptive
+> Halting
+> Controller
+> LLM Router
+> Aggregator
+> Final Answer y
+> Halt
+> 1
+> 2
+> 34
+> Agent
+> Retrieved
+> context C t
+> Memory Write
+> Gate
+> Write/Skip
+> Role r t
+> LLM m t
+> Role r tLLM m t
+> St-1
+> Response
+> yt
+> Continue to next step
+> Role r 1LLM m 1Resp y 1Role r t-1 LLM m t-1 Resp y t-1
+> St
+> State s t
+
+Figure 2: Gated-Memory Routing framework. At each step t, the system constructs a state st = ( q, S t−1) from the query and current execution memory. A role allocator and LLM router configure the next agent, a retrieval gate supplies relevant memory context, and a write gate decides whether the new execution record enters memory. The halting controller either continues the loop or passes the stored records to an Aggregator LLM for the final answer. 
+
+to commit the record et = ( rt, m t, y t), so mem-ory evolves as a gated subset of the trajectory, 
+
+St ⊆ { ei}ti=1 . The process terminates at a realized depth L ∈ { 1, . . . , ϕ } when the halting policy fires or the maximum depth ϕ is reached; because halt-ing is evaluated after each step, at least one agent always acts. An aggregator then produces the final answer from the terminal state SL. Throughout, boldface denotes the frozen sentence embedding of a quantity (e.g., q = enc( q)). Writing τ<t = {ei}t−1 
+
+> i=1
+
+for the full raw trajectory before step t, routing strategies differ in the state each decision sees: query-only routing conditions on q alone, full-history routing on q and the entire 
+
+τ<t , and gated-memory routing on st = ( q, S t−1),pairing the query with a learned selective memory derived from τ<t that keeps only selected records. 
+
+3.2 Framework Overview 
+
+Figure 2 illustrates Gated-Memory Routing. Its central object is the gated execution memory St
+
+that every decision conditions on. A single jointly trained router acts over it through complementary components: a Memory Write Gate (Section 3.6) and Retrieval Gate (Section 3.5) keep the memory high-signal, so the History-Aware Role Allocator 
+
+(Section 3.3) and LLM Router (Section 3.4) choose from a gated execution state, while the Adaptive Halting Controller (Section 3.7) reads that state to decide when to stop, making depth, and thus cost, adaptive. Because the memory stays compact and trustworthy, it can halt early without the overload full-history routing incurs. The trajectory is trained end-to-end with a single reward trading answer quality against cost (Section 3.8); encoders and representations appear in Appendix 8. 
+
+3.3 History-Aware Role Allocator 
+
+Role allocation chooses which agent specialization acts at each step. Rather than committing from the query alone or reacting to the full raw trajec-tory, our allocator conditions on the current state 
+
+st = ( q, S t−1), so the next specialization comple-ments the retained solution state rather than every intermediate step produced. Because specializations such as a critic, verifier, or debugger carry semantic structure rather than being interchangeable IDs, we represent each role through its textual description rather than a categor-ical label. The description is encoded and projected through a Variational Autoencoder (VAE) (Kingma and Welling, 2014) into a continuous latent role em-bedding ri. A state encoder maps st = ( q, S t−1)
+
+to a context vector ct, and the allocator defines a stochastic policy over the available roles R:
+
+πr(ri | st) = exp( c⊤ 
+
+> t
+
+ri)
+
+P  
+
+> rj∈R
+
+exp( c⊤ 
+
+> t
+
+rj ) .
+
+This policy selects the specialization whose latent description best matches the query and current memory state, supporting transfer across related roles and extension to newly described specializa-tions without changing the routing interface. 3.4 LLM Router 
+
+Backbone selection matches the current reasoning need to a model’s capability and cost. Because this need depends on the selected role and the progress already in memory (a difficult step may warrant a stronger model, while memory may already supply enough guidance for a cheaper one), we model LLM routing as a role-conditioned policy over the current state st rather than a query-level choice. The router combines the state context ct with the selected role representation via a learned pro-jection to form a role-conditioned context ut. Each candidate LLM is represented by a continuous la-tent capability vector mi, derived from its natural-language description using the same description-encoding scheme as the role allocator, rather than by a fixed index. The router samples the backbone according to 
+
+πm(mi | st, r t) = exp( u⊤ 
+
+> t
+
+mi)
+
+P  
+
+> mj∈M
+
+exp( u⊤ 
+
+> t
+
+mj ) .
+
+This lets the system route each step to a model whose described capabilities match the current role and memory state. 
+
+3.5 Retrieval Gate 
+
+Even a selective memory should not be exposed wholesale to every agent: many retained records belong to other subproblems or roles irrelevant to the agent about to act, so passing all of them inflates token cost and buries the entries that matter. A fixed top-k retriever is equally rigid, since some steps need broad context while others need one record or none. The Retrieval Gate therefore treats context construction as a step-adaptive selection, deciding independently for each record whether to surface it. Each stored record is summarized by an embed-ding vj that fuses its role latent, backbone latent, and a projection of its response, and the current step forms a retrieval query pt by the analogous fusion of the query with the role and backbone just selected. The gate therefore asks which prior records a step of this configuration should read: for record j, the retrieval logit and binary decision are 
+
+ℓt,j = p⊤ 
+
+> t
+
+vj , zt,j ∼ Bernoulli( σ(ℓt,j )) ,
+
+and the retrieved context is 
+
+Ct = {ej ∈ St−1 : zt,j = 1 }.
+
+Because the draws are independent, Ct varies in size, contracting toward empty when memory is largely irrelevant and expanding when several records bear on the step. Independence keeps each decision local; cross-record redundancy is instead suppressed at write time (Section 3.6). The gate has no cost term of its own: retrieving more records lengthens the agent prompt and is paid for only through the trajectory reward (Section 3.8). 
+
+3.6 Memory Write Gate 
+
+What the system writes to memory determines the state on which all later decisions are based. If every intermediate element is appended, gated memory collapses back into full-history routing, and redun-dant records crowd memory and dilute retrieval. The Memory Write Gate therefore treats memory construction as a selective decision rather than a default append: a new record should enter memory only when it is both relevant to the task and novel with respect to the records already stored. We score this relevance–novelty trade-off with a Maximal Marginal Relevance criterion (Carbonell and Goldstein, 1998), but replace its fixed compo-nents with learned, stochastic ones. Let ct denote the current context state (Section 3.3), yt the em-bedding of the new reasoning step, and {yj } the embeddings of stored steps, and let sim( ·, ·) be a cosine similarity taken in a learned projection of these frozen embeddings, so the relevance and nov-elty geometry is trained rather than prescribed. The write score is 
+
+ωt = λ sim( yt, ct)−(1 −λ) max  
+
+> j:ej∈St−1
+
+sim( yt, yj ),
+
+with a learned coefficient λ ∈ (0 , 1) balancing rel-evance against redundancy with stored records; the novelty term is dropped when memory is empty, so the first record is admitted on relevance alone. Rather than greedily keeping the top-scoring record as in deterministic MMR, we sample the write de-cision wt ∼ Bernoulli( σ(ωt)) , keeping memory construction trainable under the same policy objec-tive as the routing decisions. The novelty criterion controls cross-record redundancy, allowing the re-trieval gate (Section 3.5) to score records indepen-dently. As a result, memory remains a compact representation of execution progress rather than accumulating into a transcript. 
+
+3.7 Adaptive Halting Controller 
+
+Reasoning depth is a major driver of cost, yet a depth fixed from the query commits this budget before the system observes how execution unfolds. We therefore make depth a consequence of exe-cution: after each step the Adaptive Halting Con-troller decides whether the memory holds sufficient evidence for aggregation or another agent should act. Whether recent steps still add evidence is a trend no single-step snapshot captures, so the controller carries a recurrent state hhalt  
+
+> t
+
+=GRU( hhalt  
+
+> t−1
+
+, enc( St)) that integrates a pooled sum-mary of the post-write memory across steps, kept separate from the query-attended routing context 
+
+ct. It then samples a halt action 
+
+ht ∼ Bernoulli 
+
+
+
+σ
+
+
+
+MLP( hhalt  
+
+> t
+
+)
+
+ 
+
+.
+
+Because the decision is evaluated only after the step’s agent has executed, at least one agent al-ways runs. If ht = 1 the stored records pass to the Aggregator LLM; otherwise execution continues to the maximum depth ϕ. The halt action is opti-mized under the same trajectory-level reward as the other decisions (Section 3.8), so reasoning depth co-adapts with routing. 
+
+3.8 Optimization 
+
+The routing stack couples several discrete stochas-tic decisions (role, backbone, retrieval, write, and halt), and their number varies with the halt-determined depth, so we optimize the trajectory with policy gradients rather than backpropagating through sampled actions. Because queries dif-fer widely in difficulty, a single trajectory base-line is noisy; we instead train all policies jointly with a group-relative advantage in the spirit of GRPO (Shao et al., 2024), using G rollouts of each query as a per-query baseline without a learned critic. For each query we sample G trajectories that differ only in their sampled decisions. Trajectory 
+
+τi has utility ui = Ri − λc Cost( τi), where Ri ∈{0, 1} is task success, Cost( τi) sums the per-step backbone costs, and λc sets the accuracy–cost trade-off (Appendix 9). Centering each utility within its group yields the advantage 
+
+Ai = ui − 1
+
+G
+
+X
+
+> i′∈G (i)
+
+ui′ ,
+
+a per-query baseline that cancels difficulty without a critic. We deliberately drop the usual within-group standard-deviation normalization: when rollouts for a query share near-identical rewards, the standard deviation approaches zero and in-flates the advantage from negligible cost differ-ences, whereas the centered advantage remains well-scaled. The same advantage weights every sampled action. With log πi the summed log-probability of all role, backbone, retrieval, write, and halt actions in τi, the objective is 
+
+L = −mean i[log πi sg( Ai)]+ α LVAE −cH ¯H(π),
+
+where sg is stop-gradient, LVAE regularizes the role and backbone encoders (Appendix 8), and 
+
+¯H(π) is the mean per-step entropy of the routing and halt policies. The entropy term discourages premature deterministic behavior; Appendix 12 verifies empirically that the trained gates do not col-lapse to trivial always-write, never-write, retrieve-all, or retrieve-none solutions. The LLM backbones and sentence encoder are frozen, so the router is the only trained component, updated jointly by a single optimizer. 
+
+4 Experimental Setup 
+
+Datasets and Benchmarks. We evaluate on five benchmarks spanning mathematical reasoning, pro-gram synthesis, and knowledge-intensive ques-tion answering: GSM-Hard (Gao et al., 2023), MATH (Hendrycks et al., 2021), HumanEval (Chen et al., 2021), MBPP (Austin et al., 2021), and MMLU-Pro (Wang et al., 2024). 
+
+Baselines. Our baselines span single-model inference; single-agent reasoning (CoT (Wei et al., 2022), Complex-CoT (Fu et al., 2023)); fixed-topology multi-agent collaboration (MacNet-Chain, -Tree, and -Complete (Qian et al., 2025)); adaptive workflow optimization (AFlow (Zhang et al., 2025b)); evolving orchestration (Pup-peteer (Dang et al., 2025)); and query-only routing (MASRouter (Yue et al., 2025)). 
+
+LLM Backbones. We route over five open-weight LLMs: llama-3.2-3B, llama-3.1-8B (Grattafiori et al., 2024), mistral-nemo-12B (Mistral AI Team, 2024), qwen-2.5-14B, and qwen-2.5-32B (Yang et al., 2024). This 3B–32B heterogeneous pool allows the router to trade off capability and inference cost. To quantify the accuracy–cost trade-off, we assign each backbone a price proportional to its parameter count, a hardware-independent proxy for per-token inference compute (Appendix 9). Backbone capability descriptions are listed in Appendix 16. 4.1 Implementation Details 
+
+We train with Adam optimizer using learning rate 
+
+0.01 , GRPO group size G = 6 , and 16 queries per batch. We set maximum depth ϕ = 6 , cost penalty 
+
+λc ∈ { 10 , 20 , 50 }, entropy coefficient cH = 0 .01 ,and VAE regularizer weight α = 0 .001 . For the fixed-topology multi-agent baselines, we set the number of agents equal to our maximum depth 
+
+ϕ = 6 , so every multi-agent method operates un-der the same agent budget. We use the same 26 
+
+heterogeneous role profiles as MASRouter (Yue et al., 2025), spanning programming agents with compiler access to research-oriented agents with external knowledge sources; full descriptions are in Appendix 14. For final aggregation, we use the LLM backbone selected most frequently across the query’s reasoning steps. The aggregation prompt is provided in Appendix 15. 
+
+5 Results 
+
+5.1 Performance Analysis 
+
+Table 1 shows that Gated-Memory Routing achieves the strongest overall performance: it at-tains the best average accuracy and the top result on four of the five benchmarks, improving on the strongest baseline by 2.44 points on average. The gains are most pronounced on GSM-Hard and Hu-manEval, where intermediate reasoning quality and selective context matter most; the one exception is MBPP, where a fixed multi-agent chain topology powered by qwen-2.5-14B edges ahead at pass@1 but trails on every other benchmark and on aver-age. On MBPP our method is comparable to MAS-Router ( 79 .60 vs. 79 .20 ) and ahead of Puppeteer-32B ( 74 .80 ), while several fixed MacNet config-urations score highest. MBPP’s short, relatively uniform problems appear to benefit from a fixed pipeline built on a strong code model, leaving less room for adaptive orchestration to help; the benefit of gated memory is most visible where reasoning is longer and more heterogeneous. The comparison is sharpest against the two paradigms our method is built to improve on. MAS-Router routes from the query alone, committing ev-ery decision before any reasoning exists, and trails by 3.46 points. Puppeteer orchestrates agents over the evolving execution state but does not route over the pool, running every step on the largest back-bone in the pool (qwen-2.5-32B), and still trails by 2.44 points. Gated-memory routing conditions each decision on a filtered state instead, and is the 10 −3 10 −2 10 −1 
+
+> Inference token cost (log scale) 65 70 75 80 85 90 Accuracy (%)
+> HumanEval
+> llama-3.2-3B llama-3.1-8B mistral-nemo-12B qwen-2.5-14B qwen-2.5-32B LLM pool Single LLM CoT Complex-CoT MacNet-chain MacNet-tree MacNet-complete MASRouter Puppeteer AFlow Ours Pareto frontier
+
+Figure 3: Accuracy versus inference token cost on Hu-manEval, with cost on a log scale. Our method lies on the high-accuracy end of the Pareto frontier, achieving the highest accuracy among compared methods while using substantially less inference cost than the strongest multi-agent and routing baselines. 
+
+most accurate of the three on every benchmark, even though it routes over a heterogeneous pool rather than relying on the largest model alone. The gain is therefore not a matter of raw scale but of how well roles, backbones, and memory are co-ordinated as the trajectory unfolds. Appendix 11 reports the mean and standard deviation over three training seeds for our method and both routing base-lines; the ranking of the three methods is identical under every seed. 
+
+5.2 Cost Analysis 
+
+Figure 3 places our method on the Pareto frontier of accuracy against inference cost on HumanEval, where it costs 43 .86% less than MASRouter and 
+
+31 .9% less than Puppeteer (qwen-2.5-32B) while remaining more accurate than both, gaining on cost and accuracy at once rather than trading one for the other. The GSM-Hard frontier in Appendix 10 shows the same pattern. Appendix 9 additionally reports approximate FLOPs and batch-amortized wall-clock time per query on HumanEval and MBPP, which give the same ordering. These savings come from where computation is spent. Because each decision conditions on a com-pact, gated memory rather than the full execution history, the halting controller can stop once that memory carries enough evidence, so easy queries terminate early and only the hard ones run deep. The gates contribute indirectly: a clean memory makes halting trustworthy and spares downstream agents the redundant context that inflates prompts Method LLM Mul. Rout. MATH GSM-Hard MBPP HumanEval MMLU-Pro Avg. Single LLM llama-3.2-3B ✗ ✗ 43.27 25.85 52.20 62.79 34.00 43.62 llama-3.1-8B ✗ ✗ 43.75 39.87 57.60 69.78 48.25 51.85 mistral-nemo-12B ✗ ✗ 42.07 30.11 56.00 68.22 27.75 44.83 qwen-2.5-14B ✗ ✗ 75.72 64.58 71.80 82.95 65.25 72.06 qwen-2.5-32B ✗ ✗ 78.37 61.52 79.00 84.37 66.02 73.86 CoT (Wei et al., 2022) qwen-2.5-14B ✗ ✗ 77.88 67.52 70.80 82.17 62.16 72.11 qwen-2.5-32B ✗ ✗ 78.85 64.56 77.20 85.15 68.41 74.83 Complex-CoT (Fu et al., 2023) qwen-2.5-14B ✗ ✗ 75.96 66.76 70.40 80.62 63.07 71.36 qwen-2.5-32B ✗ ✗ 77.16 65.32 78.40 85.47 68.41 74.95 MacNet-Chain (Qian et al., 2025) qwen-2.5-14B ✓ ✗ 73.80 59.75 82.66 86.82 61.48 72.90 qwen-2.5-32B ✓ ✗ 77.64 61.93 80.73 83.80 67.95 74.41 MacNet-Tree (Qian et al., 2025) qwen-2.5-14B ✓ ✗ 76.68 60.32 79.84 82.95 60.68 72.09 qwen-2.5-32B ✓ ✗ 77.88 62.31 80.71 86.02 67.73 74.93 MacNet-Complete (Qian et al., 2025) qwen-2.5-14B ✓ ✗ 77.16 59.00 80.65 84.50 61.48 72.56 qwen-2.5-32B ✓ ✗ 79.09 62.22 81.20 86.05 67.16 75.14 AFlow (Zhang et al., 2025b) qwen-2.5-14B ✓ ✗ 63.46 58.24 70.00 85.27 64.66 68.33 qwen-2.5-32B ✓ ✗ 77.64 67.05 76.40 84.50 68.41 74.80 Puppeteer (Dang et al., 2025) qwen-2.5-14B ✓ ✗ 75.00 65.91 72.58 83.59 65.23 72.46 qwen-2.5-32B ✓ ✗ 79.09 68.75 74.80 85.16 68.64 75.29 MASRouter (Yue et al., 2025) LLM Pool ✓ ✓ 74.31 66.00 79.20 85.16 66.70 74.27          
+
+> Ours LLM Pool ✓✓79.33 70.55 79.60 89.84 69.32 77.73
+
+Table 1: Test accuracy (%) across five benchmarks; MBPP and HumanEval report pass@1. Mul. indicates multi-agent execution, and Rout. indicates routing over the LLM backbone pool. Best results are in bold , and second-best results are underlined. “LLM Pool” denotes the full five-model pool. 
+
+under full-history routing. Section 5.5 compares the three paradigms directly: gated-memory rout-ing is at least as accurate as full-history routing while costing appreciably less, and is both more accurate and cheaper than query-only routing. 
+
+5.3 Ablation Study 
+
+Configuration GSM-Hard HumanEval Acc. Cost Acc. Cost Full system 70.55 0.587 89.84 0.032 w/o role allocator 68.37 0.400 85.94 0.043 w/o LLM router 56.53 0.555 71.88 0.026 w/o retrieval gate 69.22 0.488 85.94 0.034 w/o write gate 66.67 0.621 84.38 0.037 w/o halting 70.08 0.840 86.72 0.086 w/o both memory gates 67.99 0.447 83.59 0.033 
+
+Table 2: Leave-one-out ablation. Each row disables one routing module while keeping the others active. We report accuracy (%) and total test-set cost on GSM-Hard and HumanEval. 
+
+Table 2 reports a leave-one-out ablation, each variant replacing one module with a default: w/o role allocator uses random role selection, w/o LLM router random backbone selection, w/o retrieval gate exposes the full memory to each agent, w/o write gate writes every response to memory, and 
+
+w/o halting runs every query to the maximum depth 
+
+ϕ. The effects split cleanly along the division of labor the method is built around. The two rout-ing decisions carry accuracy: dropping the LLM router is by far the most damaging change (a 14 .0-point drop on GSM-Hard), and dropping the role allocator costs a smaller but consistent amount, so matching model capacity and specialization to the current state is what drives answer quality. The memory gates also serve accuracy through the quality of the memory state: removing either lowers accuracy, because unfiltered context dilutes what each agent and the router condition on. Dis-abling both gates at once ( w/o both memory gates )lowers accuracy by 2.56 points on GSM-Hard and 
+
+6.25 on HumanEval, so selective memory matters even with the router and role allocat Halting is the lever that controls cost: without it, inference cost rises by over 40% on GSM-Hard and more than doubles on HumanEval, while accuracy also slips, since most queries are solved before the depth limit and the extra steps add computation with-out improving answers. The w/o halting variant also provides an equal-depth comparison with the fixed-topology baselines: executing all six steps, it reaches 70 .08 on GSM-Hard, above every MacNet-32B variant ( 61 .93 –62 .31 , Table 1) at lower cost (Appendix 10), because each step is still routed to an appropriate backbone rather than the largest one. Halting also reduces training-time compu-tation: disabling it raises the number of training rollout steps by about 1.8× on both benchmarks (Appendix 13). 2 4 6 8 10 Maximum depth ϕ      
+
+> 75 76 77 78 79 80 Accuracy (%)
+> default
+> Accuracy Token cost 0.4 0.6 0.8 1.0 1.2 1.4 Per-query token cost ( 10 −3 )Figure 4: Effect of the maximum depth ϕon MATH: test accuracy (left axis) and per-query inference token cost (right axis). ϕ= 6 is the default used elsewhere in the paper.
+
+5.4 Effect of the Depth Budget 
+
+Figure 4 varies the maximum depth ϕ on MATH with adaptive halting left in place. Accuracy in-creases with the budget but saturates: most of the gain is realized by ϕ = 6 , with under a point more from ϕ = 6 to ϕ = 10 as cost keeps climbing. Small budgets truncate useful reasoning on the harder problems, while larger ones mostly add cost, since halting already stops easy queries early re-gardless of the ceiling. The default ϕ = 6 thus sits near the knee of the accuracy–cost curve, capturing nearly all the attainable accuracy before the budget begins buying cost more than accuracy. 
+
+5.5 Routing-Paradigm Comparison 
+
+We contrast Gated-Memory Routing with the two routing paradigms it is built to improve on. Query-only routing fixes every decision from the input query before execution begins; we instantiate it with MASRouter, the strongest query-only router among our baselines. Under full-history routing, the per-step role and backbone allocation is condi-tioned on the accumulated history, and all interme-diate reasoning is forwarded as context to the next agent. Gated-memory routing is our full system. Table 3 compares the three.                  
+
+> GSM-Hard HumanEval Routing paradigm Acc. (%) Cost Acc. (%) Cost Query-only (MASRouter) 66.00 1.012 85.16 0.057 Full-history 70.27 0.985 89.06 0.068 Gated-memory (ours) 70.55 0.587 89.84 0.032
+> Table 3: Comparison of the three routing paradigms on GSM-Hard and HumanEval.
+
+Full-history routing conditions each decision on the entire accumulated trajectory, increasing con-text length and reasoning overhead. The additional context does not appear to improve accuracy here: full-history routing is roughly on par with the cu-rated memory ( 70 .27 vs 70 .55 on GSM-Hard and 
+
+89 .06 vs 89 .84 on HumanEval), while the gated memory attains comparable accuracy at apprecia-bly lower cost (about 40% on GSM-Hard and over 
+
+50% on HumanEval). Query-only routing tends to be the least accurate of the three. These results sug-gest that, in our setting, curating the memory rather than forwarding the full history largely preserves accuracy while reducing cost. 
+
+6 Conclusion 
+
+We presented Gated-Memory Routing , a frame-work for dynamic multi-agent coordination that conditions routing decisions on a learned, gated execution memory rather than on the query alone or the full raw history. A Memory Write Gate and a Retrieval Gate keep this memory compact and task-relevant, enabling role and backbone routing to operate over a filtered execution state. An Adap-tive Halting Controller uses the same memory to decide when to stop, adapting reasoning depth and cost to each query. Across five benchmarks, our method attains the best average accuracy, exceed-ing the strongest baseline by 2.44 points, while reducing HumanEval inference cost by 31 .9% rel-ative to that baseline. Future work will extend gated-memory routing to open-ended generation, larger-scale agent ecosystems, and pools of more recent backbone models, and explore richer reward signals beyond binary task success. 
+
+Limitations 
+
+Our evaluation uses closed-domain tasks with veri-fiable answers, enabling automatic reward computa-tion; open-ended generation would require reward models, human evaluation, or other supervision. Our efficiency analysis: parameter count provides a hardware-independent compute proxy but does not capture latency, memory pressure, or batching, while FLOPs and wall-clock measurements in Ap-pendix 9 cover only two benchmarks. Finally, we evaluate open-weight Qwen2.5, Llama-3, and Mis-tral models; backbones can be substituted through their capability profiles and per-token costs without changing the framework. References 
+
+Jacob Austin, Augustus Odena, Maxwell Nye, Maarten Bosma, Henryk Michalewski, David Dohan, Ellen Jiang, Carrie Cai, Michael Terry, Quoc Le, and 1 others. 2021. Program synthesis with large language models. arXiv preprint arXiv:2108.07732 .Jaime Carbonell and Jade Goldstein. 1998. The use of mmr, diversity-based reranking for reordering doc-uments and producing summaries. In Proceedings of the 21st Annual International ACM SIGIR Confer-ence on Research and Development in Information Retrieval , SIGIR ’98, page 335–336, New York, NY, USA. Association for Computing Machinery. Lingjiao Chen, Matei Zaharia, and James Zou. 2024a. FrugalGPT: How to use large language models while reducing cost and improving performance. Trans-actions on Machine Learning Research . Featured Certification. Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Pondé de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, Alex Ray, Raul Puri, Gretchen Krueger, Michael Petrov, Heidy Khlaaf, Girish Sastry, Pamela Mishkin, Brooke Chan, Scott Gray, and 39 others. 2021. Evaluating large language models trained on code. CoRR , abs/2107.03374. Shuhao Chen, Weisen Jiang, Baijiong Lin, James Kwok, and Yu Zhang. 2024b. RouterDC: Query-based router by dual contrastive learning for assembling large language models. In The Thirty-eighth Annual Conference on Neural Information Processing Sys-tems .Weize Chen, Yusheng Su, Jingwei Zuo, Cheng Yang, Chenfei Yuan, Chi-Min Chan, Heyang Yu, Yaxi Lu, Yi-Hsin Hung, Chen Qian, Yujia Qin, Xin Cong, Ruobing Xie, Zhiyuan Liu, Maosong Sun, and Jie Zhou. 2024c. Agentverse: Facilitating multi-agent collaboration and exploring emergent behaviors. In 
+
+The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. Yufan Dang, Chen Qian, Xueheng Luo, Jingru Fan, Zihao Xie, Ruijie Shi, Weize Chen, Cheng Yang, Xiaoyin Che, Ye Tian, Xuantang Xiong, Lei Han, Zhiyuan Liu, and Maosong Sun. 2025. Multi-agent collaboration via evolving orchestration. In The Thirty-ninth Annual Conference on Neural Informa-tion Processing Systems .Yilun Du, Shuang Li, Antonio Torralba, Joshua B. Tenenbaum, and Igor Mordatch. 2024. Improving factuality and reasoning in language models through multiagent debate. In Forty-first International Con-ference on Machine Learning .Yao Fu, Hao Peng, Ashish Sabharwal, Peter Clark, and Tushar Khot. 2023. Complexity-based prompting for multi-step reasoning. In The Eleventh International Conference on Learning Representations, ICLR 2023, Kigali, Rwanda, May 1-5, 2023 . OpenReview.net. Luyu Gao, Aman Madaan, Shuyan Zhou, Uri Alon, Pengfei Liu, Yiming Yang, Jamie Callan, and Graham Neubig. 2023. Pal: program-aided lan-guage models. In Proceedings of the 40th Interna-tional Conference on Machine Learning , ICML’23. JMLR.org. Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schel-ten, Alex Vaughan, Amy Yang, Angela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mi-tra, Archie Sravankumar, Artem Korenev, Arthur Hinsvark, and 542 others. 2024. The llama 3 herd of models. Preprint , arXiv:2407.21783. Alex Graves. 2016. Adaptive computation time for recurrent neural networks. ArXiv , abs/1603.08983. Kostas Hatalis, Despina Christou, Joshua Myers, Steven J. Jones, Keith Lambert, Adam Amos-Binks, Zohreh A. Dannenhauer, and Dustin Dannenhauer. 2023. Memory matters: The need to improve long-term memory in llm-agents. In Proceedings of the 2023 AAAI Fall Symposia, Arlington, Virginia, USA, October 25-27, 2023 , pages 277–280. AAAI Press. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. 2021. Measuring mathematical problem solving with the MATH dataset. In Thirty-fifth Conference on Neural Information Processing Systems Datasets and Benchmarks Track (Round 2) .Sirui Hong, Mingchen Zhuge, Jonathan Chen, Xiawu Zheng, Yuheng Cheng, Jinlin Wang, Ceyao Zhang, Zili Wang, Steven Ka Shing Yau, Zijuan Lin, Liyang Zhou, Chenyu Ran, Lingfeng Xiao, Chenglin Wu, and Jürgen Schmidhuber. 2024. MetaGPT: Meta pro-gramming for a multi-agent collaborative framework. In The Twelfth International Conference on Learning Representations .Ahasan Kabir, Jiaqi Xue, Mengxin Zheng, and Qian Lou. 2026. HW-Router: Hardware-aware routing for scalable multi-LLM serving. In Proceedings of the 63rd Design Automation Conference (DAC) .Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. 2020. Scaling laws for neural language models. CoRR ,abs/2001.08361. Diederik P. Kingma and Max Welling. 2014. Auto-encoding variational bayes. In 2nd International Conference on Learning Representations, ICLR 2014, Banff, AB, Canada, April 14-16, 2014, Conference Track Proceedings .Guohao Li, Hasan Abed Al Kader Hammoud, Hani Itani, Dmitrii Khizbullin, and Bernard Ghanem. 2023. CAMEL: Communicative agents for ”mind” explo-ration of large language model society. In Thirty-seventh Conference on Neural Information Process-ing Systems .Shijun Li, Hilaf Hasson, and Joydeep Ghosh. 2026. OMAC: A holistic optimization framework for LLM-based multi-agent collaboration. In Forty-third Inter-national Conference on Machine Learning .Tian Liang, Zhiwei He, Wenxiang Jiao, Xing Wang, Yan Wang, Rui Wang, Yujiu Yang, Shuming Shi, and Zhaopeng Tu. 2024. Encouraging divergent thinking in large language models through multi-agent debate. In Proceedings of the 2024 Conference on Empiri-cal Methods in Natural Language Processing , pages 17889–17904, Miami, Florida, USA. Association for Computational Linguistics. Zijun Liu, Yanzhe Zhang, Peng Li, Yang Liu, and Diyi Yang. 2024. A dynamic LLM-powered agent net-work for task-oriented agent collaboration. In First Conference on Language Modeling .Kai Mei, Xi Zhu, Wujiang Xu, Mingyu Jin, Wenyue Hua, Zelong Li, Shuyuan Xu, Ruosong Ye, Yingqiang Ge, and Yongfeng Zhang. 2025. AIOS: LLM agent operating system. In Second Conference on Language Modeling .Mistral AI Team. 2024. Mistral nemo. https: //mistral.ai/news/mistral-nemo/ . Accessed: 2026-08-28. Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chi-ang, Tianhao Wu, Joseph E. Gonzalez, M Waleed Kadous, and Ion Stoica. 2025. RouteLLM: Learning to route LLMs from preference data. In The Thir-teenth International Conference on Learning Repre-sentations .Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G. Patil, Ion Stoica, and Joseph E. Gonzalez. 2023. MemGPT: Towards llms as operating systems. 
+
+arXiv preprint arXiv:2310.08560 .Chen Qian, Wei Liu, Hongzhang Liu, Nuo Chen, Yufan Dang, Jiahao Li, Cheng Yang, Weize Chen, Yusheng Su, Xin Cong, Juyuan Xu, Dahai Li, Zhiyuan Liu, and Maosong Sun. 2024. ChatDev: Communicative agents for software development. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 15174–15186, Bangkok, Thailand. Association for Computational Linguistics. Chen Qian, Zihao Xie, Yifei Wang, Wei Liu, Kunlun Zhu, Hanchen Xia, Yufan Dang, Zhuoyun Du, Weize Chen, Cheng Yang, Zhiyuan Liu, and Maosong Sun. 2025. Scaling large language model-based multi-agent collaboration. In The Thirteenth International Conference on Learning Representations, ICLR 2025, Singapore, April 24-28, 2025 . OpenReview.net. Zhihong Shao, Peiyi Wang, Qihao Zhu, Runxin Xu, Junxiao Song, Mingchuan Zhang, Y. K. Li, Y. Wu, and Daya Guo. 2024. Deepseekmath: Pushing the limits of mathematical reasoning in open language models. CoRR , abs/2402.03300. Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang Yue, and Wenhu Chen. 2024. MMLU-pro: A more robust and challenging multi-task language under-standing benchmark. In The Thirty-eight Conference on Neural Information Processing Systems Datasets and Benchmarks Track .Zhexuan Wang, Yutong Wang, Xuebo Liu, Liang Ding, Miao Zhang, Jie Liu, and Min Zhang. 2025. Agent-Dropout: Dynamic agent elimination for token-efficient and high-performance LLM-based multi-agent collaboration. In Proceedings of the 63rd An-nual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 24013– 24035, Vienna, Austria. Association for Computa-tional Linguistics. Jason Wei, Xuezhi Wang, Dale Schuurmans, Maarten Bosma, brian ichter, Fei Xia, Ed H. Chi, Quoc V Le, and Denny Zhou. 2022. Chain of thought prompt-ing elicits reasoning in large language models. In 
+
+Advances in Neural Information Processing Systems .Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Hassan Awadallah, Ryen W White, Doug Burger, and Chi Wang. 2024. Autogen: Enabling next-gen LLM applications via multi-agent conversations. In First Conference on Language Modeling .Wujiang Xu, Zujie Liang, Kai Mei, Hang Gao, Juntao Tan, and Yongfeng Zhang. 2025. A-mem: Agentic memory for LLM agents. In The Thirty-ninth An-nual Conference on Neural Information Processing Systems .Jiaqi Xue, Qian Lou, Jiarong Xing, and Heng Huang. 2026. R2-router: A new paradigm for LLM routing with reasoning. In Forty-third International Confer-ence on Machine Learning .Sikuan Yan, Xiufeng Yang, Zuchao Huang, Ercong Nie, Zifeng Ding, Zonggen Li, Xiaowen Ma, Jinhe Bi, Kristian Kersting, Jeff Z. Pan, Hinrich Schuetze, Volker Tresp, and Yunpu Ma. 2026. Memory-r1: Enhancing large language model agents to manage and utilize memories via reinforcement learning. In 
+
+Proceedings of the 64th Annual Meeting of the As-sociation for Computational Linguistics (Volume 1: Long Papers) , pages 12805–12825, San Diego, Cali-fornia, United States. Association for Computational Linguistics. An Yang, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chengyuan Li, Dayi-heng Liu, Fei Huang, Haoran Wei, Huan Lin, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Ji-axi Yang, Jingren Zhou, Junyang Lin, Kai Dang, and 22 others. 2024. Qwen2.5 technical report. CoRR ,abs/2412.15115. Yanwei Yue, Guibin Zhang, Boyang Liu, Guancheng Wan, Kun Wang, Dawei Cheng, and Yiyan Qi. 2025. MasRouter: Learning to route LLMs for multi-agent systems. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Vol-ume 1: Long Papers) , pages 15549–15572, Vienna, Austria. Association for Computational Linguistics. Guibin Zhang, Yanwei Yue, Zhixun Li, Sukwon Yun, Guancheng Wan, Kun Wang, Dawei Cheng, Jef-frey Xu Yu, and Tianlong Chen. 2025a. Cut the crap: An economical communication pipeline for LLM-based multi-agent systems. In The Thirteenth International Conference on Learning Representa-tions .Jiayi Zhang, Jinyu Xiang, Zhaoyang Yu, Fengwei Teng, Xiong-Hui Chen, Jiaqi Chen, Mingchen Zhuge, Xin Cheng, Sirui Hong, Jinlin Wang, Bingnan Zheng, Bang Liu, Yuyu Luo, and Chenglin Wu. 2025b. AFlow: Automating agentic workflow generation. In 
+
+The Thirteenth International Conference on Learning Representations .Jintian Zhang, Xin Xu, Ningyu Zhang, Ruibo Liu, Bryan Hooi, and Shumin Deng. 2024. Exploring collaboration mechanisms for LLM agents: A social psychology view. In Proceedings of the 62nd An-nual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 14544– 14607, Bangkok, Thailand. Association for Compu-tational Linguistics. Yukuan Zhang, Mengxin Zheng, and Qian Lou. 2026. Securerouter: Encrypted routing for efficient secure inference. CoRR , abs/2604.15499. Mingchen Zhuge, Wenyi Wang, Louis Kirsch, Francesco Faccio, Dmitrii Khizbullin, and Jürgen Schmidhuber. 2024. Gptswarm: Language agents as optimizable graphs. In Forty-first International Con-ference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 , volume 235 of Proceedings of Machine Learning Research , pages 62743–62767. PMLR / OpenReview.net. 7 Algorithm 
+
+We provide detailed pseudocode for Gated-Memory Routing in Algorithm 1. 
+
+8 Representations, Encoders, and Training Interface 
+
+This appendix specifies the encoders and represen-tations underlying the routing modules of Section 3, and how the policy is trained against the frozen backbones. 
+
+Sentence encoder. All text is embedded by a single frozen sentence encoder enc( ·)
+
+(all-MiniLM-L6-v2 ), producing 384 -dimensional vectors; following the convention of Section 3, 
+
+x = enc( x) for any text x, so q is the query embedding and yt the embedding of reasoning step yt. The same encoder embeds the query, the role and backbone descriptions, and every agent response. Its parameters are not updated during training, and response embeddings are detached before they enter memory, so no gradient flows back through the encoder or through the agent outputs. 
+
+Role and backbone latents. Each role profile and each backbone description is embedded once by enc and mapped to a continuous latent by a variational encoder (a small VAE with a 128 -dimensional latent), yielding the role embeddings 
+
+ri and backbone embeddings mi used by the role allocator (Section 3.3) and LLM router (Sec-tion 3.4). The reconstruction and KL terms of these encoders form the LVAE regularizer in the training objective. 
+
+State encoder. The state st = ( q, S t−1) is en-coded into the context vector ct used by the routing modules. The query is linearly projected to a 128 -dimensional vector ˆq, and each retained step j < t 
+
+becomes a token uj formed from its role latent rrj
+
+and backbone latent mmj , additively modulated by a sigmoid gate over the response embedding yj , so that response content, and not only routing identity, informs the state. A two-layer Transformer en-coder contextualizes the tokens {uj }j<t , the query attends over them to produce a pooled history vec-tor ht, and ct = [ ˆ q ∥ ht ]. The execution memory is therefore encoded as an ordered set of per-step records rather than a single averaged vector. 
+
+Memory-record embedding. The re-trieval gate (Section 3.5) forms the query vector pt = Linear([ q ∥ rrt ∥ mmt ]) and, for each stored record j, an embedding 
+
+vj = Linear([ rrj ∥ mmj ∥ ˜yj ]) , where ˜yj is a learned projection of yj . The retrieval logit is the scaled cosine similarity ℓt,j = s cos( pt, vj ) + b
+
+with learnable scale s and bias b, and record j is admitted by zt,j ∼ Bernoulli( σ(ℓt,j )) . Memory holds at most ϕ records, so Ct ranges from empty to ϕ entries, with b setting its typical length. 
+
+Write-gate similarities. For the Memory Write Gate (Section 3.6), the projection underlying 
+
+sim( ·, ·), the relevance–novelty weight λ, the write threshold θ, and a logit scale β are learned jointly with the routing policies, and the write decision is 
+
+wt ∼ Bernoulli( σ(β(ωt − θ))) , which Section 3.6 abstracts as σ(ωt).
+
+Training interface. The backbones are frozen and queried as an environment: at each step the selected model is called through an OpenAI-compatible vLLM server, and the returned text is embedded and detached as described above. The router is optimized purely by the score-function (policy-gradient) estimator: the group-relative ad-vantage Ai (Section 3.8) weights the trajectory log-probability log πi = PLt=1 
+
+  log πr(rt | st) + log πm(mt | st, r t) + log p(zt) + log p(wt) + log p(ht), where zt collects the step-t retrieval decisions. Gradients reach only the routing, gat-ing, halting, and embedding parameters; a single optimizer updates all of them jointly, and the back-bones are never differentiated through. 
+
+9 Cost Calculation for Open-Weight Backbones 
+
+Because the five backbones are open-weight and served locally, they do not carry a public per-token price. To give the cost-aware objective a hardware-independent and monotonic cost signal, we set each model’s per-token reference price proportional to its (active) parameter count N in billions: an input rate of 0.003 N and an output rate of 0.010 N per million tokens, with output weighted more heavily to reflect the higher cost of autoregressive decoding. For dense transformers, per-token inference com-pute (FLOPs) grows approximately linearly with 
+
+N , so pricing each token by model size makes the reported cost proportional to a size-weighted token count: a hardware-independent proxy for relative inference compute across the pool, rather than the dollar price of any specific API or the wall-clock Algorithm 1 Gated-Memory Routing  
+
+> 1:
+
+Input: Query q, role set R, model pool M, maximum depth ϕ 
+
+> 2:
+
+Output: Final answer yfinal  
+
+> 3:
+
+Encode query embedding q ← enc( q) 
+
+> 4:
+
+Initialize memory S0 ← ∅ , halting state hhalt 0 ← 0 
+
+> 5:
+
+Initialize t ← 0, h0 ← 0 
+
+> 6:
+
+while ht = 0 and t < ϕ do  
+
+> 7:
+
+t ← t + 1  
+
+> 8:
+
+Form state st ← (q, S t−1) 
+
+> 9:
+
+// Role and model routing  
+
+> 10:
+
+Sample role rt ∼ πr(· | st) 
+
+> 11:
+
+Sample LLM backbone mt ∼ πm(· | st, r t) 
+
+> 12:
+
+// Retrieval gate  
+
+> 13:
+
+Form retrieval vector pt ← Linear([ q ∥ rrt ∥ mmt ])  
+
+> 14:
+
+for all ej ∈ St−1 do  
+
+> 15:
+
+Sample zt,j ∼ Bernoulli( σ(ℓt,j ))  
+
+> 16:
+
+end for  
+
+> 17:
+
+Retrieve context Ct ← { ej ∈ St−1 : zt,j = 1 } 
+
+> 18:
+
+// Agent execution  
+
+> 19:
+
+Generate reasoning step yt ← Agent( q, r t, m t, C t) 
+
+> 20:
+
+Form execution record et ← (rt, m t, y t) 
+
+> 21:
+
+// Memory write gate  
+
+> 22:
+
+Compute write score ωt using the query, yt, and stored records in St−1 
+
+> 23:
+
+Sample wt ∼ Bernoulli( σ(ωt))  
+
+> 24:
+
+if wt = 1 then  
+
+> 25:
+
+St ← St−1 ∪ { et} 
+
+> 26:
+
+else  
+
+> 27:
+
+St ← St−1 
+
+> 28:
+
+end if  
+
+> 29:
+
+// Adaptive halting  
+
+> 30:
+
+hhalt  
+
+> t
+
+← GRU( hhalt  
+
+> t−1
+
+, enc( St))  
+
+> 31:
+
+Sample ht ∼ Bernoulli  σ(MLP( hhalt  
+
+> t
+
+))  
+
+> 32:
+
+end while  
+
+> 33:
+
+L ← t 
+
+> 34:
+
+Select aggregator backbone magg as the most frequently selected model in {mi}Li=1  
+
+> 35:
+
+yfinal ← Aggregator( q, S L; magg )cost on particular hardware. Both the training cost term of Section 3.8 and the reported test cost of a trajectory are the additive sum Cost( τ ) = P 
+
+> t
+
+Ft
+
+of its per-step backbone costs, where Ft is the cost of step t’s call (its input and output tokens times these rates). As a relative-compute proxy it ab-stracts away attention cost that scales with context length, batching, and memory bandwidth. Table 4 lists the backbone pool and the resulting rates.             
+
+> Backbone Size Cost in/out llama-3.2-3B 3B 0.009 / 0.03 llama-3.1-8B 8B 0.024 / 0.08 mistral-nemo-12B 12B 0.036 / 0.12 qwen-2.5-14B 14B 0.042 / 0.14 qwen-2.5-32B 32B 0.096 / 0.32
+
+Table 4: Open-weight backbone pool and size-based reference rates (input = 0 .003 N , output = 0 .010 N
+
+per 1M tokens, with N the parameter count in billions), shown as input/output. 
+
+To corroborate the size-weighted proxy with hardware-relevant measurements, Table 5 reports, for HumanEval and MBPP, an approximate FLOPs count and the batch-amortized wall-clock time per query for our method and the two strongest base-lines. FLOPs are estimated from the per-call token records as 2N FLOPs per processed token (Kaplan et al., 2020), summed over all calls with N the parameter count of the model serving each call; this omits the sequence-length-dependent atten-tion term. Wall-clock time is the end-to-end in-ference time for the test set divided by the number of queries, measured under the same serving config-uration for all methods. Our method has the lowest FLOPs and wall-clock time on both benchmarks, and the ordering matches the proxy.                  
+
+> HumanEval MBPP Method PFLOPs/query Time/query (s) PFLOPs/query Time/query (s) Ours 0.107 1.5 0.145 2.6
+> MASRouter 0.200 4.4 0.289 6.4 Puppeteer-32B 0.144 3.0 0.163 3.2
+
+Table 5: Approximate inference FLOPs and batch-amortized wall-clock time per query on HumanEval and MBPP. 
+
+10 Per-Dataset Accuracy and Cost 
+
+Tables 6 and 7 report per-method accuracy and to-tal test-set cost on GSM-Hard and HumanEval, the data underlying the Pareto comparison of Figure 3. Cost is the size-based reference cost of Appendix 9. Figure 5 shows the GSM-Hard accuracy–cost fron-tier, the companion to the HumanEval frontier in the main text. 10 −1 10 0
+
+> Inference token cost (log scale) 30 40 50 60 70 Accuracy (%)
+> GSM-Hard
+> llama-3.2-3B llama-3.1-8B mistral-nemo-12B qwen-2.5-14B qwen-2.5-32B LLM pool Single LLM CoT Complex-CoT MacNet-chain MacNet-tree MacNet-complete MASRouter Puppeteer AFlow Ours Pareto frontier
+
+Figure 5: Accuracy versus inference token cost on GSM-Hard, with cost on a log scale. As on HumanEval, our method lies on the high-accuracy end of the Pareto frontier, reaching the highest accuracy among compared methods at substantially lower cost than the strongest multi-agent and routing baselines. 
+
+11 Variance across Training Seeds 
+
+Table 1 reports one training run per method. To quantify run-to-run variability, we retrained our method and the two strongest baselines with three independent seeds each and report the per-benchmark mean and sample standard deviation in Table 8, together with the overall mean (the macro-average over benchmarks for each seed, then mean and standard deviation across seeds). Our method has the highest mean on all five benchmarks and im-proves the overall mean by 4.91 points over MAS-Router and 2.10 over Puppeteer-32B. The ranking is identical under every seed: the lowest overall score among our seeds ( 76 .62 ) exceeds the high-est among Puppeteer’s ( 75 .79 ) and MASRouter’s (74 .27 ). 
+
+12 Gate Behavior at Test Time 
+
+Table 9 checks that the trained gates do not col-lapse to trivial policies. The write rate is the frac-tion of reasoning steps committed to memory; the retrieved fraction is the mean number of retrieved items divided by the number available at that step (the memory is empty at step 0). Write rates lie strictly inside (0 , 1) on all three benchmarks, and the retrieval gate becomes more selective as mem-ory grows rather than exposing all or none of it. Method LLM Acc. (%) Cost Single LLM llama-3.2-3B 25.85 0.025 llama-3.1-8B 39.87 0.046 mistral-nemo-12B 30.11 0.050 qwen-2.5-14B 64.58 0.047 qwen-2.5-32B 61.52 0.071 CoT qwen-2.5-14B 67.52 0.076 qwen-2.5-32B 64.56 0.167 Complex-CoT qwen-2.5-14B 66.76 0.108 qwen-2.5-32B 65.32 0.230 MacNet-Chain qwen-2.5-14B 59.75 0.629 qwen-2.5-32B 61.93 3.421 MacNet-Tree qwen-2.5-14B 60.32 0.696 qwen-2.5-32B 62.31 2.433 MacNet-Complete qwen-2.5-14B 59.00 0.933 qwen-2.5-32B 62.22 4.099 AFlow qwen-2.5-14B 58.24 0.134 qwen-2.5-32B 67.05 2.165 Puppeteer qwen-2.5-14B 65.91 0.232 qwen-2.5-32B 68.75 0.445 MASRouter LLM Pool 66.00 1.012 Ours LLM Pool 70.55 0.587 
+
+Table 6: Accuracy and total test-set cost on GSM-Hard. 
+
+The per-step entropy of the gate distributions also stays well above zero throughout training on all three benchmarks. 
+
+13 Halting and Training-Time Computation 
+
+Adaptive halting also reduces training-time compu-tation, since shorter trajectories mean fewer rollout steps per update. Table 10 compares the mean re-alized depth and the total number of rollout steps over training with and without halting. 
+
+14 Agent Role Profiles 
+
+The role allocator selects among the same 26 het-erogeneous role profiles used by MASRouter (Yue et al., 2025), grouped into three domains: 7 code-oriented roles, 7 commonsense/knowledge roles, and 12 mathematical-reasoning roles. Each pro-file is a short natural-language description that we encode and project into the latent role space (Section 3.3). At instantiation, this description, to-gether with the role’s reasoning strategy and the benchmark’s output-format requirements, forms the agent’s system prompt, while the user prompt supplies the query and any retrieved context. The descriptions are listed below. The imbalance across domains reflects the original MASRouter catalog, which we adopt unchanged so that both methods se-lect from the same roles. To test dependence on the                                                       
+
+> Method LLM Acc. (%) Cost Single LLM llama-3.2-3B 62.79 0.001 llama-3.1-8B 69.78 0.0025 mistral-nemo-12B 68.22 0.002 qwen-2.5-14B 82.95 0.003 qwen-2.5-32B 84.37 0.009 CoT qwen-2.5-14B 82.17 0.004 qwen-2.5-32B 85.15 0.012 Complex-CoT qwen-2.5-14B 80.62 0.005 qwen-2.5-32B 85.47 0.014 MacNet-Chain qwen-2.5-14B 86.82 0.019 qwen-2.5-32B 83.80 0.059 MacNet-Tree qwen-2.5-14B 82.95 0.024 qwen-2.5-32B 86.02 0.084 MacNet-Complete qwen-2.5-14B 84.50 0.033 qwen-2.5-32B 86.05 0.119 AFlow qwen-2.5-14B 85.27 0.014 qwen-2.5-32B 84.50 0.224 Puppeteer qwen-2.5-14B 83.59 0.029 qwen-2.5-32B 85.16 0.047 MASRouter LLM Pool 85.16 0.057 Ours LLM Pool 89.84 0.032
+
+Table 7: Accuracy and total test-set cost on HumanEval. 
+
+full catalog, we randomly subsampled it to 13 roles, keeping roughly half of each domain, and retrained the full system: accuracy is 70 .74 on GSM-Hard and 89 .06 on HumanEval, against 70 .55 and 89 .84 
+
+with all 26 roles, so performance does not hinge on the full role set. 
+
+Code. 
+
+• AlgorithmDesigner. Specifies the design of the algorithm, including explanations, usage instructions, and API references, optionally giving pseudocode for the main logic; replies concisely. • ProgrammingExpert. A programming ex-pert who, given a function signature and doc-string, writes the full implementation (restat-ing the signature) in a single Python code block. • BugFixer. A programming expert who re-states the signature and returns a corrected full implementation in a Python code block. • ReflectProgrammer. A programming expert who reflects on prior attempts and returns a full implementation in a Python code block. • PlanSolver. Produces the pseudocode of the target function. • ProjectManager. Oversees the overall code structure, suggests optimal design patterns Method GSM-Hard MATH MBPP HumanEval MMLU-Pro Overall MASRouter 65.37 ± 0.55 74.37 ± 2.28 76.87 ± 2.21 81.51 ± 3.94 64.09 ± 4.83 72.44 ± 1.88 Puppeteer-32B 66.98 ± 1.87 77.17 ± 4.41 76.41 ± 2.29 86.72 ± 2.06 68.98 ± 1.01 75.25 ± 0.52 Ours 69.76 ± 1.45 78.37 ± 1.88 80.40 ± 1.21 88.54 ± 1.19 69.62 ± 1.17 77.35 ± 0.63 
+
+Table 8: Mean ± sample standard deviation of test accuracy (%) over three training seeds per method. Overall is the macro-average over the five benchmarks.             
+
+> Benchmark Mean depth Write rate Retrieved fraction, steps 1–5 GSM-Hard 2.92 39.6% 16 / 24 / 14 / 12 / 11% MBPP 3.79 32.8% 9 / 30 / 20 / 15 / 12% HumanEval 3.30 36.5% 91 / 48 / 33 / 24 / 21%
+
+Table 9: Test-time gate behavior of the full system: mean realized depth, fraction of steps written to memory, and fraction of available memory items retrieved at each step.          
+
+> Benchmark Depth, halting Depth, no halting Rollout steps, halting vs. none GSM-Hard 3.4 6.0 26.5k vs. 47.9k ( 1.81 ×)HumanEval 3.3 6.0 6.3k vs. 11.5k ( 1.83 ×)
+
+Table 10: Effect of adaptive halting on training-time computation. 
+
+for maintainability and flexibility, and avoids over-engineering; replies concisely. • TestAnalyst. Identifies problems in the cur-rent code from test data and feedback, sup-plies special cases and boundary conditions to watch, and points out potential errors; replies concisely. 
+
+Commonsense and Knowledge. 
+
+• KnowledgeExpert. A knowledgeable question-answering expert who analyzes step by step and selects the correct answer. • Reflector. Re-examines the question-answering process step by step and selects the correct answer. • Critic. Points out potential issues in other agents’ analyses point by point and gives a critical opinion before the final result. • Scientist. A scientist with natural-science knowledge who provides a thorough solving process, including necessary proofs and expla-nations. • Economist. An experienced economist (macroeconomics, microeconomics, financial markets) who gives well-reasoned, evidence-based answers. • Historian. Analyzes cultural, economic, po-litical, and social events from primary sources to reason about the past. • WikiSearcher. Lists the key Wikipedia en-tities that should be looked up to solve the problem. 
+
+Mathematical Reasoning. 
+
+• MathSolver. A math expert who produces a solving process from the hints supplied by other agents. • Mathematician. A mathematician skilled at math games, arithmetic, and long-horizon planning. • MathTeacher. Teaches the solution step by step as if to a student. • MathAnalyst. First derives the solution sym-bolically (variables as letters), then substitutes values to compute the result. • Inspector. Checks whether the problem-solving logic, calculations, and any accom-panying code are correct and consistent, then gives its own step-by-step solution. • AlgorithmEngineer. Integrates step-by-step reasoning with Python code to solve the prob-lem. • ProgrammingExpert. Analyzes the problem and writes functions, combining reasoning with Python code. • SoftwareDeveloper. Designs efficient solu-tions and provides clear, concise functions. • Engineer. An experienced engineer who solves the problem from engineering knowl-edge. • Scientist. Provides a detailed solving process with necessary proofs and explanations. • Economist. Applies economic reasoning to give evidence-based answers. • CertifiedAccountant. Analyzes financial problems and returns correct calculations and solutions. 
+
+15 Aggregator Prompt 
+
+Once the halting controller stops the trajectory, the Aggregator LLM receives the query and the re-tained execution records and produces the final an-swer. The aggregator is instantiated with the back-bone the router selected most frequently during the trajectory (Section 4.1). Across benchmarks the aggregator shares a common framing in its system prompt, namely to weigh the analyses and results of the other agents, identify errors, and commit to a single most-reliable answer, while the user prompt enforces the benchmark-specific output for-mat. The boxes below paraphrase the system and user prompts for each benchmark.                 
+
+> Aggregator prompt: MATH System. Weigh the other agents’ analyses and code, jus-tify the decision, and report the final numeric answer as a boxed value with no units (e.g., “The answer is 140 ”).
+> User. Give the final answer in the form “The answer is
+> 140 ”.
+> Aggregator prompt: GSM-Hard System. Weigh the other agents’ analyses and code and commit to the most reliable answer, with reasons. Report a single pure number, with no units, symbols, commas, or scientific notation, and no rounding unless the problem asks; the last line must read exactly The answer is <number> .
+> User. Give the final answer with a last line of the form
+> The answer is <number> .
+> Aggregator prompt: HumanEval and MBPP System. Act as the decision-maker over the other agents’ outputs, identify errors, and return the answer as a single Python code block containing nothing else.
+> User. Given the function signature and docstring, with any prior designs or implementations, write the full im-plementation (restating the signature) in one Python code block.
+> Aggregator prompt: MMLU-Pro System. Act as the decision-maker over the other agents’ answers and analyses and identify errors.
+> User. Exactly one of up to ten options (A to J) is correct; end with a last line of the form “The answer is X”, where X is one of A to J.
+
+16 Backbone LLM Profiles 
+
+The LLM router selects among the five open-weight backbones through their natural-language capability descriptions, which a variational en-coder maps into the latent backbone space (Sec-tion 3.4). The descriptions below are the text en-coded for each model; each description also states the model’s reference input/output price (Table 4), so the encoded text covers both capability and cost. • llama-3.2-3B. Meta’s compact 3-billion-parameter, text-only instruction-tuned model with a 128k-token context window. The cheap-est and fastest choice in the pool, with solid general reasoning and instruction following; suited to easy queries where quality is less critical. • llama-3.1-8B. Meta’s widely used 8-billion-parameter instruction-tuned model, offering solid general-purpose reasoning and instruc-tion following at very low cost; a reliable base-line across a broad range of tasks. • mistral-nemo-12B. Mistral AI’s 12-billion-parameter dense model built in partnership with NVIDIA, with strong multilingual per-formance, a 128k-token context window, and solid general reasoning and coding at modest cost; a reliable mid-size workhorse. • qwen-2.5-14B. Alibaba Cloud’s 14-billion-parameter dense instruction-tuned model with a 128k-token context window; strong on mathematics, coding, and general reasoning, punching above its size class as a capable mid-tier option for moderately hard queries. • qwen-2.5-32B. Alibaba Cloud’s flagship dense model in this pool, with frontier-level performance among open-weight models in its size class on mathematics, coding, and complex reasoning; reserved for the hardest queries where smaller models fall short.

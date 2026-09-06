@@ -1,0 +1,262 @@
+Title: REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows
+
+URL Source: https://arxiv.org/pdf/2609.00643v1
+
+Published Time: Wed, 02 Sep 2026 00:38:07 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+# REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows 
+
+Ruoling Qi 1,2 Xuaner Wu 1 Penghang Liu Jian Chen Yirui Liu 1,†
+
+> 1
+
+Institute of Artificial Intelligence, China Telecom (TeleAI) 
+
+> 2
+
+Shanghai Jiao Tong University 
+
+> †
+
+Corresponding author Ruoling Qi: qiruoling760@sjtu.edu.cn Yirui Liu: yiruiliu926@gmail.com 
+
+## Abstract 
+
+Agent revisions expose a fundamental correctness–efficiency trade-off during concurrent execution. Discarding ongoing work preserves latest-version correctness but wastes progress that may remain valid, whereas reusing prior work preserves efficiency but risks propagating stale state into outputs and tool effects. Existing recovery strategies resolve this trade-off in an imbalanced way with coarse-grained policies: they either favor efficiency by allowing potentially stale work to continue, or favor correctness by restarting the workflow or recomputing a linear suffix from the earliest conflict, thereby discarding unaffected progress. We present R EVISE , a validity-guided runtime for fine-grained recovery in structured agent workflows. When a revision arrives, R EVISE first intersects its delta with recorded data and control dependencies and propagates the resulting impact through the partially executed DAG to identify affected work. It then stops invalid work, preserves validity-established progress beyond the earliest conflict, and recomputes only the affected region. Incomplete provenance conservatively expands recovery, while reused results are revalidated before commit. Analysis of real coding-agent traces show online recovery opportunities: 118 sessions retain observable work before a queued later message is delivered; across 167 overlapping assistant responses, enqueue-to-completion overlap reaches 56.55 s at p95. Across 300 challenging revision/commit executions, R EVISE matches a latest-version oracle with no stale outputs or effects. On unmodified LangGraph and LLMCompiler applications using Qwen3-14B, it reduces model calls by 40.6–56.0% relative to full restart and by 31.3–43.6% relative to suffix recomputation. Under serving pressure, it further reduces revision-to-correct-completion tokens by 13.26% and improves SLO goodput by 3.07–5.43%. 
+
+## 1 Introduction 
+
+Multi-turn agent workflows are becoming increasingly interactive: users can provide new instructions, corrections, or clarifications while model and tool calls from an earlier turn are still in flight [1]. These inputs may change requirements, intermediate results, or control decisions on which ongoing or completed tasks depend. We call such an event a revision . When a revision arrives during ongoing agent execution, the runtime faces a fundamental correctness–efficiency trade-off. Delaying intervention allows potentially stale in-flight work to continue, wasting computation after the revision arrives; full restart preserves latest-version correctness but discards all prior progress; and recomputing a linear suffix from the earliest conflict is more selective yet can still redo unaffected work beyond that point. The central challenge is therefore to determine fine-grained execution validity after a revision, so invalid work can be stopped while valid progress is preserved, balancing latest-version correctness with recovery efficiency. 
+
+> Preprint. arXiv:2609.00643v1 [cs.AI] 1 Sep 2026
+
+Existing systems address different aspects of this trade-off, but do not provide a mechanism for fine-grained recovery after online revisions. Workflow and serving runtimes schedule structured model and tool execution [2, 3, 4], but do not determine how a revision changes the validity of partially executed work. Revisable execution identifies an earliest conflict and rolls back the subsequent trace [5], but its linear recovery boundary can discard unaffected work beyond that conflict. Transactional runtimes protect externally visible effects [6, 7], but do not decide which prior computation can be safely retained. What remains unresolved is a fine-grained recovery mechanism over a partially executed DAG: which work is invalidated, and which progress can still be preserved. We present R EVISE , a validity-guided runtime for fine-grained recovery in structured agent workflows. When a revision arrives, R EVISE intersects its delta with recorded data and control dependencies and propagates the resulting impact through the executed DAG to identify affected work. It then stops invalid work, preserves proven-valid progress beyond the earliest conflict, and recomputes only the affected region. Fine-grained provenance enables selective recovery; when provenance is incomplete, REVISE conservatively expands recovery toward a suffix or full restart. Reuse remains provisional: outputs and staged tool effects are revalidated against intervening revisions before commit. Analysis of real coding-agent traces shows opportunities for online intervention: among 5,825 analyzable sessions, 118 retain observable work before a queued later message is delivered; across 167 overlapping assistant responses, enqueue-to-completion overlap reaches 56.55 s at p95. Across 300 adversarial executions, R EVISE matches a latest-version oracle without stale outputs or effects. On unmodified LangGraph and LLMCompiler applications using Qwen3-14B, it reduces model calls by 40.6–56.0% relative to full restart and by 31.3–43.6% relative to suffix recomputation. Under GPU serving pressure, it further reduces revision-to-completion tokens by 13.26% and improves SLO goodput by 3.07–5.43%. These results show that timely intervention avoids obsolete work, while provenance-guided selective recovery preserves additional progress when revisions are local. In summary, our contributions are as follows: • an online execution validity abstraction for determining which completed, running, and pending work remains valid after a revision; • a validity-guided, fail-closed recovery protocol that identifies affected work from revision deltas and dynamic data/control dependencies, selectively preserves valid progress, and revalidates outputs and effects before commit; • an evaluation demonstrating real online revision opportunities, latest-version correctness across challenging event orderings, and lower recomputation with serving gains under contention. 
+
+## 2 Revision opportunities and the limits of offline evidence 
+
+A revision can create two distinct recovery opportunities in a partially executed workflow. Temporal overlap allows obsolete in-flight work to be stopped early, while locality allows valid progress outside the affected region to be preserved. We therefore ask two empirical questions: Do revisions arrive early enough to intervene? and Do real revisions exhibit locality that could permit partial recovery? 
+
+Figure 1 illustrates the desired behavior: stop obsolete work, preserve progress whose validity can be established, and recompute only the affected paths. To answer the first question, we need both conversational semantics and an execution timeline. SWE-chat [1] provides real coding-agent sessions from which we reconstruct when later user messages were queued relative to ongoing assistant, tool, and background work. Static issue-resolution benchmarks such as SWE-bench [8] cannot establish such intervention windows because they contain neither interleaved user revisions nor an execution timeline. Timing alone, however, does not imply invalidation: a later message may be an ordinary follow-up rather than a revision. We therefore combine timestamp reconstruction with manual semantic audit. The traces reveal a real but long-tailed intervention opportunity. Among 5,825 analyzable SWE-chat sessions, 657 contain a matched queued-revision signal; 118 of these retain observable assistant, tool, or background work before the revision is delivered. These sessions contribute 174 work-bearing queued-revision events, and 62 sessions expose an intervention window of at least 10 s. Assistant responses completed within these windows overlap for 5.54 s at the median, 56.55 s at p95, and 853.16 s at the maximum. These measurements establish temporal opportunity : revisions can arrive 2(a) Revision-unaware runtime  stale work + replay  (b) REVISE  preserve valid +  recompute  affected            
+
+> A complete done
+> B running* stale
+> C running unknown
+> D pending* old v1
+> A complete reuse
+> C running continue
+> B running* cancel
+> avoid v1
+> D pending* re compute v2
+> revision 𝒕 𝒓
+> revision 𝒕 𝒓
+
+Figure 1: Desired behavior at revision time tr . A revision-unaware runtime cannot safely distinguish obsolete from still-valid work. R EVISE aims to stop affected work, preserve valid progress, and recompute only the affected region. 1 0 1 1 0 2 1 0 3 
+
+> Overlap Duration (log scale)
+> 5.5 s
+> p50
+> 56.5 s
+> p95
+> 853.2 s
+> max
+
+(b) Assistant  Overlap  Window      
+
+> Completed responses inside the window
+> 0510
+> True Revisions
+> L0 Global
+> L1 Suffix
+> L2 Candidate
+> N/A No Gain
+
+(c) Revision  Locality  Audit                
+
+> 20 true revisions / 30 enriched cases
+> 3
+> 10
+> 6
+> 1
+> 102103104
+> Sessions (log scale)
+> Analyzable
+> Queued Revision
+> Observable Overlap
+> ≥10-sWindow
+
+(a) SWE-chat  Trace  Funnel 
+
+> 5,825 analyzable sessions
+> 5,825
+> 657
+> 118
+> 62
+
+Figure 2: SWE-chat evidence for revision opportunity: (a) the trace funnel, (b) overlap duration, and (c) locality among manually audited revisions. early enough for a runtime to stop ongoing work. They do not establish how much computation is avoidable, because the traces lack token-level progress and dependency-complete execution state. We next examine whether these revisions appear local enough to permit partial recovery. From the 174 work-bearing events, we retain 173 with complete timestamps and deterministically select 30 for manual audit, spanning 29 sessions and 24 repositories. The sample covers all nine mutation, task-notification, or tool-overlap events together with three assistant-only duration strata; it is intended for taxonomy construction, not prevalence estimation. The audit identifies 20 revisions and reveals heterogeneous recovery structure: three affect a linear chain or the whole workflow (L0), ten primarily admit suffix recovery (L1), six exhibit an apparently independent branch (L2 candidate), and one has no useful intervention window. Crucially, apparent locality is not sufficient to authorize reuse. A branch that looks independent in the conversational trace may still depend on a revised artifact or control decision that the trace does not expose. SWE-chat lacks artifact versions and complete data/control provenance, so the L2 cases are only candidates for selective recovery rather than evidence that reuse is safe. The workload study therefore establishes both sides of the motivation: revisions can overlap with ongoing agent execution, and some revisions appear local enough that coarse rollback may discard useful progress. At the same time, offline traces cannot certify which progress remains valid. This evidence gap motivates R EVISE ’s online provenance and fail-closed validity protocol. 
+
+## 3 REVISE 
+
+3.1 Validity and safe reuse 
+
+Intuitively, an earlier attempt is reusable only when the data it read, the control decision it followed, its parent work, and any effect it would publish all remain valid. For example, a revision to plan.budget 
+
+invalidates an attempt that read that field, but need not invalidate an independent attempt that read neither that field nor an affected parent. A workflow is a DAG G = ( V, E ) whose nodes may invoke models, tools, verifiers, routers, or joins. Each semantic artifact a has a monotonically increasing version va. A read selector (a, p, c ) identifies an artifact, a nested semantic path, and whether the read supplied data or controlled execution 3A complete  done                
+
+> B running
+> C running
+> D pending
+> revision
+> 2Trace Impact
+> ●affected ●valid
+> 3Lifecycle Recovery + Commit
+> AREUSE complete
+> CCONTINUE join revalidate ✓
+
+## ✓           
+
+> commit
+> complete → selective partial → suffix unknown → restart
+> BCANCEL
+> 1Work at Revision 𝒕 𝒓
+> version delta v1v2
+> ∆ ∩ read/control 𝑠𝑒𝑡 𝑠
+> data + control
+> provenance
+> DAVOID v1 v2 re compute
+
+Figure 3: R EVISE recovery from revision to commit. A revision arrives with completed, running, and pending work. R EVISE intersects its version delta with dynamic data/control provenance, maps validity to lifecycle actions—reuse, cancel, continue, avoid, or recompute—and revalidates joined outputs before commit. Complete evidence enables selective recovery; partial or unknown evidence expands recovery to a suffix or full restart. (c ∈ { data , control }). A revision event e = ( a, v, v + 1 , op, ∆) replaces, appends, cancels, or changes control state; ∆ is the set of changed paths. The runtime accepts e only when v is current. An attempt xu is valid if no revision since its snapshot intersects any data or control selector it consumed, every parent attempt remains current, and its effect remains authorized. The core invariant is 
+
+reuse (xu) ⇒ valid (xu) ∧ effectSafe (xu). (1) When either condition cannot be proved, R EVISE recomputes or blocks rather than guessing. 
+
+3.2 Dynamic impact and recovery 
+
+REVISE first identifies the work that a revision can affect. It finds recorded reads that intersect the changed paths ∆. Ordinary paths intersect under ancestor–descendant overlap. A structural read uses a #members marker to record a collection’s membership, so member insertion or deletion intersects the marker only for that collection. To collect reads without manual dependency labels, an adapter wraps structured state at node entry in a recursive read-only proxy: field access records a leaf path, whereas iteration records a membership marker. The execution framework supplies parent edges. A typed patch is merged into the current snapshot, and an old/new structural diff produces ∆ without an application-provided affected set. REVISE indexes complete readers by artifact path, coarse readers by artifact, and unknown readers in a conservative set. For each revision, it finds direct readers whose selectors intersect ∆ and traverses their active descendants. This produces an impact set and a recovery plan that records direct taint, affected nodes, unsafe effects, and the evidence behind every decision. The plan assigns each node one of five lifecycle actions: • Cancel : stop affected work that is currently running. • Avoid : do not start affected work that is still pending. • Recompute : execute again, on the revised snapshot, any affected completed node and any canceled or avoided node still required by the revised workflow. • Continue : let a proven-unaffected running attempt proceed; result remains provisional until commit. • Reuse : keep a proven-unaffected completed result; it too is revalidated at commit. Thus, preserve is not a separate action: it means continuing unaffected running work or reusing unaffected completed work. The first three actions remove or redo stale work, while the last two retain only work supported by the available evidence. The same evidence determines the scope of recomputation. Complete fine-grained provenance recomputes only the affected subgraph. If R EVISE can identify only the earliest safe conflict, it recomputes a topological suffix; if it cannot identify a safe boundary, it performs a full restart. An irreversible or incompletely covered effect requires explicit handling or blocks execution. Selective recovery is therefore an optimization enabled by the validity semantics. 43.3 Commit-time revalidation 
+
+A revision may precede an attempt’s final read, so revision-time decisions cannot permanently authorize reuse. Each attempt runs on an immutable snapshot and accumulates a certificate 
+
+Cx = ( id , v start , R data , R control , P, mode ), (2) where vstart is the revision-journal version at attempt start, P identifies parent attempts and mode is complete, coarse, or unknown. Revisions append deltas to a journal. Revision and commit serialize on the same lock. At commit, R EVISE checks every delta after vstart against the final certificate and verifies that every parent remains the current committed attempt. A conflicting, unknown, or obsolete attempt is rejected; tool effects remain staged until this check succeeds. If a later revision invalidates an already committed parent, R EVISE invalidates its dependent outputs and any revocable or versioned effects before recomputing the current version. 1
+
+## 4 Evaluation 
+
+Experimental setup. We evaluate R EVISE on LangGraph and LLMCompiler [9], repository-grounded replay, adversarial tests, and multi-tenant serving. Both applications use local Qwen3-14B inference through SGLang. Serving experiments use 64 tenants and four H100 replicas at 1.4–2.6 workflows/s (0.7–1.3 × a measured 2.0-workflow/s capacity). 
+
+Repository-grounded replay. We construct controlled replays from SWE-Review-Traj [10]. Of 100 audited trajectories, 51 request patch changes and 33 expose structured defect paths; we select five locally reproducible workloads. We preserve the repository, patch, reviewer evidence, and tests while controlling revision timing, so the replay grounds revision content and tool work rather than natural timing. 
+
+Runtime and baselines. Our Python adapters obtain LangGraph topology/state reads and LLM-Compiler Task dependencies, with SGLang serving [3]; they also support request aborts and staged effects. We compare full restart , earliest-conflict dynamic suffix , and R EVISE selective recovery ; live experiments additionally wait for turn end. Suffix receives the same provenance as R EVISE , isolating recovery granularity. We report correctness, calls, tokens, model-wall time, recomputation, 25-s SLO goodput, and p99 latency. 
+
+4.1 RQ1: Does R EVISE preserve correctness? 
+
+Table 1 summarizes 15,939 executions. Every run matches its latest-version/full-restart oracle, with no stale output or committed effect. The 300-run adversarial matrix covers both revision/commit orders, late reads, consecutive revisions, unknown provenance, membership changes, and control-route invalidation. Obsolete attempts never publish, while valid siblings remain reusable; all 800 validity-certificate checks complete in under 0.04 ms. These results establish in-process validity and effect safety, not distributed consensus or crash recovery. Table 1: Correctness and effect safety across complementary settings.                                  
+
+> Workload Runs Oracle-equal ↑Stale out. ↓Stale eff. ↓
+> Online and integration matrices 171 171 00LLMCompiler portability 288 288 00Repository-grounded replay 180 180 00Adversarial protocol 300 300 00GPU serving pressure 15,000 15,000 00Total 15,939 15,939 00
+> 1System boundary. The recovery planner is backend independent and requires adapters only to expose workflow topology, lifecycle events, and reads. R EVISE decides semantic validity; physical KV allocation, including non-contiguous or cross-GPU KV reuse, remains outside its scope.
+
+54.2 RQ2: How much recomputation is avoided? 
+
+On LangGraph, R EVISE reduces model calls by 56.0% versus full restart and 43.6% versus dynamic suffix; model-wall time falls by 62.7% and 50.2%. Across 48 LLMCompiler workflows, calls fall by 40.6% and 31.3%, while tokens fall by 7.9% and 5.8%, respectively. Because dynamic suffix uses the same provenance, these gains come from finer recovery rather than better dependency information. With unavailable fine-grained provenance, R EVISE falls back conservatively: all 48 cases lacking fine-grained provenance recover equivalently to full restart. Repository replay shows the same effect on real coding artifacts. Across 18 replay configurations, REVISE performs 12.94% less recomputation than suffix (95% CI: 7.77–17.70%) and discards 10.38% less completed work (95% CI: 2.74–18.81%). All 180 executions remain equivalent in final output, 
+
+pytest , file/patch state, and visible effects. 
+
+4.3 RQ3: Do work savings become serving gains? 
+
+Work reduction need not shorten a single request’s critical path. LangGraph E2E p50 improves only 5.9% over suffix despite 50.2% less model-wall time, while repository replay changes E2E by −0.55 % (95% CI: [−4.00 , +3 .84] %). We therefore evaluate whether saved work helps under replica contention. Across 15,000 workflows with 50% revised requests, R EVISE reduces revision-to-correct-completion tokens by 13.26% (95% CI: 12.86–13.67%) and model-wall time by 14.70% (95% CI: 14.28–15.11%) relative to suffix. Table 2 shows little goodput gain near capacity but increasing benefit under contention. Thus, work reduction is stable across load, while its serving value is pressure-dependent. Table 2: Serving change of R EVISE relative to suffix. Brackets report 95% confidence intervals.                      
+
+> Load Regime SLO goodput ↑p99 ↓
+> 1.0 ×Frozen capacity −0.12 %−1.13 %1.1 ×Boundary pressure +3 .07 %−4.42 %1.3 ×Intentional overload +5 .43 %−13 .80 %Pooled 1.0–1.3 ×+2 .79 %[+1 .23 ,+4 .40] −6.45 %[−10 .11 ,−3.05]
+
+## 5 Related work 
+
+Revision and rollback recovery. Revisable by Design rolls a streaming trace back to its earliest conflict [5]. Error-triggered alternatives include stepwise/Web rollback [11, 12], context–environment rewind [13], and DART’s dependency- and effect-aware checkpoint admission [14]. These systems roll back trajectories or checkpoints. In contrast, R EVISE maps an external semantic revision to leaf-level validity decisions across node lifecycles, allowing it to preserve non-contiguous work when preservation is proved safe. 
+
+Foundations, substrates, and workload characterization. Self-adjusting computation tracks dependencies and propagates changes [15]; R EVISE extends this perspective to partially executed agent DAGs with cancellation, staged effects, and revision/commit races. AIOS, SGLang, and Agentix schedule agent work [2, 3, 4]; PASTE overlaps execution [16]; Leyline edits KV spans [17]; and DeltaBox/Crab restore sandboxes [18, 19]. TraceLab characterizes long-running coding-agent trajectories and human interaction gaps [20], but does not identify whether a later interaction revises already-consumed execution state or which completed or in-flight work remains valid afterward. ACRFence exposes replay hazards [21], while Atomix/Cordon protect externally visible effects [6, 7]. These systems provide complementary execution and recovery substrates, but do not jointly map online revisions to data/control-validity decisions over a partially executed workflow. 
+
+## 6 Conclusion 
+
+Agent workflows must remain correct when user revisions arrive during ongoing execution without unnecessarily discarding valid progress. We presented R EVISE , a validity-guided runtime for fine-6grained recovery that identifies affected work from revision deltas and dynamic data and control dependencies, stops invalid work, selectively preserves proven-valid progress, and recomputes only the affected region. When provenance is incomplete, R EVISE conservatively expands recovery toward a suffix or full restart, while outputs and staged tool effects are revalidated before commit. Analysis of real SWE-chat traces establishes opportunities for online intervention, and experiments on unmodified LangGraph and LLMCompiler applications, repository-grounded replays, challenging event orderings, and Qwen3-14B serving-pressure settings show that R EVISE maintains latest-version correctness without stale outputs or effects, reduces unnecessary recomputation, and improves serving efficiency under contention. 
+
+## References 
+
+[1] Joachim Baumann, Vishakh Padmakumar, Xiang Li, John Yang, Diyi Yang, and Sanmi Koyejo. SWE-chat: Coding agent interactions from real users in the wild. arXiv preprint arXiv:2604.20779 , 2026. URL 
+
+https://arxiv.org/abs/2604.20779 .[2] Kai Mei, Xi Zhu, Wujiang Xu, Mingyu Jin, Wenyue Hua, Zelong Li, Shuyuan Xu, Ruosong Ye, Yingqiang Ge, and Yongfeng Zhang. AIOS: LLM agent operating system. In Conference on Language Modeling (COLM) , 2025. URL https://openreview.net/forum?id=L4HHkCDz2x .[3] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. arXiv preprint arXiv:2312.07104 , 2024. URL https: //arxiv.org/abs/2312.07104 .[4] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E. Gonzalez, and Ion Stoica. Agentix: An efficient serving engine for LLM agents as general programs. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) , pages 2443–2459. USENIX Association, 2026. URL https://www.usenix. org/conference/nsdi26/presentation/luo .[5] Zhiyuan Zhai, Ming Li, and Xin Wang. Revisable by design: A theory of streaming LLM agent execution. 
+
+arXiv preprint arXiv:2604.23283 , 2026. URL https://arxiv.org/abs/2604.23283 .[6] Bardia Mohammadi, Nearchos Potamitis, Lars Klein, Akhil Arora, and Laurent Bindschaedler. Atomix: Timely, transactional tool use for reliable agentic workflows. arXiv preprint arXiv:2602.14849 , 2026. URL 
+
+https://arxiv.org/abs/2602.14849 .[7] Zheng Chen, Hanqing Liu, Duling Xu, Dong Dong, Jialin Li, Bangzheng Pu, and Jidong Zhai. Cordon: Semantic transactions for tool-using LLM agents. arXiv preprint arXiv:2606.17573 , 2026. URL https: //arxiv.org/abs/2606.17573 .[8] Carlos E Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik R Narasimhan. SWE-bench: Can language models resolve real-world github issues? In The Twelfth International Conference on Learning Representations , 2024. URL https://openreview.net/forum? id=VTF8yNQM66 .[9] Sehoon Kim, Suhong Moon, Ryan Tabrizi, Nicholas Lee, Michael Mahoney, Kurt Keutzer, and Amir Gholami. An llm compiler for parallel function calling. arXiv preprint arXiv:2312.04511 , 2023. [10] Ruoyu Wang, Jierun Chen, Shaowei Wang, Chaofan Tao, Sidi Yang, Yuxin Jiang, Kim-Hui Yap, Lifeng Shang, Xiaohui Li, and Haoli Bai. SWE-Review: Closing the loop on issue resolution with agentic code review. arXiv preprint arXiv:2607.06065 , 2026. URL https://arxiv.org/abs/2607.06065 .[11] Xingzuo Li, Kehai Chen, Yunfei Long, Xuefeng Bai, Yong Xu, and Min Zhang. Generator-assistant stepwise rollback framework for large language model agent. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing , pages 17683–17700, 2025. doi: 10.18653/v1/2025. emnlp-main.892. URL https://aclanthology.org/2025.emnlp-main.892/ .[12] Zhisong Zhang, Tianqing Fang, Kaixin Ma, Wenhao Yu, Hongming Zhang, Haitao Mi, and Dong Yu. WebRollback: Enhancing web agents with explicit rollback mechanisms. In Proceedings of the 19th Conference of the European Chapter of the Association for Computational Linguistics (Volume 2: Short Papers) , pages 187–197, 2026. doi: 10.18653/v1/2026.eacl-short.12. URL https://aclanthology. org/2026.eacl-short.12/ .
+
+7[13] Yu Zhuang, Kefei Chen, Yitong Duan, Shuxin Zheng, Jian Li, and Xu-Yao Zhang. AgentRewind: Recoverable execution for long-horizon LLM agents. arXiv preprint arXiv:2608.14380 , 2026. URL 
+
+https://arxiv.org/abs/2608.14380 .[14] Ke Yang, Panpan Li, Zonghan Wu, Kejin Xu, Huaxi Huang, and Xiaoshui Huang. DART: Semantic recoverability for structured tool agents. arXiv preprint arXiv:2605.23311 , 2026. URL https://arxiv. org/abs/2605.23311 .[15] Daniel Anderson, Guy E. Blelloch, Anubhav Baweja, and Umut A. Acar. Efficient parallel self-adjusting computation. In ACM Symposium on Parallelism in Algorithms and Architectures (SPAA) , pages 59–70, 2021. doi: 10.1145/3409964.3461799. [16] Yifan Sui, Han Zhao, Rui Ma, Zhiyuan He, Hao Wang, Jianxun Li, Kaiqiang Xu, Kai Chen, and Yuqing Yang. Parallelizing tool execution and LLM generation for low-latency agent serving. arXiv preprint arXiv:2603.18897 , 2026. URL https://arxiv.org/abs/2603.18897 .[17] Bole Ma, Jan Eitzinger, and Harald K"ostler. Leyline: KV cache directives for agentic inference. arXiv preprint arXiv:2606.01065 , 2026. URL https://arxiv.org/abs/2606.01065 .[18] Yunpeng Dong, Jingkai He, Shiqi Liu, Yuze Hou, Dong Du, Zhonghu Xu, Si Yu, Baochuan Yang, Yubin Xia, and Haibo Chen. DeltaBox: Scaling stateful AI agents with millisecond-level sandbox checkpoint/rollback. 
+
+arXiv preprint arXiv:2605.22781 , 2026. URL https://arxiv.org/abs/2605.22781 .[19] Tianyuan Wu, Chaokun Chang, Lunxi Cao, Wei Gao, and Wei Wang. Crab: A semantics-aware checkpoint/restore runtime for agent sandboxes. arXiv preprint arXiv:2604.28138 , 2026. URL 
+
+https://arxiv.org/abs/2604.28138 .[20] Kan Zhu, Mathew Jacob, Chenxi Ma, Yi Pan, Stephanie Wang, Arvind Krishnamurthy, and Baris Kasikci. TraceLab: Characterizing coding agent workloads for LLM serving. arXiv preprint arXiv:2606.30560 ,2026. URL https://arxiv.org/abs/2606.30560 .[21] Yusheng Zheng, Yiwei Yang, Wei Zhang, and Andi Quinn. ACRFence: Preventing semantic rollback attacks in agent checkpoint-restore. In CoDAIM Workshop , 2026. URL https://arxiv.org/abs/2603. 20625 .
+
+8A Additional Experimental Details 
+
+A.1 Online revision opportunity in SWE-chat 
+
+The 118 SWE-chat sessions with observable work before revision delivery contain 174 work-bearing queued-revision events. We retain 173 events from 117 sessions with complete enqueue and delivery timestamps. 
+
+Audit-cohort construction. The audit includes all nine rare strict-overlap events—one mutation, two task notifications, and six tool overlaps—plus seven assistant-only events from each duration stratum: < 10 s, 10–30 s, and ≥ 30 s. Within each stratum, a stable hash fixes the order and a greedy rule favors unused sessions and underrepresented repositories. The resulting 30-event cohort spans 29 sessions and 24 repositories. It is frozen before semantic review and is used for taxonomy construction, not prevalence estimation. 
+
+A.2 Latest-version correctness 
+
+We evaluate latest-version correctness under challenging event orderings and repository-grounded recovery scenarios. Table 3: Challenging event orderings and required recovery behavior.          
+
+> Case Required behavior Late read A read materialized after a revision is revalidated at commit; an invalid attempt is rejected. Commit race Commit-first output is subsequently invalidated; revision-first rejects the stale attempt at commit. Consecutive revisions Obsolete v1/v2 attempts reject while a disjoint sibling remains valid. Unknown provenance Missing dependency evidence fails closed. Membership change A#members read intersects key insertion or deletion. Control route Old route certificates invalidate and the current route recomputes.
+
+Challenging event orderings. Both possible orderings between revision and commit are exercised in the 300-run matrix. Across all runs, R EVISE matches the latest-version oracle without stale outputs or effects. Across 800 commit checks, certificate validation costs 0.0026 ms p50, 0.0076 ms p95, and 0.0344 ms maximum. Table 4: Correctness on 30 reviewer-triggered issues from 20 repositories.                
+
+> Policy Official verdict ↑Latest-version equivalent ↑Stale effects ↓
+> Full restart 30/30 30/30 0Earliest-conflict suffix 30/30 30/30 0
+> REVISE 30/30 30/30 0
+
+Repository-grounded correctness. The official verdict is joined to a reference Patch@v2, and a three-task canary reruns the official evaluator under all three policies. This experiment tests recovery correctness rather than patch quality. A separate local Qwen3-14B canary resolves 0/3 tasks, so we make no claim that R EVISE improves patch generation. 
+
+A.3 Selective recovery efficiency 
+
+We evaluate how selective recovery reduces recomputation across LangGraph, LLMCompiler, and repository-grounded replay workloads. 
+
+LangGraph live-request results. The matrix delivers typed revisions during live SGLang genera-tions and issues 15 real aborts. Policy and scenario order rotate across three repeats. Because the shared service cache is not flushed between jobs, calls and generated tokens are primary metrics; model-wall time is secondary. 9Table 5: Qwen3-14B work and latency in the unmodified 10-node LangGraph application.                     
+
+> Policy Calls ↓Compl. tok. ↓Model-wall ↓E2E p50 ↓
+> Full restart 10.0 80.0 1521 ms 719 ms Earliest-conflict suffix 7.8 62.4 1138 ms 711 ms
+> REVISE 4.4 35.2 567 ms 669 ms
+
+Table 6: R EVISE reduction relative to earliest-conflict suffix in the live-request Qwen matrix (means over three repeats).                 
+
+> Revision Calls Prompt tok. Compl. tok. Model-wall Policy/control 37.5% 36.3% 42.6% 43.8% Helper goal 28.6% 28.1% 28.6% 28.3% Reviewer evidence 16.7% 15.9% 16.7% 16.8%
+
+LLMCompiler portability. The portability matrix fixes eight ParallelQA plans, four revision classes, and three repeats per policy. All 48 local identities remain selective, whereas all 48 cases lacking fine-grained provenance recover equivalently to full restart. The resulting 50% fallback rate is a controlled stress-matrix composition, not a deployment estimate. All 288 runs match the latest-version oracle with no stale outputs or effects. A 30-pair no-revision probe produces identical outputs. Its measured −4.2% wall-time difference is treated as scheduling noise rather than a speedup. Planner latency is 0.207 ms p50. 
+
+Repository-grounded locality. Aggregating the first two local cases yields confidence intervals excluding zero. The three ratio-one controls have intervals crossing zero and are therefore interpreted as policy equivalence rather than performance gains. These controls distinguish the benefit of preserving proven-valid progress under local revisions from cases in which fine-grained recovery correctly collapses to the suffix boundary. 
+
+A.4 Robustness to provenance and revision frequency 
+
+The benefit of selective recovery depends on both how often revisions occur and how precisely the runtime can establish execution validity. We vary these two factors independently. 
+
+Revision-frequency sensitivity. Across 24,000 workflows with 0/10/25/50% revised requests, no-revision model-wall time changes by only +0 .013 %, with a confidence interval crossing zero. At nonzero revision fractions, per-revision completion-token and model-wall reductions remain approximately 12–14%. Aggregate benefit therefore increases with the controlled revision fraction; this sweep does not estimate production prevalence. 
+
+Provenance sensitivity. A separate 12,000-workflow provenance sweep yields recomputation-to-active-work ratios of 50.0%, 81.7%, and 100% under complete, half, and unknown provenance. Half coverage falls back to full-equivalent recovery for 60% of revised requests, while unknown provenance does so for 100%. All runs match the latest-version oracle with no stale effects. The half-coverage mask is controlled rather than a measurement of natural provenance coverage. In the unmodified 10-node LangGraph application, complete provenance captures all six expected leaf reads and recovers all five expected recomputation sets without full-restart fallback. As provenance becomes less precise, recovery expands conservatively rather than reusing work whose validity cannot be established. 
+
+A.5 Serving under GPU pressure 
+
+The serving matrix runs Qwen3-14B with SGLang 0.5.13 on four single-H100 replicas and 64 tenant namespaces under open-loop arrivals. A separate suffix-only scan fixes measured capacity at 2.0 workflows/s before policy comparison. We evaluate 1.4, 1.8, 2.0, 2.2, and 2.6 workflows/s, corresponding to 0.7–1.3 × measured capacity; the final rate is intentional overload. 10 Table 7: Recovery work in the unmodified LLMCompiler application [9] (48 identities per scope; means).                       
+
+> Scope Policy Calls ↓Total tok. ↓Full fallback Local Full restart 6.00 2536.5 100% Local Earliest-conflict suffix 5.19 2482.0 50% Local REVISE 3.56 2336.9 0%
+> Global/untracked All policies 6.00 2552.1 100%
+
+Table 8: Selective recovery in the five repository-grounded replay workloads.                   
+
+> Role Locality Affected/suffix ratio Recompute-work change Multi-file local Local positive 0.50 −13 .50 %Small local Local positive 0.75 −11 .18 %Mixed boundary Policy-equivalent 1.00 −2.37 %Global change Negative control 1.00 −0.57 %Scope expansion Negative control 1.00 −3.94 %
+
+Each policy runs 500 workflows per configuration (180 warmup, 280 steady, 40 cooldown) in three paired repeats, yielding 15,000 records. Job identity, arrival, tenant, revision, and replica assignment are paired, while policy order rotates across repeats. All runs use four replicas, satisfy telemetry and arrival-generator checks, and commit no stale effects. Work deltas and configuration-level serving deltas are bootstrapped separately. 
+
+A.6 Implementation and reproducibility Framework integration. The unmodified 10-node LangGraph application uses a 25-line shared state/node-factory wrapper that captures all six expected leaf reads, with no application-node edits or selector annotations. For LLMCompiler, a shared 343-logical-line adapter wraps native task arguments and dependencies with no application edits or selector annotations, capturing all 1,584 expected explicit selector instances across the portability matrix. 
+
+Environment and artifacts. Experiments use Python 3.12, LangGraph 1.2.9, SGLang 0.5.13, Qwen3-14B in bfloat16, and H100 80GB GPUs. Generation uses temperature zero and fixed experiment-order seeds. Formal runners emit per-job JSON records containing configuration, selected and executed nodes, token/model-wall metrics, effect state, and oracle checks; separate analyzers enforce frozen gates. Repository replay additionally records rootfs identity, test collection, and exit status. The anonymized artifact package includes the runners, analyzers, preregistrations, and environment instructions. 11
