@@ -1,0 +1,821 @@
+Title: Adaptive Context Parallelism for Production LLM Serving
+
+URL Source: https://arxiv.org/pdf/2609.04774v1
+
+Published Time: Mon, 07 Sep 2026 00:34:11 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Adaptive Context Parallelism for Production LLM Serving 
+
+# Jiarui Guo 
+
+Peking University 
+
+# Rongle Wang 
+
+Peking University 
+
+# Peijun Huang 
+
+Peking University 
+
+# Zongwei Lv 
+
+Peking University 
+
+# Ziqing Wang 
+
+Alibaba Group 
+
+# Kan Liu 
+
+Alibaba Group 
+
+# Tao Lan 
+
+Alibaba Group 
+
+# Lin Qu 
+
+Alibaba Group 
+
+# Xiaolin Wang 
+
+Peking University 
+
+# Tong Yang 
+
+Peking University 
+
+## ABSTRACT 
+
+As LLM context windows expand and input sequences grow longer, serving systems face increasing computational and mem-ory demands. Context parallelism (CP), which partitions the input sequence across multiple ranks to parallelize the computation, has therefore become increasingly important for efficient LLM serv-ing. However, existing CP-enabled systems either rely on static CP configurations or adjust the CP degree only for active requests or batches. In this paper, we present Vertumnus, an adaptive CP serv-ing system designed for heterogeneous and evolving workloads. At the request level, Vertumnus routes requests among workers with different CP degrees using a placement cost that combines predicted queuing delay, cache-aware prefill time, and GPU-time cost. At the cluster level, Vertumnus adapts the worker composi-tion through seconds-scale split and merge operations as workload demand changes. Vertumnus further introduces a global prefix-cache management policy that coordinates cache placement and replication among workers with the same or different CP degrees, preserving cache locality as request assignments and worker com-position change. Experiments on a 64-GPU cluster with public and production workloads show that, under the highest evaluated loads, Vertumnus reduces mean TTFT by up to 28.1% and improves token-weighted SLO attainment by up to 13.3 percentage points over the strongest baseline. 
+
+## 1 INTRODUCTION 
+
+Recent years have witnessed remarkable advances in large lan-guage models (LLMs), driven by rapid improvements in model capabilities, context length, and model scale [1–3]. LLMs are now powering a diverse range of applications, e.g. conversational as-sistants [4], retrieval-augmented generation [5], long-document understanding [6], and autonomous agents [7]. As LLMs become deeply integrated into products and enterprise workflows, LLM in-ference is increasingly delivered as a continuously available online service rather than executed only as isolated offline tasks [8, 9], placing LLM serving on the critical path of production applications. Therefore, efficient LLM serving systems have become a critical component of modern AI infrastructure [10–12]. In production, the workloads handled by these systems exhibit three important characteristics. ① Request lengths are highly heterogeneous. Con-ventional question-answering requests may contain only a few hundred tokens, whereas document analysis, retrieval-augmented generation, and complex agentic requests may contain tens of thou-sands of tokens or more [13]. ② Workloads are temporally dynamic. Both the request arrival rate and the composition of short and long 
+
+> Kan Liu (liukan.lk@alibaba-inc.com) and Tong Yang (yangtong@pku.edu.cn) are cor-responding authors.
+
+requests can change substantially over time [14, 15]. ③ Prefix reuse is becoming increasingly prevalent. Shared system prompts, multi-turn conversations, and agent/subagent workflows often produce long repeated prefixes, making prefix caching critical for avoid-ing redundant prefill computation [16–18]. Efficiently serving such workloads requires matching computational resources to both indi-vidual requests and evolving aggregate demand, while exploiting prefix reuse and maintaining overall GPU efficiency. These requirements become particularly demanding for long-context requests. As context lengths continue to grow, context parallelism (CP) 1 has emerged as an important technique for ac-celerating long-context processing [19–21]. In CP, the input tokens of a request are partitioned across multiple ranks, each mapped to one GPU, and the attention computation is distributed among these ranks. This allows long requests to exploit the compute capacity of multiple GPUs and reduce per-GPU memory pressure, poten-tially reducing time-to-first-token (TTFT) at the cost of additional cross-GPU communication and a larger resource footprint. Like workload intensity and prefix-cache locality, the CP degree is an important factor that a serving scheduler must consider. Dif-ferent CP degrees induce different request latency, communication overhead, GPU consumption, and aggregate serving capacity. How-ever, to the best of our knowledge, the current landscape leaves three important gaps. First, most existing LLM serving systems ei-ther lack support for CP or do not treat the CP degree as a first-class scheduling dimension [22–24]. Their scheduling policies typically optimize request characteristics, cache locality, or worker load with-out modeling how these factors interact with the CP degree. Sec-ond, systems that support CP commonly determine each worker’s CP degree at deployment time [25]. When workers with multiple CP degrees coexist, GPUs are statically partitioned among persis-tent CP workers. Since requests are usually routed using offline profiles and length-based rules, such static provisioning cannot adapt the worker composition to workload evolution. Moreover, routing solely by input length may be suboptimal, as it ignores worker-specific prefix reuse and current load. Third, although re-cent systems dynamically adjust CP at request, batch, or iteration granularity, their adaptation is tied to active executions rather than a persistent worker composition [26, 27]. Therefore, they do not determine how a fixed GPU budget should be distributed across CP degrees as aggregate demand evolves. Moreover, transient rank groups hinder prefix reuse because they provide no stable workers for retaining cached prefixes and routing future requests.              
+
+> 1Some early works use sequence parallelism (SP) to refer to attention-level sequence partitioning, which we call CP. In this paper, CP partitions the input sequence and attention computation across ranks, whereas SP refers to partitioning the activations of non-matrix-multiplication operations, such as LayerNorm and dropout, along the sequence dimension. arXiv:2609.04774v1 [cs.OS] 4 Sep 2026 Jiarui Guo et al. t0 t1 t2 t3 t4 t5 t6
+> Input
+> sequence
+> t0 t1 t2 t3 t4 t5 t6 t7
+> padding
+> GPU 0
+> GPU 1
+> GPU 2
+> GPU 3
+> Q0
+> Q7
+> Q1
+> Q6
+> Q2
+> Q5
+> Q3
+> Q4
+> K0 V0
+> K7 V7
+> K1 V1
+> K6 V6
+> K2 V2
+> K5 V5
+> K3 V3
+> K4 V4
+> GPU 0
+> GPU 1
+> GPU 2
+> GPU 3
+> Causal Attention
+
+Figure 1: An example of context parallelism when 𝐶 = 4.1K 2K 4K 8K 16K 32K 64K    
+
+> Input tokens
+> 0.0 1.0 2.0 3.0 4.0
+> Speedup (×)
+> C=2 C=4 C=8
+
+Figure 2: Effects of CP on inputs with different lengths. 
+
+To address these limitations, we propose Vertumnus 2, an adap-tive serving system that treats the CP worker composition as a cluster-wide, dynamically controllable resource. Vertumnus coor-dinates CP execution at two timescales. At the request level, its scheduler routes each incoming request among persistent CP work-ers by minimizing a model-based placement cost, which combines predicted queuing delay, cache-aware prefill time, and the GPU-time cost of the selected CP degree. At the cluster level, Vertumnus monitors workload conditions and reconfigures the worker compo-sition within seconds; it uses in-place split and merge operations that require neither process restarts nor model-weight reloads. To maintain cache locality under heterogeneous and changing CP de-grees, Vertumnus further provides a global prefix-cache manager that coordinates prefix placement, replication, and reclamation among workers with the same or different CP degrees. Together, these mechanisms allow Vertumnus to improve serving capacity under a fixed GPU budget while satisfying service-level objectives (SLOs) under dynamic and prefix-intensive workloads. In general, the paper makes the following contributions: 
+
+• We develop a cache-aware prefill-time model and incorporate the CP degree into request scheduling across heterogeneous workers. The scheduler jointly accounts for worker load, prefix reuse, CP-dependent performance, and GPU-time cost. 
+
+• We design a cluster-level controller that adjusts the CP worker composition as the workload changes. It splits and merges work-ers within seconds to better match the available parallel capacity to current serving demand. 
+
+• We design a global prefix-cache manager that preserves locality as request assignments and CP worker composition change. It adapts prefix placement and replication within and across CP degrees as reuse patterns evolve. 
+
+• We implement Vertumnus and evaluate it with public and pro-duction workloads. The results show that Vertumnus reduces mean and P90 TTFT by up to 28.1% and 55.0%, respectively, and improves token-weighted TTFT SLO attainment by up to 13.3 percentage points. 
+
+## 2 BACKGROUND AND MOTIVATION 2.1 Context Parallelism 
+
+Modern LLMs employ diverse attention mechanisms, including dense, sparse, linear, and hybrid variants [1, 28–30]. Context par-allelism (CP) parallelizes long-sequence attention by partitioning the input tokens and their associated attention computation across multiple ranks, each mapped to one GPU. Given an input sequence 
+
+> 2Vertumnus is the Roman god of change and transformation. It reflects the system’s ability to adapt to evolving workloads across multiple timescales.
+
+x = (𝑥 0, . . . , 𝑥 𝑛 −1), standard causal self-attention [31] computes Attn (𝑄, 𝐾, 𝑉 ) = softmax 
+
+ 𝑄𝐾 ⊤
+
+√𝑑 ℎ
+
++ 𝑀 
+
+
+
+𝑉 , 
+
+where 𝑄 , 𝐾 , and 𝑉 denote the query, key, and value representa-tions, respectively; 𝑑 ℎ is the dimension of each attention head; and 
+
+𝑀 𝑖 𝑗 = 0 for 𝑗 ≤ 𝑖 and 𝑀 𝑖 𝑗 = −∞ otherwise. The resulting valid attention region is triangular, with later query blocks involving more computation than earlier ones. One implementation of CP addresses this imbalance through zigzag sequence partitioning [25, 32]. As illustrated in Figure 1, for a CP degree of 𝐶 , the input sequence is padded, if necessary, to a multiple of 2 𝐶 and evenly divided into 2 𝐶 contiguous chunks. Rank 
+
+𝑘 receives the 𝑘 -th and (2𝐶 − 1 −𝑘 )-th chunks for 𝑘 = 0, 1, . . . , 𝐶 − 1, pairing an early chunk with a late chunk to balance the attention workload. Each rank computes the query, key, and value represen-tations for its local tokens and performs an AllGather to collect the key and value representations across all ranks. It then computes attention for its local queries over all causally visible key-value states. Finally, the local outputs are restored to their original se-quence order and concatenated, producing a result equivalent to single-rank causal attention. Besides this zigzag-partitioned design, several alternative CP execution schemes have also been proposed [20, 21, 33, 34], and CP has been widely adopted in large-scale LLM training [19, 35–37]. For LLM inference, CP is particularly beneficial during the prefill stage, which processes the input sequence and constructs the KV cache before token generation. By executing a request across the 𝐶 
+
+ranks, CP increases the aggregate compute resources available to the request, thereby reducing its prefill latency and potentially im-proving its TTFT. However, a larger CP degree also introduces addi-tional communication and occupies more GPUs. Its benefit therefore depends strongly on input length: short inputs may not provide enough computation to amortize the communication overhead, whereas long inputs generally benefit more from the additional parallelism. As shown in Figure 2, we report the prefill speedup of different CP degrees relative to single-rank execution without CP (i.e., 𝐶 = 1) for the Qwen3-30B-A3B model [38]. For short requests, CP provides little benefit and can even increase prefill time because its communication and synchronization overheads outweigh the reduction in attention computation. Its benefit grows substantially with input length: at 64K tokens, 𝐶 = 4 and 𝐶 = 8 achieve approxi-mately 2 .71 × and 3 .91 × speedups, respectively. Thus, a larger CP degree can substantially reduce the prefill latency of long requests, but may consume additional GPUs without providing latency ben-efits for short requests, creating a fundamental trade-off between prefill latency and aggregate serving capacity. Adaptive Context Parallelism for Production LLM Serving 00:00 03:00 06:00 09:00 12:00 15:00 18:00 21:00 24:00                    
+
+> Time
+> 010 20 30 40 50
+> Long-request share (%)  Request count Input tokens
+> (a) Long-request fraction 00:00 03:00 06:00 09:00 12:00 15:00 18:00 21:00 24:00
+> Time
+> 020 40 60 80 100
+> Normalized request rate (%) (b) Normalized request rate 00:00 03:00 06:00 09:00 12:00 15:00 18:00 21:00 24:00
+> Time
+> 35 40 45 50 55
+> Prefix-cache hit rate (%) (c) Prefix-cache hit rate
+
+Figure 3: Temporal dynamics of a production LLM workload. 
+
+## 2.2 Prefix Caching under Context Parallelism 
+
+LLM inference generally consists of two stages: prefill and de-code. The prefill stage processes the input sequence and generates the key-value (KV) states for its input tokens, while the decode stage autoregressively generates new tokens and appends their KV states to the existing cache [39–41]. KV caching retains these states so that each decode step does not need to recompute the represen-tations of preceding tokens [42, 43]. Prefix caching extends this reuse across requests, allowing requests in multi-turn interactions or requests sharing common prefixes to reuse previously computed KV states [17, 44]. By retaining their KV states for future requests, prefix caching reduces redundant prefill computation at the cost of additional memory consumption [45, 46]. Prefix caching reduces the computation for CP-based prefill. Let 
+
+𝐿 = 𝑃 +𝑅 denote the total input length, where 𝑃 is the cached prefix length and 𝑅 is the uncached suffix length. Upon a prefix hit, the prefix KV states are reused, and only the 𝑅 uncached tokens undergo projection, feed-forward, and attention computation. Because the uncached queries attend to both the cached prefix and preceding uncached tokens, the remaining attention workload is 
+
+𝑊 (𝑅, 𝑃 ) = 𝑅𝑃 + 𝑅 (𝑅 + 1)
+
+2 . (1) The two terms capture attention from the uncached queries to the cached prefix and causal attention within the uncached suffix, respectively. As the cached prefix grows, CP has less remaining computation to parallelize, while its communication and synchro-nization overheads may not decrease proportionally. Consequently, a larger CP degree may provide substantial benefits for an uncached request but only limited benefits for the same request after a large prefix hit. Moreover, the cached KV states must be available at the selected worker and partitioned across its ranks, making their place-ment and reuse dependent on the worker’s CP degree. Therefore, selecting an appropriate CP degree requires considering both the cached prefix and the uncached suffix rather than the original input length alone. 
+
+## 2.3 Motivating Observations 
+
+To understand the workload characteristics encountered in de-ployment, we analyze a representative 24-hour traffic trace collected from our production LLM serving system. Figure 3 summarizes the temporal variation in its request-length composition, request arrival rate, and prefix-cache reuse. 
+
+Observation 1: Long requests are sparse in count but large in token volume. We classify requests with more than 32K input tokens as long requests. As shown in Figure 3(a), long requests ac-count for approximately 4% to 8% of request arrivals, yet contribute about 32% to 54% of the input tokens over the day. Long requests generally benefit more from larger CP degrees because they can better amortize CP communication overheads, whereas assigning larger degrees to short requests occupies more GPUs with limited latency benefit. Consequently, request count alone understates the resource significance of long requests: even a small change in their frequency can materially change the aggregate prefill compute demand and the worker composition required to sustain it. 
+
+Observation 2: Request arrival rate varies substantially over time. As shown in Figure 3(b), the request arrival rate changes by more than threefold between off-peak and peak periods. During off-peak periods, lower concurrency pressure allows more GPUs to be assigned to individual requests to reduce their latency. Dur-ing peak periods, however, a worker composition containing too many larger-degree workers provides fewer independent serving lanes and may limit aggregate serving capacity. Consequently, a worker composition that is effective under light load may become a bottleneck as the request arrival rate increases. 
+
+Observation 3: Prefix-cache reuse is common and dynamic. 
+
+We define the token-level prefix-cache hit rate as the fraction of input tokens covered by prefix-cache hits. As shown in Figure 3(c), this hit rate varies between approximately 35% and 55% over the day. Prefix hits reduce the amount of computation remaining for CP and change the relative benefit of different CP degrees. Moreover, cache contents are worker-specific, even among workers with the same CP degree, while changes in worker composition may require cached KV states to be transferred or reconciled across workers. Request placement and worker reconfiguration must therefore both account for the current prefix-cache state. 
+
+## 3 PROBLEM DEFINITION 3.1 System Model 
+
+We consider the prefill pool of a P/D-disaggregated LLM serving system with a fixed budget of 𝐺 GPUs. A persistent serving unit with CP degree 𝐶 is referred to as a CP worker, or simply a worker. A degree-𝐶 worker consists of 𝐶 CP ranks, each mapped to one GPU, and serves as the unit of request execution and physical KV-state placement. At time 𝑡 , the prefill pool contains a set of workers 
+
+W ( 𝑡 ). Each worker 𝑤 has a CP degree 𝐶 𝑤 ∈ C and occupies 𝐶 𝑤 
+
+GPUs: ∑︁   
+
+> 𝑤 ∈ W ( 𝑡 )
+
+𝐶 𝑤 = 𝐺, Jiarui Guo et al. 
+
+where C is the predefined set of supported CP degrees. Each worker’s CP degree remains fixed over the request-scheduling timescale. Consider a request 𝑖 arriving at time 𝑡 𝑖 with input length 𝐿 𝑖 . Let 
+
+𝑃 𝑖,𝑤 (𝑡 𝑖 ) denote the longest reusable prefix available at worker 𝑤 ,and let 
+
+𝑅 𝑖,𝑤 (𝑡 𝑖 ) = 𝐿 𝑖 − 𝑃 𝑖,𝑤 (𝑡 𝑖 )
+
+be the remaining uncached suffix. We denote the prefill execution time under CP degree 𝐶 by 𝐸 𝐶 (𝑅, 𝑃 ). If request 𝑖 is assigned to worker 𝑤 , its time-to-first-token (TTFT) is TTFT 𝑖,𝑤 = 𝑄 𝑤 (𝑡 𝑖 ) + 𝐸 𝐶 𝑤 
+
+ 𝑅 𝑖,𝑤 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 (𝑡 𝑖 ) + 𝑇 ext  
+
+> 𝑖
+
+,
+
+where 𝑄 𝑤 (𝑡 𝑖 ) is its waiting time at worker 𝑤 , and 𝑇 ext  
+
+> 𝑖
+
+captures latency outside the prefill pool, including KV transfer and first-token generation. Let 𝑤 𝑖 denote the selected worker, such that TTFT 𝑖 = TTFT 𝑖,𝑤 𝑖 . After prefill, requests and their KV states are transferred to a separately provisioned decode pool for token gen-eration. 
+
+## 3.2 Cache-Aware Prefill-Time Model 
+
+Building on profiling-based models for sequence-parallel prefill and cache-aware routing [26, 47], we construct a compact model that jointly captures CP degree and prefix reuse. With 𝑃 denoting the cached prefix length and 𝑅 the uncached suffix length, the predicted execution time is modeled as 
+
+b𝐸 𝐶 (𝑅, 𝑃 ) = 𝑑 + 𝑎𝑅 + 𝑏𝑃 + 1
+
+𝐶 [𝑐𝑅 + 𝛼𝑊 (𝑅, 𝑃 )] . (2) Here, 𝑑 is the fixed startup overhead, and 𝑎𝑅 captures uncached-token costs that do not decrease proportionally with CP, including communication, synchronization, and data movement. The term 𝑏𝑃 
+
+captures cached-prefix access and replay, while 𝑐𝑅 represents token-local computation distributed across CP ranks, such as projection and feed-forward operations. Finally, 𝑊 (𝑅, 𝑃 ) = 𝑅𝑃 + 𝑅 (𝑅 + 1)/ 2is the remaining attention workload derived in Equation 1, and 
+
+𝛼 converts it into execution time. The coefficients are fitted from queue-free profiles for each model-hardware configuration. This model captures the joint effects of prefix reuse and context parallelism. For a fixed input length, a larger prefix hit reduces both 
+
+𝑅 and 𝑊 (𝑅, 𝑃 ), while increasing 𝐶 accelerates only the computation distributed across CP ranks. The benefit of a CP degree therefore depends on the request’s remaining computation rather than its original input length alone. As shown in Figure 4, the model yields small fitting errors for the Qwen3-30B-A3B model [38] across the profiled CP degrees, input lengths, and prefix-cache hit ratios, in-dicating that this compact decomposition captures the dominant prefill costs. For a request-worker pair (𝑖, 𝑤 ), we instantiate the model as 
+
+𝑠 𝑖,𝑤 = b𝐸 𝐶 𝑤 
+
+ 𝑅 𝑖,𝑤 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 (𝑡 𝑖 ) , (3) which denotes the predicted prefill service time excluding queuing delay. 
+
+## 3.3 Service Objectives 
+
+For each request 𝑖 , we specify a TTFT requirement 𝜏 𝑖 and a time-per-output-token (TPOT) requirement 𝛿 𝑖 . For a measurement window of duration 𝐻 , let R ( 𝐻 ) denote the requests arriving during 10 1 10 0 10 1           
+
+> Measured latency (s)
+> 10 1
+> 10 0
+> 10 1
+> Predicted latency (s)
+> C=2 C=4 C=8
+> (a) Predicted vs. measured prefill time 0510 15 20 25
+> Absolute percentage error (%)
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Cumulative fraction
+> C=2 C=4 C=8 (b) Prediction error distribution
+
+Figure 4: Accuracy of the cache-aware prefill-time model. 
+
+the window; their latencies are measured upon completion. Since Vertumnus operates on the prefill pool, its primary objective is to minimize mean TTFT: TTFT (𝐻 ) = 1
+
+|R ( 𝐻 )| ∑︁ 𝑖 ∈ R ( 𝐻 )
+
+TTFT 𝑖 .
+
+It also seeks to maximize token-weighted TTFT SLO attainment: Attain TTFT (𝐻 ) =
+
+Í𝑖 ∈ R ( 𝐻 ) 𝐿 𝑖 · 1 [TTFT 𝑖 ≤ 𝜏 𝑖 ]
+
+Í𝑖 ∈ R ( 𝐻 ) 𝐿 𝑖 
+
+.
+
+Here, each request is weighted by its input length 𝐿 𝑖 , so the met-ric measures the fraction of input-token demand contributed by requests that satisfy their TTFT requirements. We assume that the decode pool is independently managed to meet its TPOT requirements. Improving prefill efficiency may al-low the system to sustain a higher request rate and consequently increase decode throughput when sufficient decode capacity is available, while decode-side optimization is outside the scope of this work. 
+
+## 4 SYSTEM OVERVIEW 
+
+To address these challenges, we present Vertumnus, an LLM serving system that adapts context parallelism to heterogeneous and dynamically changing production workloads. Figure 5 illus-trates its overall architecture. Vertumnus operates within the prefill pool of a P/D-disaggregated serving system: a fixed GPU budget is partitioned among persistent CP workers with different CP degrees, while requests are subsequently transferred to an independently provisioned decode pool. Within the prefill pool, Vertumnus coor-dinates request placement, worker composition, and prefix-cache management to reduce mean TTFT and improve TTFT SLO attain-ment under a fixed GPU budget. Vertumnus adapts CP at two complementary timescales. At the request timescale, the system decides which existing CP worker should serve each request; at the cluster timescale, it decides which CP workers should exist. For each incoming request, the scheduler consults the current worker state and worker-specific prefix-cache information to select an appropriate worker from the eligible work-ers with different CP degrees. Over longer workload windows, the reconfiguration controller monitors workload conditions and adjusts the worker composition through worker split and merge operations. Across both timescales, the global prefix-cache manager adapts prefix placement to request routing and worker reconfigura-tion. Adaptive Context Parallelism for Production LLM Serving KV     
+
+> Handoff
+> Worker
+> Worker
+> Worker
+> ……
+> Decode Pool
+> Decode
+> Response
+> Worker
+> Scheduler Prefix-Cache Manager
+> Prefill Pool
+> CP=2 CP=4 CP=8
+> Worker
+> State
+> Cache
+> Metadata
+> Reconfiguration Controller Prefill
+> Request
+> Cache Control
+> Prefix Lookup
+> Request
+
+Figure 5: System architecture of Vertumnus. Solid arrows denote request-level data and control paths, whereas dashed arrows represent cluster-level management operations. 
+
+## 5 REQUEST-LEVEL SCHEDULING 
+
+Given the current worker composition and prefix-cache place-ment, the request-level scheduler assigns each incoming request to an eligible CP worker. This decision jointly considers request length, worker load, and worker-specific prefix reuse across differ-ent CP degrees. In this section, we first explain why considering any one of these factors alone is insufficient, then describe the worker state and candidate construction, and finally present the CP-aware placement cost used by Vertumnus. 
+
+## 5.1 Scheduling Challenges 
+
+Under a fixed worker composition, workers with different CP degrees are not interchangeable. Assigning a request to a worker with a larger CP degree may reduce its prefill latency, but it also occupies more GPUs and limits the capacity available for serving other requests concurrently. This resource opportunity cost means that minimizing individual request latency does not necessarily maximize aggregate input-token throughput. Prefix reuse further changes the computation remaining for a request and, consequently, the CP degree at which it can be served efficiently. Requests with the same original input length may therefore favor different CP degrees depending on their available prefix reuse, making length-only routing insufficient. These considerations must also be balanced against the cur-rent worker load. A cache-first policy may repeatedly select an overloaded worker, increasing queuing delay despite avoiding re-dundant computation. Conversely, a load-first policy may select an idle worker but require recomputation of a large reusable prefix. Routing based only on request length and CP degree ignores both load imbalance and worker-specific prefix locality. A CP-aware scheduler must therefore jointly consider request length, worker load, and prefix-cache reuse. 
+
+## 5.2 Worker State and Candidate Construction 
+
+When request 𝑖 arrives at time 𝑡 𝑖 , the scheduler observes the current worker set W ( 𝑡 𝑖 ) and three types of state for each worker 
+
+𝑤 ∈ W ( 𝑡 𝑖 ): its CP degree 𝐶 𝑤 , its outstanding prefill workload, and its lifecycle status. The scheduler uses this workload as a lightweight proxy for the waiting time 𝑄 𝑤 (𝑡 𝑖 ), which depends on subsequent execution progress and is not directly available at placement time. This proxy enables the scheduler to compare load pressure across workers with different CP degrees. The scheduler also queries the prefix-cache manager for the longest reusable prefix of request 
+
+𝑖 available at each worker. Because cache contents are worker-specific, these lengths may differ across candidate workers for the same request. Using this state, the scheduler constructs the candidate set 
+
+W𝑖 (𝑡 𝑖 ) = {𝑤 ∈ W ( 𝑡 𝑖 ) | 𝑤 is eligible to serve request 𝑖 } .
+
+A worker is excluded if it is unavailable or draining, or if it cannot satisfy the sequence-length or memory requirements of the request. A prefix-cache miss does not exclude a worker, since the worker can still serve the request by recomputing the missing prefix. The resulting candidate set and its worker-specific state are used to evaluate the placement costs described in the next subsection. Once a worker is selected, the scheduler immediately reserves the re-quest’s estimated prefill workload at that worker so that concurrent arrivals do not observe the same pre-assignment load state. 
+
+## 5.3 Adaptive Placement Cost 
+
+To select a worker for request 𝑖 , the scheduler assigns a placement cost to every eligible worker 𝑤 ∈ W 𝑖 (𝑡 𝑖 ):
+
+𝐽 𝑖,𝑤 = 𝑞 𝑤 (𝑡 𝑖 ) + 𝛽𝑠 𝑖,𝑤 + 𝜆 
+
+h
+
+𝐶 𝑤 𝑠 𝑖,𝑤 − 𝐶 min b𝐸 𝐶 min (𝑅 𝑖,𝑤 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 (𝑡 𝑖 )) 
+
+i
+
+,
+
+where 𝐶 min is the smallest CP degree among the eligible workers, 
+
+𝛽 ≥ 1 controls the emphasis on cache-aware service time, and 
+
+𝜆 ≥ 0 controls the cost of occupying additional GPUs. The request is assigned to the minimum-cost worker: 
+
+𝑤 𝑖 = arg min    
+
+> 𝑤 ∈ W 𝑖 (𝑡 𝑖 )
+
+𝐽 𝑖,𝑤 .
+
+Queuing-delay cost. The first term, 𝑞 𝑤 (𝑡 𝑖 ), estimates how long request 𝑖 would wait before beginning execution at worker 𝑤 . It is maintained from the predicted remaining service times of the unfinished requests already assigned to worker 𝑤 at time 𝑡 𝑖 . We estimate this delay as 
+
+𝑞 𝑤 (𝑡 𝑖 ) =∑︁     
+
+> 𝑗 :𝑤 𝑗 =𝑤 𝑗 is unfinished at 𝑡 𝑖
+
+b𝐸 𝐶 𝑤 
+
+ 𝑅 𝑗,𝑤 (𝑡 𝑗 ), 𝑃 𝑗,𝑤 (𝑡 𝑗 ) .
+
+This term avoids routing requests to overloaded workers solely because they provide a favorable CP degree or prefix-cache hit. 
+
+Service-time cost. The second term uses the performance model defined in Equation 3: 
+
+𝑠 𝑖,𝑤 = b𝐸 𝐶 𝑤 
+
+ 𝑅 𝑖,𝑤 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 (𝑡 𝑖 ) .
+
+It captures the remaining computation, reusable prefix, and ex-ecution efficiency under the worker’s CP degree. When 𝛽 = 1, 
+
+𝑞 𝑤 (𝑡 𝑖 ) + 𝑠 𝑖,𝑤 corresponds to the predicted worker-dependent com-ponent of TTFT. However, latency-greedy placement may select a lightly loaded worker without the reusable prefix, causing redun-dant computation and dispersing related prefixes across workers. Setting 𝛽 > 1 amplifies the smaller service time produced by a prefix hit, making cache-holding workers more likely to be selected and preserving prefix locality for subsequent requests. 
+
+Additional GPU-time cost. The final term measures the additional GPU time incurred by executing request 𝑖 at worker 𝑤 rather than at the smallest eligible CP degree. Execution at worker 𝑤 is predicted Jiarui Guo et al. 
+
+to consume 𝐶 𝑤 𝑠 𝑖,𝑤 GPU-seconds, whereas execution at degree 𝐶 min 
+
+under the same prefix-reuse condition would consume 
+
+𝐶 min · b𝐸 𝐶 min 
+
+ 𝑅 𝑖,𝑤 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 (𝑡 𝑖 )
+
+GPU-seconds. Their difference accounts for both the larger GPU footprint and the shorter execution time of degree 𝐶 𝑤 , thereby cap-turing the resource cost of using additional CP ranks. The coefficient 
+
+𝜆 controls how strongly this cost affects request placement. For short requests, limited parallel speedup typically results in greater excess GPU time and favors a smaller CP degree. For compute-intensive requests, the larger latency reduction can outweigh this penalty, allowing them to select a larger degree. 
+
+## 6 CLUSTER-LEVEL RECONFIGURATION 
+
+Request-level scheduling can route requests only among the cur-rently available CP workers: it cannot correct a persistent mismatch between the worker composition and aggregate workload demand. To address this limitation, Vertumnus initializes a heterogeneous worker composition from historical workload characteristics and periodically adapts it through adjacent worker split and merge op-erations. These transitions activate pre-established CP groups over persistent GPU ranks, avoiding process restarts and model-weight reloading. 
+
+## 6.1 Capacity Profiling and Initialization 
+
+Both offline profiling and runtime monitoring partition their measurements into windows of fixed duration 𝐻 . Before deploy-ment, Vertumnus profiles one worker at each supported CP degree under increasing request loads. For a degree-𝐶 worker, the window-level request demand is measured by summing the predicted service times b𝐸 𝐶 (𝑅, 𝑃 ) of the requests served within an observation window. We denote by 𝜅 𝐶 the largest window-level demand for which the worker still satisfies the target TTFT SLO attainment. This profiling is performed for each model and CP degree deployed in our testbed and captures their execution efficiency and runtime overheads. The initial worker composition is selected using a representative historical workload, including its aggregate demand and request-length distribution. Historical information determines the expected mixture of small- and large-degree workers, while the profiled capacities are used to ensure that the selected composition can accommodate the expected demand. Among historically suitable compositions with sufficient capacity, the controller favors com-positions containing more large-degree workers, making greater parallelism available to latency-sensitive, compute-intensive re-quests. If none of these compositions provides sufficient capacity, it selects the composition with the largest aggregate profiled capacity. The runtime windows are consecutive and non-overlapping, with 𝐻 𝑘 denoting the 𝑘 -th window. Let R ( 𝐻 𝑘 ) contain the requests arriving during 𝐻 𝑘 , and let 𝑤 𝑖 denote the worker selected for request 
+
+𝑖 in that window. The aggregate workload demand is estimated as 
+
+𝐷 (𝑘 ) =∑︁   
+
+> 𝑖 ∈ R ( 𝐻 𝑘 )
+
+b𝐸 𝐶 𝑤 𝑖 
+
+ 𝑅 𝑖,𝑤 𝑖 (𝑡 𝑖 ), 𝑃 𝑖,𝑤 𝑖 (𝑡 𝑖 ) .
+
+The controller uses this estimate to determine whether the current composition should remain unchanged or move to an adjacent state in the pre-established grouping lattice. 
+
+## 6.2 Split-and-Merge Reconfiguration 
+
+At the end of each observation window, the controller compares the aggregate workload demand with the profiled capacity of the current worker composition and also monitors the fraction of long requests. A sustained workload above the upper threshold triggers a split to increase serving concurrency, whereas a workload below the lower threshold triggers a merge to provide more parallelism for individual requests. When the aggregate workload remains rel-atively stable but the long-request fraction changes substantially, an increase in this fraction favors merging, while a decrease favors splitting. Capacity takes precedence when the two signals conflict, and a merge is admitted only if the adjacent composition retains sufficient profiled capacity for the observed workload. The corre-sponding condition must persist for multiple observation windows before a transition is initiated. Given the selected direction, the controller considers topology-compatible split or merge operations leading to an adjacent com-position. Each operation replaces one degree-2 𝐶 worker with two degree-𝐶 workers or performs the inverse conversion, thereby pre-serving the aggregate GPU count. Among eligible operations, the controller first minimizes the predicted drain interval and then the expected KV-reconciliation traffic. The latter is estimated from the missing destination copies of retained prefixes weighted by their recent access frequencies. The participating workers are removed from the scheduler’s can-didate set and stop admitting new prefill requests. Queued requests are redirected to other eligible workers, while in-flight prefill execu-tions finish under the old CP geometry. The CP geometry is pinned throughout each engine step, and a configuration update observed at the model-input boundary applies only to the next step. This prevents a single execution step from combining communication under the old geometry with sequence partitioning under the new geometry. After a parent worker has drained, a split can activate its inde-pendent child groups. For a merge, all participating sibling groups first park at a common model-input boundary before activating their parent group. The controller commits the target CP degree under a new configuration epoch, and the resulting workers be-come schedulable only after all participating ranks have adopted the new epoch and the scheduler and cache manager have updated their worker metadata. Cached prefixes are retained without placing their full redistri-bution on the conversion critical path. Although their physical KV blocks remain resident, their rank ownership and addressing may need to be reconciled with the new CP geometry. After a merge, the manager combines the prefix metadata of the source workers and marks blocks missing from the merged worker as pending rec-onciliation. After a split, it assigns retained prefixes to the resulting workers according to prefix demand and available cache capacity. When a pending prefix is first reused, the manager transfers only the missing blocks from a valid resident copy and installs them under the new CP geometry. A pending prefix is not counted as immediately reusable cache capacity until reconciliation completes, and its missing portion is processed as an ordinary cache miss if no valid copy remains. Subsequent replication and reclamation are handled by the prefix-cache manager described in the next section. Adaptive Context Parallelism for Production LLM Serving 
+
+## 7 PREFIX CACHE MANAGEMENT 
+
+Vertumnus introduces a global prefix-cache manager to preserve cache locality across heterogeneous CP workers and worker recon-figuration. It maintains a global view of the logical prefix structure, replica placement, and degree-level prefix demand. Based on this in-formation, the manager replicates cached prefixes within and across CP degrees and reclaims underused replicas. Figure 6 illustrates the global prefix trie and the resulting cache operations. 
+
+## 7.1 Global Prefix-Trie Management 
+
+Each CP worker maintains a physically separate prefix cache, and its KV states cannot be reused by another worker without explicit replication or transfer. Request placement and worker reconfigura-tion continuously change where cached prefixes are accessed and stored, making it difficult for independent worker caches to preserve prefix locality. Thus, Vertumnus maintains a global metadata view over the caches of all CP workers. Following prior prefix-caching systems [11, 17, 47, 48], the manager organizes this metadata as a prefix trie to capture the inclusion relationships among cached prefixes. In the prefix trie, each node 𝑧 represents one cache block, while the path from the root to 𝑧 represents the complete prefix ending at that block. The manager also records its prefix length and the workers that currently hold the complete cached prefix ending at node 𝑧 . From these replica holders and their CP degrees, the man-ager derives ReplicaCount (𝑧, 𝐶 ), which is the number of degree-𝐶 
+
+workers holding this prefix. For every supported CP degree 𝐶 , each node additionally maintains two dynamic statistics, access [𝑧, 𝐶 ]
+
+and missed [𝑧, 𝐶 ]. access [𝑧, 𝐶 ] records how often node 𝑧 is reused by requests assigned to degree-𝐶 workers. missed [𝑧, 𝐶 ] accumu-lates the cache benefit lost when requests prefer degree 𝐶 but no degree-𝐶 worker holds 𝑧 . The former captures demand for adjust-ing the number of existing replicas within a CP degree, whereas the latter reveals demand for introducing a replica at a CP degree where the prefix is currently unavailable. The trie maintains these logical relationships and global metadata, while each worker’s local cache index continues to track its physical KV blocks. When request 𝑖 arrives, the manager traverses the trie using its block sequence to obtain MatchedPath (𝑖 ), regardless of where the matched nodes are replicated. After the scheduler assigns the re-quest to worker 𝑤 𝑖 , ReusedPath (𝑖, 𝑤 𝑖 ) identifies the portion of the matched path whose KV states are actually reused at that worker. The manager increments access [𝑧, 𝐶 𝑤 𝑖 ] for every node on the reused path. Because the selected worker may be affected by tran-sient queuing pressure, the manager derives the request’s preferred CP degree by omitting the worker-load term 𝑞 𝑤 (𝑡 𝑖 ) from the place-ment cost: 
+
+𝑤 pref  
+
+> 𝑖
+
+= arg min    
+
+> 𝑤 ∈ W 𝑖 (𝑡 𝑖 )
+
+𝐽 𝑖,𝑤 − 𝑞 𝑤 (𝑡 𝑖 ) , 𝐶 pref  
+
+> 𝑖
+
+= 𝐶 𝑤 pref 
+
+> 𝑖
+
+.
+
+We denote this degree by PreferDegree (𝑖 ) = 𝐶 pref  
+
+> 𝑖
+
+. For each node on the matched path with no replica at 𝐶 pref  
+
+> 𝑖
+
+, the manager computes its marginal cache benefit as the difference between the predicted service times when prefix reuse ends at its parent and at the node itself. This benefit is accumulated in missed [𝑧, 𝐶 pref  
+
+> 𝑖
+
+]. Because each node contributes only the benefit of extending its parent prefix by Global Prefix Trie           
+
+> hot
+> cold
+> A
+> DC
+> B
+> root
+> F
+> access
+> missed
+> cache holders
+> GH
+> E
+> Adaptive Cache Operations
+> ACGA
+> BEH
+> AA
+> BBE
+> CG
+> intra-degree replicate
+> D
+> reclaim
+> CG
+> inter-degree replicate
+> CP=4
+> CP=8
+
+Figure 6: Prefix-cache management in Vertumnus. Colors indicate recent demand. Each gray container represents the local prefix cache of a CP worker, while blocks with dotted outlines denote replicas created after a periodic scan. 
+
+one cache block, the benefits of longer prefixes are not counted repeatedly. Algorithm 1 summarizes this per-request update and gives the corresponding calculation. 
+
+Algorithm 1 Per-Request Cache Statistics Update 
+
+Require: Request 𝑖 and its selected worker 𝑤 𝑖  
+
+> 1:
+
+for all 𝑧 ∈ ReusedPath (𝑖, 𝑤 𝑖 ) 
+
+> 2:
+
+Increase access [𝑧, 𝐶 𝑤 𝑖 ] by 1  
+
+> 3:
+
+𝐶 pref  
+
+> 𝑖
+
+← PreferDegree (𝑖 ) 
+
+> 4:
+
+for all 𝑧 ∈ MatchedPath (𝑖 ) 
+
+> 5:
+
+if ReplicaCount (𝑧, 𝐶 pref  
+
+> 𝑖
+
+) = 0 
+
+> 6:
+
+𝑃 0 ← PrefixLength (Parent (𝑧 ))  
+
+> 7:
+
+𝑃 1 ← PrefixLength (𝑧 ) 
+
+> 8:
+
+benefit ←
+
+b𝐸 𝐶 pref 
+
+> 𝑖
+
+(𝐿 𝑖 − 𝑃 0, 𝑃 0) − b𝐸 𝐶 pref 
+
+> 𝑖
+
+(𝐿 𝑖 − 𝑃 1, 𝑃 1)
+
+ 
+
+> 9:
+
+Increase missed [𝑧, 𝐶 pref  
+
+> 𝑖
+
+] by benefit 
+
+## 7.2 Adaptive Replication and Reclamation 
+
+The cache manager periodically scans every trie node 𝑧 at each supported CP degree 𝐶 and generates inter-degree replication, intra-degree replication, and reclamation candidates. Inter-degree repli-cation creates the first replica of 𝑧 at degree 𝐶 when none cur-rently exists. When ReplicaCount (𝑧, 𝐶 ) = 0, node 𝑧 cannot pro-duce cache accesses at degree 𝐶 , so access [𝑧, 𝐶 ] cannot capture the demand for introducing such a replica. The manager therefore uses 
+
+missed [𝑧, 𝐶 ], which accumulates the predicted cache benefit lost by requests that prefer degree 𝐶 , and adds (𝑧, 𝐶 ) to the inter-degree replication list when this value exceeds a threshold 𝜃 inter .When 𝑟 = ReplicaCount (𝑧, 𝐶 ) > 0, intra-degree replication creates an additional replica among workers with the same CP degree. In this case, access [𝑧, 𝐶 ]/ 𝑟 represents the average reuse demand handled by each existing replica. The manager adds (𝑧, 𝐶 )
+
+to the intra-degree replication list when access [𝑧, 𝐶 ] > 𝑟𝜃 intra ,where 𝜃 intra represents the per-replica demand threshold required to justify another same-degree copy. Conversely, it adds (𝑧, 𝐶 ) to the reclamation list when access [𝑧, 𝐶 ] < 𝑟𝜃 reclaim , indicating that Jiarui Guo et al. 
+
+the existing replicas no longer justify their cache occupancy. We set 
+
+𝜃 reclaim < 𝜃 intra to avoid repeated replication and reclamation. The thresholds 𝜃 inter , 𝜃 intra , and 𝜃 reclaim are calibrated before deployment for the target model, hardware configuration, and scan interval. After each scan, the manager multiplies both access and missed 
+
+by a configured factor decay ∈ ( 0, 1), giving recent demand greater influence than older observations. Algorithm 2 summarizes the periodic scan. 
+
+Algorithm 2 Periodic Prefix-Cache Scan 
+
+Require: Prefix trie, supported CP degrees C 
+
+> 1:
+
+Initialize empty lists inter , intra , and reclaim  
+
+> 2:
+
+for all node 𝑧 and degree 𝐶 ∈ C  
+
+> 3:
+
+𝑟 ← ReplicaCount (𝑧, 𝐶 ) 
+
+> 4:
+
+if 𝑟 = 0 
+
+> 5:
+
+if missed [𝑧, 𝐶 ] > 𝜃 inter  
+
+> 6:
+
+Add (𝑧, 𝐶 ) to inter  
+
+> 7:
+
+else  
+
+> 8:
+
+if access [𝑧, 𝐶 ] > 𝑟𝜃 intra  
+
+> 9:
+
+Add (𝑧, 𝐶 ) to intra  
+
+> 10:
+
+else if access [𝑧, 𝐶 ] < 𝑟𝜃 reclaim  
+
+> 11:
+
+Add (𝑧, 𝐶 ) to reclaim  
+
+> 12:
+
+for all node 𝑧 and degree 𝐶 ∈ C  
+
+> 13:
+
+Scale access [𝑧, 𝐶 ] by decay  
+
+> 14:
+
+Scale missed [𝑧, 𝐶 ] by decay 
+
+The manager first determines which candidates in the three lists should be executed. For each replication candidate, the manager estimates the minimum copy footprint among feasible destination workers. For a given destination, this footprint contains only the missing blocks on the path from the root to 𝑧 . Inter-degree can-didates are ranked by decreasing missed [𝑧, 𝐶 ] per copied block. Intra-degree candidates are ranked by decreasing access [𝑧, 𝐶 ]/ 𝑟 ,with smaller copy footprints preferred when their per-replica ac-cess frequencies are similar. Reclamation candidates are ranked by increasing access [𝑧, 𝐶 ]/ 𝑟 . The three lists are ranked separately, and only a bounded number of operations are selected from each list per scan. For each selected replication, the destination is chosen from degree-𝐶 workers without 𝑧 . The manager favors destinations that retain a longer ancestor path of 𝑧 , have sufficient cache capacity, and carry lower workloads. For intra-degree replication, the source is selected from lightly loaded degree-𝐶 workers holding 𝑧 , whereas inter-degree replication may use a source worker at any CP degree that holds 𝑧 . For a selected reclamation, the manager chooses a replica on a worker with greater cache pressure while minimizing the impact on other retained prefixes. Replication transfers only the blocks missing from the destina-tion’s path from the root to 𝑧 , including any missing parent blocks required to form a complete prefix. Intra-degree replication trans-fers these blocks between corresponding CP ranks. Inter-degree replication transfers compatible KV states from a worker at an-other degree and repartitions them for the destination worker. A replica is reclaimed only when it is not in use and its removal does not invalidate descendant prefixes retained at the same worker. A newly created replica becomes visible to request scheduling only after a cache-state report confirms that all required KV states have been installed, while a reclaimed replica is removed from the holder metadata only after its deletion is confirmed. When worker re-configuration changes the worker set, the manager reconciles the affected replica records with the resulting placement. 
+
+## 8 IMPLEMENTATION 
+
+We implement Vertumnus on top of RTP-LLM [12], a production-oriented LLM serving framework with P/D disaggregation and pre-fix caching. Our implementation adds approximately 8,000 lines of C++, Python, and Java code to the prefill engine, request scheduler, worker-management layer, and prefix-cache subsystem, excluding tests and experiment harnesses. We do not modify decode batching or decode kernels; decode-side changes are limited to propagating the CP configuration epoch and DP-rank identity. We also imple-ment an offline profiling workflow that fits the prefill service-time model b𝐸 𝐶 (𝑅, 𝑃 ) and measures the SLO-preserving capacity 𝜅 𝐶 for each evaluated model and CP degree deployed in our testbed. The resulting model parameters and capacity profiles are loaded by the scheduler and reconfiguration controller before serving. To support in-place worker reconfiguration, we decouple the ac-tive CP group from the model state resident on each GPU rank. Each prefill rank loads its model weights once and retains them through-out serving. During initialization, Vertumnus reuses communicators already provided by RTP-LLM whenever their rank membership matches a required CP group and creates only the missing groups in the topology-aware grouping lattice. These process groups and their collective paths are warmed before serving. They introduce only communicator state and collective buffers while sharing the model state resident on each rank, enabling reconfiguration with-out process restarts or weight reloads. We implement the boundary protocol using a versioned control record that specifies the target CP degree and configuration epoch. Each rank acknowledges its adopted epoch and CP degree, and the controller exposes the re-sulting workers only after receiving consistent acknowledgments from all participating ranks. We implement the global prefix trie as an in-memory Java in-dex in the FlexLB control plane, while physical KV blocks remain managed by each worker’s native cache index and LRU policy. Workers report cache-key changes whenever their local cache state is updated, whereas replication and reclamation decisions are made periodically from the maintained trie statistics. Selected replication operations are issued asynchronously through RTP-LLM’s existing KV-transfer path. During a transfer, the source pins the referenced KV blocks against local eviction, while the destination reserves physical blocks for the missing portion of the selected prefix path. The destination publishes the resulting cache-key mappings only after the required blocks have been installed across its participating ranks. Reclamation is implemented through version-checked exact-key deletion, allowing the manager to remove a selected redundant replica while leaving ordinary local eviction to the native LRU pol-icy. The controller’s observation-window duration and the cache manager’s scan interval are independently configurable. The cache manager also exposes a configurable decay factor, per-list action lim-its, and background-transfer concurrency. In our experiments, both the controller observation window and the cache-manager scan Adaptive Context Parallelism for Production LLM Serving 
+
+Table 1: Characteristics of the evaluated workloads.                          
+
+> Reqs. Input Tokens Output Tokens Reuse Workload Mean P99 Mean P99 L-Eval 2,369 13,728 68,056 42.76 459 79.61% Tool-Agent 23,608 8,596 61,671 182 898 58.56% Production 22,446 6,952 81,724 411 4,227 24.75%
+
+interval are set to 20 seconds, and the cache dispatcher launches at most one active transfer per scan. 
+
+## 9 EVALUATION 9.1 Experimental Setup 
+
+Testbed: We evaluate Vertumnus on a cluster of 64 NVIDIA H20-3e GPUs organized into eight nodes, each equipped with eight GPUs, 128 CPU cores, and 960 GB of host memory. GPUs within each node are connected by NVLink, while the nodes are connected through an RDMA-capable network. We allocate 40 GPUs to the prefill pool and the remaining 24 GPUs to the independently provisioned decode pool. We evaluate DeepSeek-V4-Flash-FP8 [1] and Qwen3-30B-A3B [38]. For heterogeneous worker configurations, we use CP degrees 
+
+C = {4, 8} for DeepSeek-V4-Flash-FP8 and C = {2, 4} for Qwen3-30B-A3B. For each model, all comparable methods use the same model configuration, 40-GPU prefill budget, 24-GPU decode budget, and aggregate KV-cache capacity. Across all methods, the decode pool uses the same DP-8 worker configuration and is provisioned so that it does not become the performance bottleneck. 
+
+Workloads: We evaluate two public workloads, L-Eval [49] and Mooncake Tool-Agent [50], together with an anonymized workload trace collected from our production LLM services. L-Eval covers diverse long-context tasks, including question answering and in-formation retrieval, with widely varying input lengths. Mooncake Tool-Agent represents agentic serving workloads characterized by recurring system and tool prefixes. The Production workload is sam-pled from a recent, anonymized trace collected from our large-scale LLM service. L-Eval does not provide request-arrival timestamps, so we generate its arrivals using a Poisson process at controlled request rates. For Mooncake Tool-Agent and the Production work-load, we preserve the original request order and timestamps and scale their inter-arrival times to obtain different load levels. Ta-ble 1 summarizes the request count, request-length distribution, and prefix-reuse potential of each workload. 34 
+
+Baselines: We compare Vertumnus against two production-oriented baselines implemented on the same serving backend. Homo uses a homogeneous worker composition in which all pre-fill workers are degree-4 workers. Static uses the same worker composition as Vertumnus at each request rate. It routes requests using an input-length threshold profiled offline for each model and worker composition. Requests longer than the threshold are as-signed to workers with the larger CP degree, whereas the remaining 
+
+> 3We measure prefix-reuse potential as the token-level hit rate of an oracle prefix cache that retains every previously observed prefix, has unlimited capacity, and makes cached prefixes globally accessible.
+> 4The full production traffic typically exhibits a token-level prefix-cache hit rate of 35–55%. Because our replay contains only a sampled subset of requests, some cross-request prefix-reuse relationships are absent, and the cache statistics measured during replay do not necessarily match the online values.
+
+Table 2: TTFT deadlines used to evaluate SLO attainment. The two model deployments use different CP-degree ranges and target different throughput levels; we therefore use model-specific TTFT SLOs.            
+
+> Input length Model <8K 8–32K ≥32K DeepSeek-V4-Flash-FP8 0.5 s 2 s 5 s Qwen3-30B-A3B 1 s 5 s 10 s
+
+requests are assigned to workers with the smaller CP degree. We also compare against vLLM [10] and SGLang [11] using the same 40-GPU prefill budget. The evaluated version of vLLM does not support combining CP with data parallelism (DP), so we configure it with homogeneous TP-4 workers. SGLang supports CP serving but does not allow workers with different CP degrees to coexist in the same serving pool, so we configure it with only degree-4 workers. Specifically, we do not include LoongServe [26] because its publicly available implementation does not support the MoE model architectures evaluated in this work, including DeepSeek-V4-Flash-FP8 and Qwen3-30B-A3B. Supporting these models would require substantial model-specific execution and kernel integration rather than a configuration-only change, preventing a faithful comparison on the same testbed. 
+
+Metrics and methodology: Time-to-first-token (TTFT) is mea-sured from request arrival at the scheduler to the generation of its first output token; it includes queuing, scheduling, synchronous prefix-cache operations, prefill execution, KV transfer to the decode pool, and the first decode iteration. We report mean and P90 TTFT together with token-weighted TTFT SLO attainment, using the model- and input-length-specific TTFT targets listed in Table 2. Specifically, each request is weighted by its input-token count, and SLO attainment is computed as the total weight of requests meet-ing the configured TTFT target divided by the total weight of all requests. For cache experiments, we additionally report the token-level prefix-cache hit rate, defined as the fraction of input tokens reused from cached prefixes. Before collecting measurements, we warm up each system until its request processing and prefix-cache state stabilize. We repeat each experiment three times and report the average across these runs. 
+
+## 9.2 End-to-End Serving Performance 
+
+Figures 7–12 present the end-to-end results across two models, three workloads, and different request rates. Overall, Vertumnus achieves the lowest or comparable mean and P90 TTFT and the highest or near-highest SLO attainment, with its advantages be-coming clearer as the baselines accumulate delays under high load. 
+
+DeepSeek-V4-Flash-FP8: Vertumnus generally matches or outper-forms Homo and Static while providing lower mean and P90 TTFT than vLLM and SGLang. Static may assign prefix-sharing requests with different input lengths to workers with different CP degrees, while Homo’s single CP degree cannot balance concurrency for short requests and parallelism for long requests. In contrast, Ver-tumnus jointly considers worker load, worker-specific prefix reuse, and predicted execution time at each CP degree. At the highest request rates, it reduces mean TTFT by 27.4%, 3.9%, and 1.1% on Jiarui Guo et al. Ours Homo Static vLLM SGLang 8 10 12 14 16             
+
+> Request rate (req/s)
+> 400 600 800 1,000 1,200
+> Mean TTFT (ms)
+> (a) L-Eval 750 1,000 1,250
+> 46810 12 14
+> Request rate (req/s)
+> 400 500 600
+> Mean TTFT (ms) (b) Tool-Agent 900 1,150 1,400
+> 345678
+> Request rate (req/s)
+> 500 650 800
+> Mean TTFT (ms) (c) Production
+
+Figure 7: Mean TTFT for DeepSeek-V4-Flash-FP8 across different workloads. Ours Homo Static vLLM SGLang 8 10 12 14 16             
+
+> Request rate (req/s)
+> 800 1,200 1,600 2,000 2,400 2,800
+> P90 TTFT (ms)
+> (a) L-Eval 1,500 2,000 2,500
+> 46810 12 14
+> Request rate (req/s)
+> 600 800
+> P90 TTFT (ms) (b) Tool-Agent 2,000 2,800 3,600
+> 345678
+> Request rate (req/s)
+> 900 1,300 1,700
+> P90 TTFT (ms) (c) Production
+
+Figure 8: P90 TTFT for DeepSeek-V4-Flash-FP8 across different workloads. Ours Homo Static vLLM SGLang 8 10 12 14 16             
+
+> Request rate (req/s)
+> 70 75 80 85 90 95 100
+> SLO attainment (%)
+> (a) L-Eval 46810 12 14
+> Request rate (req/s)
+> 50 60 70 80 90 100
+> SLO attainment (%) (b) Tool-Agent 345678
+> Request rate (req/s)
+> 50 60 70 80 90 100
+> SLO attainment (%) (c) Production
+
+Figure 9: SLO attainment for DeepSeek-V4-Flash-FP8 across different workloads. 
+
+L-Eval, Tool-Agent, and Production, respectively, compared with the strongest baseline. It also reduces P90 TTFT by 24.6% and 4.3% on L-Eval and Tool-Agent while remaining within 0.7% of Homo on Production, with corresponding SLO attainment improvements of 8.9, 1.4, and 3.1 percentage points. 
+
+Qwen3-30B-A3B: Individual baselines may match Vertumnus at lower request rates, but their latency increases more rapidly as the load grows, particularly on Tool-Agent and Production. At the high-est request rates, Vertumnus appropriately places requests across degree-2 and degree-4 workers, reducing mean TTFT by 13.9%, 21.0%, and 28.1% on L-Eval, Tool-Agent, and Production, respec-tively, relative to the strongest baseline. The corresponding P90 reductions are 17.8%, 55.0%, and 29.5%, while SLO attainment im-proves by 0.9, 13.3, and 1.1 percentage points. These tail-latency im-provements show that Vertumnus effectively slows queue buildup as the request rate increases. 
+
+## 9.3 Evaluation of Worker Reconfiguration 
+
+We evaluate DeepSeek-V4-Flash-FP8 on a time-varying workload derived from Mooncake Tool-Agent, alternating between high-rate phases dominated by short requests and low-rate phases with more long requests. We compare Vertumnus against two fixed worker-composition baselines, 4CP4 /3CP8 and 6CP4 /2CP8. The results are shown in Figure 13. We find that no single fixed composition performs best through-out the workload: the 4CP4 /3CP8 baseline provides insufficient concurrency when short requests dominate, whereas 6CP4 /2CP8 provides too few large-degree workers when the fraction of long re-quests increases. By adjusting its worker composition shortly after each sustained workload change, Vertumnus matches or outper-forms the better fixed baseline in each phase. When the request rate is moderate and stable, its mean TTFT is comparable to both fixed baselines. As the request rate increases between 6 and 17 minutes, Vertumnus switches to 8CP4 /1CP8 to increase serving concurrency, reducing mean TTFT by 19.6% compared with 4CP4 /3CP8. When the request rate subsequently decreases and long requests become more common between 22 and 33 minutes, Vertumnus switches to 2CP4 /4CP8 to provide more large-degree workers, reducing mean TTFT by 5.5% and 14.5% compared with 4CP4 /3CP8 and 6CP4 /2CP8, respectively. To better understand the overhead of worker reconfiguration, we break down its latency into drain and switch stages. During draining, the selected workers stop accepting new requests, redirect Adaptive Context Parallelism for Production LLM Serving Ours Homo Static vLLM SGLang 20 25 30 35 40           
+
+> Request rate (req/s)
+> 300 600 900 1,200 1,500 1,800
+> Mean TTFT (ms)
+> (a) L-Eval 2,500 5,000 7,500 10,000
+> 30 40 50 60
+> Request rate (req/s)
+> 0500 1,000 1,500 2,000
+> Mean TTFT (ms) (b) Tool-Agent 2,000 4,500 7,000
+> 22 25 28 31 34 37
+> Request rate (req/s)
+> 300 900 1,500
+> Mean TTFT (ms) (c) Production
+
+Figure 10: Mean TTFT for Qwen3-30B-A3B across different workloads. Ours Homo Static vLLM SGLang 20 25 30 35 40           
+
+> Request rate (req/s)
+> 500 1,500 2,500 3,500 4,500
+> P90 TTFT (ms)
+> (a) L-Eval 12,000 15,000 18,000
+> 30 40 50 60
+> Request rate (req/s)
+> 02,000 4,000 6,000
+> P90 TTFT (ms) (b) Tool-Agent 4,500 9,000 13,500
+> 22 25 28 31 34 37
+> Request rate (req/s)
+> 600 1,800 3,000
+> P90 TTFT (ms) (c) Production
+
+Figure 11: P90 TTFT for Qwen3-30B-A3B across different workloads. Ours Homo Static vLLM SGLang 20 25 30 35 40           
+
+> Request rate (req/s)
+> 85 90 95 100
+> SLO attainment (%)
+> (a) L-Eval 30 40 50 60
+> Request rate (req/s)
+> 020 40 60 80 100
+> SLO attainment (%) (b) Tool-Agent 22 25 28 31 34 37
+> Request rate (req/s)
+> 20 40 60 80 100
+> SLO attainment (%) (c) Production
+
+Figure 12: SLO attainment for Qwen3-30B-A3B across different workloads. 
+
+their queued requests to other eligible workers, and allow ongoing prefill requests to finish. Once draining completes, the participating ranks activate the target pre-created communication groups and expose the resulting workers for scheduling while keeping model weights and retained KV data resident in GPU memory. As shown in the figure, each split or merge operation takes between 1.1 and 5.1 seconds, with most of the variation coming from the 0.5–4.2-second drain stage while the system waits for ongoing prefill requests to finish. The switch stage consistently completes within one second. These results show that Vertumnus can change its worker compo-sition within seconds and respond promptly to sustained workload changes. 
+
+## 9.4 Prefix-Cache Ablation 
+
+To demonstrate the effect of the prefix-cache manager, we also perform an ablation study using Qwen3-30B-A3B and the Tool-Agent workload. For a controlled comparison, we fix the worker composition and compare the full Vertumnus against a variant that retains worker-local prefix caching but disables prefix replication and reclamation. Both variants use the same request scheduler and per-worker cache capacity. In the ablated variant, each worker continues to insert prefixes and handle cache pressure through its native LRU policy. We vary the request rate and show mean and P90 TTFT together with the token-level prefix-cache hit rate in Figure 14. At lower request rates, the two variants provide similar TTFT because worker queues remain short. As the request rate increases, however, the prefix-cache manager yields larger latency reductions. Without replication, preserving a cache hit may restrict a request to the only worker holding its matched prefix, even when that worker is heavily loaded. Intra-degree replication creates additional copies of frequently accessed prefixes among workers with the same CP degree, allowing the scheduler to select a less-loaded worker without sacrificing prefix reuse. Inter-degree replication makes a prefix available at a CP degree where it was previously absent, avoiding the need to choose between cache reuse and a CP degree better suited to the request. The manager also reclaims underused replicas to recover cache capacity for prefixes with greater demand. At 60 requests/s, the complete Vertumnus reduces mean and P90 TTFT by 10.3% and 18.7%, respectively, while modestly improving the token-level prefix-cache hit rate. These results show that the manager reduces TTFT primarily by expanding cache-preserving placement choices both within and across CP degrees, rather than merely increasing the cache hit rate. Jiarui Guo et al. 0 5 10 15 20 25 30 35 40                                   
+
+> Time (min)
+> 2CP4/4CP8 4CP4/3CP8 6CP4/2CP8 8CP4/1CP8
+> Worker configuration  Request rate Composition
+> S1 S2 S3 S4 S5 S6
+> 04812 16
+> Request rate (req/s)
+> (a) Load adaptation 0510 15 20 25 30 35 40
+> Time (min)
+> 600 900 1200 1500
+> Mean TTFT (ms)  S1 S2 S3 S4 S5 S6
+> Ours 4CP4/3CP8 6CP4/2CP8 (b) Mean TTFT comparison 01000 2000 3000 4000 5000
+> Reconfiguration latency (ms)
+> S1 Split S2 Split S3 Merge S4 Merge S5 Merge S6 Split
+> 608 601 4205 4206 502 1602 468 519 852 935 636 517
+> Drain Switch (c) Latency breakdown
+
+Figure 13: Experiments on worker reconfiguration. 30 40 50 60            
+
+> Request rate (req/s)
+> 250 500 750 1,000 1,250
+> Mean TTFT (ms)  w/ w/o
+> (a) Mean TTFT 30 40 50 60
+> Request rate (req/s)
+> 500 1,000 1,500 2,000 2,500 3,000
+> P90 TTFT (ms)
+> w/ w/o (b) P90 TTFT 30 40 50 60
+> Request rate (req/s)
+> 45 47 49 51 53
+> Prefix-cache hit rate (%)
+> w/ w/o (c) Prefix-cache hit rate
+
+Figure 14: Experiments on prefix-cache ablation. 
+
+## 10 RELATED WORK 10.1 LLM Serving Systems 
+
+Existing LLM serving systems optimize request execution at different levels. At the local level, systems such as Orca [23], Sarathi-Serve [51], FastServe [52], and Medha [53] schedule requests within a model instance by controlling their batching, execution order, and interleaving. At the cluster level, systems such as Llumnix [24], MuxServe [54], and AlpaServe [55] route or migrate requests and place model instances across available GPUs. Another line of work, including DistServe [39], Splitwise [56], and TetriInfer [57], disaggregates prefill and decode into separate worker pools so that the two stages can be scheduled and provisioned independently. These systems generally perform scheduling over workers whose parallel configurations have already been determined. 
+
+## 10.2 Dynamic Parallelism for LLM Serving 
+
+Most existing LLM serving systems operate over workers whose data-parallel (DP), tensor-parallel (TP), or pipeline-parallel (PP) configurations are fixed at initialization [28, 58–61]. Several recent systems have explored reconfiguring model parallelism at runtime to accommodate changes in workloads or resource availability. For example, SpotServe [62], Gyges [63], CoCoServe [64], and OServe [65] adapt the choice of model-parallel configuration to changes in workload or GPU availability. A complementary line of work, including PipeLive [66], ReMP [67], and Flying Serving [68], fur-ther reduces service interruption and state-transfer overhead when changing parallel configurations online. These systems primarily focus on limiting service interruption and state-transfer overhead during model-parallel reconfiguration. A separate line of work explores dynamic context or sequence parallelism for LLM serving. LoongServe [26] dynamically forms groups of elastic instances and adjusts the parallelism of active batches across serving iterations. NanoCP [27] specifically targets the decode stage of MoE serving: it selects a CP degree for each active request to balance attention and expert execution and reduce TPOT. Both systems adapt the execution plans of active requests or batches rather than maintaining a persistent worker composition across workload windows. In contrast, Vertumnus targets prefill serving: it organizes a fixed GPU budget into persistent CP work-ers with different degrees, routes incoming requests among them, and reconfigures their composition as aggregate demand evolves. This persistent organization also provides stable units for request queuing and prefix-cache placement across requests. 
+
+## 10.3 Prefix Caching and Cache Management 
+
+Prior work on prefix caching reuses shared prompt states across requests to avoid redundant prefill computation, as demonstrated by Prompt Cache [69], SGLang [11], and ChunkAttention [17]. Cache-aware serving systems such as Preble [47], AlignedServe [70], and Apt-Serve [71] coordinate cache reuse with request sched-uling or batching. Another line of work, including Mooncake [40], MemServe [48], LMCache [72], Infinite-LLM [73], and KVFlow [16], manages KV states across workers and memory tiers. TokenLake [74] further constructs a unified segment-level prefix-cache pool to support fine-grained elastic long-context serving. 
+
+## 11 CONCLUSION 
+
+In this paper, we presented Vertumnus, an LLM inference system that adaptively manages context parallelism under heterogeneous and changing production workloads. Vertumnus supports persis-tent workers with different CP degrees and provides a request-scheduling policy for coordinating request placement. To adapt at the cluster timescale, Vertumnus dynamically adjusts the worker composition through lightweight split and merge operations. It further provides a global prefix-cache manager that tracks prefix demand and dynamically replicates and reclaims cached prefixes. Experiments with public and production workloads demonstrate the effectiveness of Vertumnus under diverse workload conditions. Adaptive Context Parallelism for Production LLM Serving 
+
+## REFERENCES 
+
+[1] Anyi Xu, Bangcai Lin, Bing Xue, Bingxuan Wang, Bingzheng Xu, Bochao Wu, Bowei Zhang, Chaofan Lin, Chen Dong, Chenchen Ling, et al. Deepseek-v4: Towards highly efficient million-token context intelligence. arXiv preprint arXiv:2606.19348 , 2026. [2] Gheorghe Comanici, Eric Bieber, Mike Schaekermann, Ice Pasupat, Noveen Sachdeva, Inderjit Dhillon, Marcel Blistein, Ori Ram, Dan Zhang, Evan Rosen, et al. Gemini 2.5: Pushing the frontier with advanced reasoning, multimodal-ity, long context, and next generation agentic capabilities. arXiv preprint arXiv:2507.06261 , 2025. [3] Hugo Touvron, Thibaut Lavril, Gautier Izacard, Xavier Martinet, Marie-Anne Lachaux, Timothée Lacroix, Baptiste Rozière, Naman Goyal, Eric Hambro, Faisal Azhar, et al. Llama: Open and efficient foundation language models. arXiv preprint arXiv:2302.13971 , 2023. [4] Josh Achiam, Steven Adler, Sandhini Agarwal, Lama Ahmad, Ilge Akkaya, Floren-cia Leoni Aleman, Diogo Almeida, Janko Altenschmidt, Sam Altman, Shyamal Anadkat, et al. Gpt-4 technical report. arXiv preprint arXiv:2303.08774 , 2023. [5] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, et al. Retrieval-augmented generation for knowledge-intensive nlp tasks. Advances in neural information processing systems , 33:9459–9474, 2020. [6] Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, et al. Longbench v2: Towards deeper understanding and reasoning on realistic long-context multitasks. In Proceed-ings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 3639–3664, 2025. [7] Yashar Talebirad and Amirhossein Nadiri. Multi-agent collaboration: Harnessing the power of intelligent llm agents. arXiv preprint arXiv:2306.03314 , 2023. [8] Ting Sun, Penghan Wang, and Fan Lai. Hygen: Efficient llm serving via elastic online-offline request co-location. Advances in Neural Information Processing Systems , 38:14910–14937, 2026. [9] Xuanlin Jiang, Yang Zhou, Shiyi Cao, Ion Stoica, and Minlan Yu. Neo: Saving gpu memory crisis with cpu offloading for online llm inference. Proceedings of Machine Learning and Systems , 7, 2025. [10] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient mem-ory management for large language model serving with pagedattention. In 
+
+Proceedings of the 29th symposium on operating systems principles , pages 611–626, 2023. [11] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al. Sglang: Efficient execution of structured language model programs. Advances in neural information processing systems , 37:62557–62583, 2024. [12] Boyu Tan, Jiarui Guo, Zongwei Lv, Hanbo Sun, Tong Yang, Kan Liu, Xinfei Shi, Zetao Hu, Yaxin Yu, Chi Zhang, et al. Rtp-llm: High-performance alibaba llm inference engine. arXiv preprint arXiv:2605.29639 , 2026. [13] Meixuan Wang, Yinyu Ye, and Zijie Zhou. Llm serving optimization with variable prefill and decode lengths. arXiv preprint arXiv:2508.06133 , 2025. [14] Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Yuchu Fang, Yeju Zhou, Yang Zheng, Zhenheng Tang, Xin He, Rui Guo, et al. Burstgpt: A real-world workload dataset to optimize llm serving systems. In Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining V. 2 , pages 5831–5841, 2025. [15] Zizhao Mo, Junlin Chen, Huanle Xu, and Chengzhong Xu. Serving hybrid llm loads with slo guarantees using cpu-gpu attention piggybacking. Proceedings of the ACM on Management of Data , 4(3 (SIGMOD):1–26, 2026. [16] Zaifeng Pan, Ajjkumar Patel, Yipeng Shen, Zhengding Hu, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. Kvflow: Efficient prefix caching for accelerating llm-based multi-agent workflows. Advances in Neural Information Processing Systems , 38:126246–126265, 2026. [17] Lu Ye, Ze Tao, Yong Huang, and Yang Li. Chunkattention: Efficient self-attention with prefix-aware kv cache and two-phase partition. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 11608–11620, 2024. [18] Xinjun Yang, Qingda Hu, Junru Li, Feifei Li, Yicong Zhu, Yuqi Zhou, Qiuru Lin, Jian Dai, Yang Kong, Jiayu Zhang, et al. Beluga: A cxl-based memory architecture for scalable and efficient llm kvcache management. Proceedings of the ACM on Management of Data , 4(1 (SIGMOD):1–29, 2026. [19] Shenggui Li, Fuzhao Xue, Chaitanya Baranwal, Yongbin Li, and Yang You. Se-quence parallelism: Long sequence training from system perspective. In Proceed-ings of the 61st Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 2391–2404, 2023. [20] Hao Liu, Matei Zaharia, and Pieter Abbeel. Ringattention with blockwise trans-formers for near-infinite context. In International Conference on Learning Repre-sentations , volume 2024, pages 3992–4008, 2024. [21] William Brandon, Aniruddha Nrusimha, Kevin Qian, Zachary Ankner, Tian Jin, Zhiye Song, and Jonathan Ragan-Kelley. Striped attention: Faster ring attention for causal transformers. arXiv preprint arXiv:2311.09431 , 2023. [22] Dingyan Zhang, Jinbo Han, Kaixi Zhang, Xingda Wei, Sijie Shen, Chenguang Fang, Wenyuan Yu, Jingren Zhou, and Rong Chen. Simple is better: Multiplication may be all you need for llm request scheduling. arXiv preprint arXiv:2603.15202 ,2026. [23] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. Orca: A distributed serving system for {Transformer-Based } generative models. In 16th USENIX symposium on operating systems design and implementa-tion (OSDI 22) , pages 521–538, 2022. [24] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. Llumnix: Dynamic scheduling for large language model serving. In 
+
+18th USENIX symposium on operating systems design and implementation (OSDI 24) , pages 173–191, 2024. [25] Amy Yang, Jingyi Yang, Aya Ibrahim, Xinfeng Xie, Bangsheng Tang, Grigory Sizov, Jongsoo Park, and Jianyu Huang. Context parallelism for scalable million-token inference. Proceedings of Machine Learning and Systems , 7, 2025. [26] Bingyang Wu, Shengyu Liu, Yinmin Zhong, Peng Sun, Xuanzhe Liu, and Xin Jin. Loongserve: Efficiently serving long-context large language models with elastic sequence parallelism. In Proceedings of the ACM SIGOPS 30th Symposium on Operating Systems Principles , pages 640–654, 2024. [27] Jiefei Chen, Binbin Lin, Jinming Ma, Jiangfei Duan, Haojie Duanmu, Hao Liu, Qinxiu Cheng, Xiuhong Li, Zhilin Pei, Hui Wang, et al. Nanocp: Request-level dynamic context parallelism for data-expert parallel decoding. arXiv preprint arXiv:2605.21100 , 2026. [28] Shang Yang, Junxian Guo, Haotian Tang, Qinghao Hu, Guangxuan Xiao, Jiaming Tang, Yujun Lin, Zhijian Liu, Yao Lu, and Song Han. Lserve: Efficient long-sequence llm serving with unified sparse attention. Proceedings of Machine Learning and Systems , 7, 2025. [29] Kimi Team, Tongtong Bai, Yifan Bai, Yiping Bao, Jianfeng Cai, Xinyuan Cai, Peizhou Cao, Yuxuan Cao, Ziwei Chai, Y Charles, et al. Kimi k3: Open frontier intelligence. arXiv preprint arXiv:2607.24653 , 2026. [30] Qwen Team. Qwen3. 5-omni technical report. arXiv preprint arXiv:2604.15804 ,2026. [31] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. 
+
+Advances in neural information processing systems , 30, 2017. [32] Chenyu Jiang, Zhenkun Cai, Ye Tian, Zhen Jia, Yida Wang, and Chuan Wu. Dcp: Addressing input dynamism in long-context training via dynamic context parallelism. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles , pages 221–236, 2025. [33] Jiarui Fang and Shangchun Zhao. Usp: A unified sequence parallelism approach for long context generative ai. arXiv preprint arXiv:2405.07719 , 2024. [34] Sam Ade Jacobs, Masahiro Tanaka, Chengming Zhang, Minjia Zhang, Shuai-wen Leon Song, Samyam Rajbhandari, and Yuxiong He. Deepspeed ulysses: System optimizations for enabling training of extreme long sequence trans-former models. arXiv preprint arXiv:2309.14509 , 2023. [35] Hao Ge, Junda Feng, Qi Huang, Fangcheng Fu, Xiaonan Nie, Lei Zuo, Haibin Lin, Bin Cui, and Xin Liu. Bytescale: Communication-efficient scaling of llm training with a 2048k context length on 16384 gpus. In Proceedings of the ACM SIGCOMM 2025 Conference , pages 963–978, 2025. [36] Diandian Gu, Peng Sun, Qinghao Hu, Ting Huang, Xun Chen, Yingtong Xiong, Guoteng Wang, Qiaoling Chen, Shangchun Zhao, Jiarui Fang, et al. Loongtrain: Efficient training of long-sequence llms with head-context parallelism. arXiv preprint arXiv:2406.18485 , 2024. [37] Yujie Wang, Shiju Wang, Shenhan Zhu, Fangcheng Fu, Xinyi Liu, Xuefeng Xiao, Huixia Li, Jiashi Li, Faming Wu, and Bin Cui. Flexsp: Accelerating large language model training via flexible sequence parallelism. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , pages 421–436, 2025. [38] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report. arXiv preprint arXiv:2505.09388 , 2025. [39] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. {DistServe }: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , pages 193–210, 2024. [40] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Heyi Tang, Feng Ren, Teng Ma, Shangming Cai, Yineng Zhang, Mingxing Zhang, et al. Mooncake: A kvcache-centric disaggregated architecture for llm serving. ACM Transactions on Storage ,2024. [41] Hailin Zhang, Xiaodong Ji, Yilin Chen, Fangcheng Fu, Xupeng Miao, Xiaonan Nie, Weipeng Chen, and Bin Cui. Pqcache: Product quantization-based kvcache for long context llm inference. Proceedings of the ACM on Management of Data ,3(3):1–30, 2025. [42] Jiahao Wang, Jinbo Han, Xingda Wei, Sijie Shen, Dingyan Zhang, Chenguang Fang, Rong Chen, Wenyuan Yu, and Haibo Chen. {KVCache } cache in the wild: Characterizing and optimizing {KVCache } cache at a large cloud provider. In 
+
+2025 USENIX Annual Technical Conference (USENIX ATC 25) , pages 465–482, 2025. [43] Luohe Shi, Hongyi Zhang, Yao Yao, Zuchao Li, and Hai Zhao. Keep the cost down: A review on methods to optimize llm’s kv-cache consumption. arXiv Jiarui Guo et al. 
+
+preprint arXiv:2407.18003 , 2024. [44] Ao Wang, Hui Chen, Jianchao Tan, Kefeng Zhang, Xunliang Cai, Zijia Lin, Jungong Han, et al. Prefixkv: Adaptive prefix kv cache is what vision instruction-following models need for efficient generation. Advances in Neural Information Processing Systems , 38:94456–94482, 2026. [45] Yuhang Li, Rong Gu, Chengying Huan, Zhibin Wang, Renjie Yao, Chen Tian, and Guihai Chen. Hotprefix: Hotness-aware kv cache scheduling for efficient prefix sharing in llm inference systems. Proceedings of the ACM on Management of Data , 3(4):1–27, 2025. [46] Dongsheng Yang, Austin Li, Kai Li, and Wyatt Lloyd. Learned prefix caching for efficient llm inference. Advances in Neural Information Processing Systems ,38:45770–45792, 2026. [47] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, and Yiying Zhang. Preble: Efficient distributed prompt scheduling for llm serving. In International conference on learning representations , volume 2025, pages 37057–37082, 2025. [48] Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu, Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang, Yungang Bao, Ninghui Sun, et al. Memserve: Context caching for disaggregated llm serving with elastic memory pool. arXiv preprint arXiv:2406.17565 , 2024. [49] Chenxin An, Shansan Gong, Ming Zhong, Xingjian Zhao, Mukai Li, Jun Zhang, Lingpeng Kong, and Xipeng Qiu. L-eval: Instituting standardized evaluation for long context language models. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 14388–14411, 2024. [50] Mooncake trace. https://github.com/kvcacheai/Mooncake/blob/main/FAST25-release/traces/toolagent_trace.jsonl. [51] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwa-tra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. Taming 
+
+{Throughput-Latency } tradeoff in {LLM } inference with {Sarathi-Serve }. In 
+
+18th USENIX symposium on operating systems design and implementation (OSDI 24) , pages 117–134, 2024. [52] Bingyang Wu, Yinmin Zhong, Zili Zhang, Shengyu Liu, Fangyue Liu, Yuanhang Sun, Gang Huang, Xuanzhe Liu, and Xin Jin. {FastServe }:{Iteration-Level }
+
+preemptive scheduling for large language model inference. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) , pages 57–74, 2026. [53] Amey Agrawal, Haoran Qiu, Junda Chen, Íñigo Goiri, Chaojie Zhang, Rayyan Shahid, Ramachandran Ramjee, Alexey Tumanov, and Esha Choukse. Medha: Efficiently serving multi-million context length llm inference requests without approximations. arXiv preprint arXiv:2409.17264 , 2024. [54] Jiangfei Duan, Runyu Lu, Haojie Duanmu, Xiuhong Li, Xingcheng Zhang, Dahua Lin, Ion Stoica, and Hao Zhang. Muxserve: flexible spatial-temporal multiplexing for multiple llm serving. arXiv preprint arXiv:2404.02015 , 2024. [55] Zhuohan Li, Lianmin Zheng, Yinmin Zhong, Vincent Liu, Ying Sheng, Xin Jin, Yanping Huang, Zhifeng Chen, Hao Zhang, Joseph E Gonzalez, et al. 
+
+{AlpaServe }: Statistical multiplexing with model parallelism for deep learning serving. In 17th USENIX Symposium on Operating Systems Design and Implemen-tation (OSDI 23) , pages 663–679, 2023. [56] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. Splitwise: Efficient generative llm inference using phase splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) , pages 118–132. IEEE, 2024. [57] Cunchen Hu, Heyang Huang, Liangliang Xu, Xusheng Chen, Jiang Xu, Shuang Chen, Hao Feng, Chenxi Wang, Sa Wang, Yungang Bao, et al. Inference without interference: Disaggregate llm inference for mixed downstream workloads. arXiv preprint arXiv:2401.11181 , 2024. [58] Jian Lin, Jiazhi Mi, Zicong Hong, Haodong Wang, Qianli Liu, Haoyue Zhang, Peng Li, and Song Guo. Kvdrive: A holistic multi-tier kv cache management system for long-context llm inference. Proceedings of the ACM on Management of Data , 4(3 (SIGMOD):1–25, 2026. [59] Wenqi Jiang, Marco Zeller, Roger Waleffe, Torsten Hoefler, and Gustavo Alonso. Chameleon: A heterogeneous and disaggregated accelerator system for retrieval-augmented language models. Proceedings of the VLDB Endowment , 18(1):42–52, 2024. [60] Ke Hong, Xiuhong Li, Lufang Chen, Qiuli Mao, Guohao Dai, Xuefei Ning, Shengen Yan, Yun Liang, and Yu Wang. Sola: Optimizing slo attainment for large language model serving with state-aware scheduling. Proceedings of Machine Learning and Systems , 7, 2025. [61] Ruihao Gong, Shihao Bai, Siyu Wu, Yunqian Fan, Zaijun Wang, Xiuhong Li, Hailong Yang, and Xianglong Liu. Past-future scheduler for llm serving under sla guarantees. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2, pages 798–813, 2025. [62] Xupeng Miao, Chunan Shi, Jiangfei Duan, Xiaoli Xi, Dahua Lin, Bin Cui, and Zhihao Jia. Spotserve: Serving generative large language models on preemptible instances. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 , pages 1112– 1127, 2024. [63] Haoyu Chen, Xue Li, Kun Qian, Yu Guan, Jin Zhao, and Xin Wang. Gyges: Dynamic cross-instance parallelism transformation for efficient llm inference. 
+
+arXiv preprint arXiv:2509.19729 , 2025. [64] Jingfeng Wu, Yiyuan He, Minxian Xu, Xitong Gao, Kejiang Ye, and Chengzhong Xu. Unlock the potential of fine-grained llm serving via dynamic module scaling. 
+
+arXiv preprint arXiv:2507.18006 , 2025. [65] Youhe Jiang, Fangcheng Fu, Taiyi Wang, Guoliang He, and Eiko Yoneki. Oserve: Accelerating llm serving via spatial-temporal workload orchestration. arXiv preprint arXiv:2602.12151 , 2026. [66] Xu Bai, Muhammed Tawfiqul Islam, Chen Wang, and Adel N Toosi. Pipelive: Ef-ficient live in-place pipeline parallelism reconfiguration for dynamic llm serving. 
+
+arXiv preprint arXiv:2604.12171 , 2026. [67] Haipeng Yuan, Kaining Zheng, Yongshu Bai, Yuchen Zhang, Yunquan Zhang, Baodong Wu, Xiang Gao, and Daning Cheng. Remp: Low-downtime run-time model-parallelism reconfiguration for llm serving. arXiv preprint arXiv:2606.18741 , 2026. [68] Shouwei Gao, Junqi Yin, Feiyi Wang, and Wenqian Dong. Flying serving: On-the-fly parallelism switching for large language model serving. In Proceedings of the 40th ACM International Conference on Supercomputing , pages 17–29, 2026. [69] In Gim, Guojun Chen, Seung-seob Lee, Nikhil Sarda, Anurag Khandelwal, and Lin Zhong. Prompt cache: Modular attention reuse for low-latency inference. 
+
+arXiv preprint arXiv:2311.04934 , 2023. [70] Fengyao Bai, Hongbin Zhang, Zhitao Chen, Jiangsu Du, Zhiguang Chen, and Yutong Lu. Alignedserve: Orchestrating prefix-aware batching to build a high-throughput and computing-efficient llm serving system. Proceedings of the ACM on Management of Data , 4(3 (SIGMOD):1–25, 2026. [71] Shihong Gao, Xin Zhang, Yanyan Shen, and Lei Chen. Apt-serve: Adaptive request scheduling on hybrid cache for scalable llm inference serving. Proceedings of the ACM on Management of Data , 3(3):1–28, 2025. [72] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, et al. Lmcache: An efficient kv cache layer for enterprise-scale llm inference. arXiv preprint arXiv:2510.09665 ,2025. [73] Bin Lin, Chen Zhang, Tao Peng, Hanyu Zhao, Wencong Xiao, Minmin Sun, Anmin Liu, Zhipeng Zhang, Lanbo Li, Xiafei Qiu, et al. Infinite-llm: Efficient llm service for long context with distattention and distributed kvcache. arXiv preprint arXiv:2401.02669 , 2024. [74] Bingyang Wu, Zili Zhang, Yinmin Zhong, Guanzhe Huang, Yibo Zhu, Xuanzhe Liu, and Xin Jin. Tokenlake: A unified segment-level prefix cache pool for fine-grained elastic long-context llm serving. arXiv preprint arXiv:2508.17219 ,2025.

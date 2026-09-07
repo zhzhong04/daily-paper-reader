@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-06</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>8</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-06 22:31:59 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-07 23:25:16 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日聚焦 LLM 智能体的长时记忆与内存管理，12 篇论文中精读 2 篇高分工作。最值得关注的是「人类审批时间尺度下的自适应 KV 保留」与「跨回合记忆失效合约」，均获 9.0 分，直击长期运行效率瓶颈。建议优先精读这两篇，再顺藤摸瓜扫读速读列表中的门控路由与在线修订机制。</p>
+<p>今日共读7篇论文，重点关注1篇、速读6篇，聚焦系统优化与智能体效率。最值得关注的是《KVMem》在消费级GPU上实现百万级Token工作区虚拟化，值得精读。其余可关注缓存淘汰懒提升、GUI智能体系统优化与推测性宏提交三条路径，适合按兴趣选读。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Adaptive KV Retention for LLM Agents at Human-Approval Timescales">Adaptive KV Retention for LLM Agents at Human-Approval Timescales</span></li><li><span class="dpr-home-dashboard-paper-title" title="Invalidation Contracts for Cross-Episode Agent Memory">Invalidation Contracts for Cross-Episode Agent Memory</span></li><li><span class="dpr-home-dashboard-paper-title" title="ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents">ContextPipe: Database-Inspired Context Assembly for Long-Horizon Agents</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KVMem: Virtualizing Million-Token Agent Workspaces on a Consumer GPU">KVMem: Virtualizing Million-Token Agent Workspaces on a Consumer GPU</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems">Learning What to Retain: Gated-Memory Routing for Efficient Collaboration in Multi-Agent LLM Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows">REVISE: Validity-Guided Recovery for Online Revisions in Agent Workflows</span></li><li><span class="dpr-home-dashboard-paper-title" title="mzCache: On-Device LLM Memory Management under Multitasking">mzCache: On-Device LLM Memory Management under Multitasking</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Demystifying and Improving Lazy Promotion in Cache Eviction">Demystifying and Improving Lazy Promotion in Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="Efficient GUI Agents: A Systems Survey of Observation, Memory, Action, and Runtime Optimization">Efficient GUI Agents: A Systems Survey of Observation, Memory, Action, and Runtime Optimization</span></li><li><span class="dpr-home-dashboard-paper-title" title="Speculative Macro Commit for Faster Tool-Using Agents">Speculative Macro Commit for Faster Tool-Using Agents</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 </div>
 
