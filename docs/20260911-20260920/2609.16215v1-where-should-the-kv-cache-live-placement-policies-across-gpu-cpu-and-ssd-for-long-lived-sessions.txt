@@ -1,0 +1,179 @@
+Title: Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions
+
+URL Source: https://arxiv.org/pdf/2609.16215v1
+
+Published Time: Wed, 16 Sep 2026 00:10:32 GMT
+
+Number of Pages: 9
+
+Markdown Content:
+# Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions 
+
+Srikanta Datta Tumkur, Jay Iyer, Mehar Simhadri, Sai Pavan Kumar, Sai Kapil Kumar, Ramesh Nampelly 
+
+Vizuara 
+
+Abstract : GPU high-bandwidth memory is the scarcest and most expensive resource in LLM serving, and the key-value (KV) cache is its largest consumer: long chats, agent loops, and repeated document question answering all accumulate KV state that must be kept reachable across turns. The natural fix is to extend the memory hierarchy, storing KV blocks not only in GPU HBM but also in cheap, abundant CPU DRAM and SSD, and fetching them back when a session resumes, an approach taken by systems such as Mooncake, LMCache, FlexGen, InfiniGen, and AttentionStore. The hard part is the 
+
+policy , not the mechanism: which blocks live in which tier, when to promote, demote, evict, and prefetch, and how that choice should change with the workload. We study that policy space with a discrete-event simulator of a tiered layer over GPU HBM, CPU DRAM, and SSD, calibrated to a random-forest execution-time predictor, and evaluate recency, reuse-frequency, predicted-reuse, and a genuine EWMA-predictive policy with a prefetch lookahead on chat, agent, and document-QA workloads. Four findings stand out. First, tiering multiplies concurrent sessions per GPU by 73.02 × and cuts cost per session by 62.04 ×, but this gain is the tier shape’s own capacity multiple ( 1+8+64 ), not a placement-policy effect. Second, at batch one decode is compute-bound, so the placement policy barely moves throughput; what it moves is PCIe migration traffic and TTFT. On migration, recency is best for chat (2.30 × less traffic than reuse-frequency) and reuse-frequency is best for agent and document QA. Third, the shipped predicted-reuse policy is byte-identical to recency, so the roadmap’s agent recommendation reduces to recency; a genuine EWMA predictor added to the grid does differ, yet still finishes second to reuse-frequency on the very workloads prediction was meant to win. Fourth, prefetch as recommended does not pay for its bandwidth: across a policy × cache-size grid, even a future-reading oracle beats no-prefetch in none of the cells. A placement recipe therefore holds per workload on the bandwidth axis, but the “predicted-reuse” and “ + prefetch” parts of the recommendation, as implemented, do not. 
+
+Index Terms : KV cache, memory hierarchy, offloading, GPU, CPU, SSD, prefix reuse, LLM serving, long context, efficient inference. 
+
+I. I NTRODUCTION 
+
+Of everything an LLM server allocates, GPU high-bandwidth memory (HBM) is the scarcest and most expensive, and the KV cache is what consumes most of it [6]. For a single long context the cache already rivals the model weights; across many concurrent, long-lived sessions, a chat that spans hours, an agent that loops over tools, or a document-QA service that re-reads the same files, the accumulated KV state far exceeds what HBM can hold (Fig. 2). Today such sessions are served by recomputing the prefill from scratch on every resume or by capping concurrency, both of which waste compute and money. The obvious place to put the overflow is further down the memory hierarchy. CPU DRAM is roughly an order of magnitude cheaper per gigabyte than HBM and far larger; SSD is cheaper and larger again. Storing KV blocks across GPU HBM, CPU DRAM, and SSD, and fetching them back when a session resumes, turns prefill recomputation into a cache lookup. Recent systems do this: Mooncake [1] disaggregates a KVCache pool across CPU, DRAM, and SSD; LMCache [2] stores and reuses KV across GPU, DRAM, and disk; FlexGen [3] offloads weights and KV to CPU and SSD; InfiniGen [4] predicts and prefetches the KV that attention will need; and AttentionStore [5] persists KV across a DRAM-SSD hierarchy for multi-turn reuse. The mechanism is largely solved; the hard part is the policy .The bandwidth and latency gap between tiers is enormous (HBM is hundreds of times faster than SSD), so a wrong placement either wastes HBM on cold blocks or stalls decod-ing while a hot block is fetched from disk. The central question is: which KV blocks should live in which tier, when should they be promoted, demoted, evicted, and prefetched, and how does the best policy change with the workload? 
+
+This is an open question because the policy space is large and the trade-offs are workload-specific. A document-QA service with heavy prefix reuse wants different placement than an agent that revisits recent tool outputs, which wants different placement than a long single chat. This paper builds a configurable tiered placement layer and studies that space directly. Our contributions are as follows. 1) A tiered KV-cache placement layer (Fig. 4) over GPU HBM, CPU DRAM, and SSD, with configurable block granularity, a promotion and eviction policy, and a prefetch lookahead. 2) A controlled study of placement policies (recency, reuse frequency, predicted reuse) against GPU-only, full-CPU-offload, and prefix-reuse baselines on long chat, agent, and document-QA workloads. 3) A policy guide : which placement and prefetch policy wins for each workload’s reuse structure, and the result-arXiv:2609.16215v1 [cs.AI] 14 Sep 2026 Fig. 1: Study overview. (1) GPU HBM is small and expensive, but long-lived sessions accumulate a KV cache that overflows it. (2) The KV cache can be tiered across GPU HBM, CPU DRAM, and SSD, but where each block should live, and when to move it, is an unsettled policy question. (3) We build a tiered placement layer with reuse-aware promotion and prefetch and study which policy wins on chat, agent, and document-QA workloads. 
+
+Fig. 2: The opening: as the number of concurrent long-lived sessions grows, the total KV cache overflows GPU HBM. Tiering the cache into CPU DRAM and SSD extends the effective capacity by orders of magnitude at a fraction of the cost per gigabyte; Table III quantifies this on the workloads studied. Conceptual schematic. ing gain in concurrent sessions per GPU and cost per session. II. B ACKGROUND AND RELATED WORK 
+
+A. The KV cache and its cost 
+
+For a transformer with L layers and H key/value heads of dimension d, a context of length T caches 2LHdT scalars, re-read at every decode step [6]. PagedAttention [6] manages this cache in fixed blocks, which is the granularity at which it can be placed across tiers. KV quantization [10], [11] and eviction [12], [13] shrink the cache; placement is orthogonal and complementary, deciding where the (possibly compressed) blocks physically live. 
+
+B. Tiered KV storage systems 
+
+A growing line offloads KV beyond HBM. Mooncake [1] builds a disaggregated KVCache pool over CPU, DRAM, and SSD with an SLO-aware scheduler; LMCache [2] reuses KV across GPU, DRAM, and disk and across engines; FlexGen [3] offloads to CPU and SSD for high-throughput batched inference; InfiniGen [4] predicts which KV attention will need and prefetches it; AttentionStore [5] persists KV across DRAM and SSD for multi-turn reuse; and CacheBlend [7] reuses non-prefix KV with selective recomputation. These establish the mechanism; the open problem they leave is the general placement policy and its workload dependence. C. Prefix and cross-request reuse 
+
+RadixAttention in SGLang [8] and vLLM prefix caching reuse shared prompt prefixes, and ServerlessLLM [9] fast-loads checkpoints from tiered storage. Reuse is the property that makes tiering pay off, so we characterize each workload by its reuse structure and tie the best policy to it (Fig. 3). 
+
+D. The bandwidth wall 
+
+The tiers differ by orders of magnitude: HBM delivers terabytes per second, CPU DRAM tens to hundreds of giga-bytes per second over PCIe, SSD a few gigabytes per second. Fetching a hot block from SSD mid-decode can cost more than recomputing it, so KV-cache I/O can dominate offloaded inference time [4]. A good policy keeps hot blocks high, prefetches predictable accesses, and never blocks decode on a cold fetch it could have hidden. 
+
+E. Our position 
+
+We treat the placement policy itself as the object of study, taking the offload mechanism as given. With a configurable layer over the three tiers we compare promotion, eviction, and prefetch policies head to head on workloads with different reuse structure, and report the policy guide and the gain in sessions per GPU. III. M ETHODOLOGY 
+
+A. The tiered layer 
+
+The cache is a set of fixed-size KV blocks (the PagedAt-tention block [6]), each resident in one of three tiers: GPU HBM, CPU DRAM, or SSD. Let the tiers have capacities 
+
+cg ≪ cd ≪ cs and bandwidths bg ≫ bd ≫ bs. A placement maps each live block to a tier. The decode step for a token needs all of that layer’s required blocks in HBM; any block 
+
+Fig. 3: Why the policy is workload-specific: a workload’s reuse structure sets which placement policy minimizes fetch traffic (Fig. 5); heavy prefix reuse favours reuse-frequency, while recency-driven growth favours recency. Note the capacity and cost wins of tiering (Table III) do not scale with reuse; they track tier capacity. Conceptual schematic. 
+
+Algorithm 1 Tiered KV placement (per block access) 
+
+Input: block b, tiers (HBM, DRAM, SSD), policy score 
+
+s(·)
+
+if b in HBM then use directly (hit )else fetch b up the hierarchy; promote to HBM 
+
+if HBM full then demote the lowest-score block to DRAM (cascade to SSD) 
+
+prefetch: for predicted upcoming blocks, fetch ahead of use update s(b); record hit tier and any decode stall not resident must be fetched up the hierarchy before it is used, which stalls decode unless the fetch was prefetched. 
+
+B. Placement, promotion, and eviction 
+
+A policy scores each block and assigns tiers under the ca-pacity constraints. We compare three policy families: recency 
+
+(keep the most recently used blocks high, an LRU tiering), 
+
+reuse frequency (keep the most frequently re-accessed blocks high, favoring shared prefixes), and predicted reuse (a cheap predictor of which blocks the next turns will touch, in the spirit of InfiniGen [4]). On a miss, the block is fetched and promoted; under pressure, the lowest-scoring HBM block is demoted to DRAM, and the lowest DRAM block to SSD. Algorithm 1 states the per-access path. 
+
+C. Prefetch 
+
+Prefetch is how the layer hides the bandwidth wall. With a lookahead window, the engine moves blocks that the next decode steps or the resuming session will need up to HBM before they are required, overlapping transfer with compute. The lookahead depth trades HBM occupancy against stall avoidance; we sweep it. The design grid over policy and workload (Fig. 5) and the prefetch sweep quantify the choice. 
+
+D. Cost model 
+
+The effective capacity is cg + cd + cs at a blended cost dominated by the cheap tiers, so tiering serves many more concurrent sessions per dollar than HBM alone. The price is fetch latency on misses, which the policy and prefetch must keep off the decode critical path. We report both the capacity and cost win and the measured stall, so a memory saving is never mistaken for a free lunch. IV. E XPERIMENTAL SETUP 
+
+A. Workloads, baselines, and metrics 
+
+We evaluate on three workloads chosen for their reuse structure (Table I): long multi-turn chat, an agent loop that revisits recent context, and repeated document QA with heavy prefix reuse. We report per-tier hit rate, TTFT (driven by prefill reuse), TPOT and its stall component (driven by fetches), effective concurrent sessions per GPU, throughput, and cost per session, with the GPU, tier sizes, and bandwidths stated. Fig. 4: The tiered KV-cache placement layer. KV blocks live across three tiers: GPU HBM (small, fast, hot blocks), CPU DRAM (medium, warm blocks), and SSD (large, cheap, cold blocks). A placement policy decides, per block, the tier and when to promote, demote, or evict, from access signals (recency, reuse frequency, predicted reuse). A prefetch engine moves blocks up the hierarchy ahead of the decode step that needs them, hiding transfer latency. The inset contrasts cost per gigabyte and bandwidth across the tiers. TABLE I: Workloads, chosen for their reuse structure.         
+
+> Workload Reuse pattern Stresses Long multi-turn chat recency, growing context HBM capacity Agent loop revisits recent context promotion, prefetch Repeated document QA heavy prefix reuse cross-request reuse
+
+B. Policies and protocol 
+
+Baselines are GPU-only (recompute on resume), full-CPU-offload (FlexGen style), and prefix-reuse (RadixAt-tention style). The proposed layer sweeps the placement policy (recency, reuse frequency, the roadmap’s predicted-reuse heuristic, and a genuine EWMA next-touch predictor, 
+
+predictive ), the block granularity, and the prefetch looka-head. Principal settings are in Table II. One protocol detail needs stating up front. The policy grid runs chat as six concurrent sessions of 4,000 ac-cesses rather than the canonical single 24,000-access ses-sion (the same total volume). The reason is measurabil-ity, not tuning: a single dense-attention session arrives as 
+
+one request, so there are no cross-request re-reads for a placement policy to act on, and every eviction policy produces byte-identical results (that run is preserved in 
+
+results/metrics_all_single_session.csv ). The collapse is itself a finding (for one isolated long chat, eviction TABLE II: Principal settings.        
+
+> Setting Value Tiers GPU HBM, CPU DRAM, SSD Placement policy recency / reuse-frequency / predicted-reuse / predictive (EWMA) Block granularity swept Prefetch lookahead swept Baselines GPU-only, full-CPU-offload, prefix-reuse Workloads chat, agent, document QA
+
+order does not matter), and the six-session setting is the smallest concurrency at which the policies separate. V. R ESULTS 
+
+All numbers in this section are measured by the sim-ulator and read into the text through generated macros; the figures are drawn from the same result CSVs by 
+
+paper/make_figures.py . Sessions-per-GPU and cost are reported at the repository’s default tier shape 1:8:64 
+
+(working-set-to-HBM ratio R ≈ 73 ); the policy comparison uses the synthetic generators at their default configuration. Table III is the headline: tiering an HBM-only cache into HBM +DRAM +SSD multiplies the concurrent long-lived ses-sions a GPU sustains and divides cost per session by the same factor. That factor tracks the tier shape’s capacity multiple (1+8+64 = 73 ), nearly independent of the workload’s reuse structure, so it is a capacity-accounting result, not a placement-Fig. 5: PCIe migration traffic (GB, lower is better) over the placement-policy by workload grid; the boxed cell is the measured best policy per workload. Throughput is omitted because it is flat across policies at batch one (compute-bound decode); migration bytes is the quantity placement actually controls. predicted_reuse is byte-identical to lru on every workload, so the two share the chat winner. Source: 
+
+results/metrics_all.csv .TABLE III: Sessions per GPU and cost per session, HBM-only versus tiered (HBM +DRAM +SSD), at tier shape 1:8:64 . The gain equals the tier’s capacity multiple, not a policy effect. Source: results/ratio_sweep.csv .                       
+
+> Chat Agent Doc. QA Sessions/GPU, HBM-only 0.1075 0.0794 0.0430 Sessions/GPU, tiered 7.8495 5.7961 3.1405 Gain ( ×)73.02 73.00 73.03 Cost/session, HBM-only ($) 136.2305 170.6543 417.1143 Cost/session, tiered ($) 2.1958 2.7507 6.7232 Reduction ( ×)62.04 62.04 62.04 P99 TTFT, tiered (ms) 17.32 56.23 66.27
+
+policy result. The placement policy shows up elsewhere, in migration traffic and TTFT (Sec. V-C). 
+
+A. Sessions per GPU 
+
+Figure 2 is the motivation and Fig. 6 the payoff. Across the whole tier-ratio sweep the tiered-to-HBM-only sessions-per-GPU ratio stays between 72.68 × and 73.22 × for chat (and similarly for the other workloads), tracking the tier’s capacity multiple rather than the workload’s reuse. Adding an order of magnitude of DRAM and SSD capacity fits an order of magnitude more sessions; a good placement policy adds nothing to this count, and its job is instead to protect the latency at which those sessions are served. 
+
+B. Hit rate across tiers 
+
+Adding DRAM and SSD changes where accesses land, and Fig. 7 reports the split. Under the winning policy, DRAM is 
+
+Fig. 6: Sessions per GPU, tiered (HBM +DRAM +SSD) versus HBM-only, across the working-set-to-HBM ratio sweep; the dotted line marks the default 1:8:64 shape. The tiered/HBM-only ratio is flat at ≈73.02 × throughout, which is exactly the tier’s capacity multiple; hit rate does not enter it. Source: 
+
+results/ratio_sweep.csv .the workhorse tier: chat serves 23.99% from HBM and 61.87% from DRAM with 0.00% reaching SSD; agent serves 72.65% from DRAM; document QA 68.48%. SSD acts as a shallow backstop (8.80% on document QA, 6.07% on agent) rather than a frequently-hit tier, and the residual miss rate that must be recomputed stays near 14.15 to 13.62%. So it is DRAM that carries the capacity win, at near-HBM latency; SSD earns its place on the capacity and cost it adds, not on the hits it serves. 
+
+C. Which policy wins where 
+
+Figure 5 is the core policy guide, and it carries one methodological correction: at batch one, decode is compute-bound, so effective throughput is flat across policies to within a fraction of a percent (chat is 1307.60 tok/s regardless of pol-icy). Throughput is therefore the wrong lens. The placement policy controls PCIe migration traffic, and there the policies separate cleanly. For chat, recency ( lru , and its identical twin predicted_reuse ) moves 27.38 GB against reuse-frequency’s 62.99 GB, a 2.30 × difference, and also wins TTFT, though this is the concurrent -chat number. For the roadmap’s own scenario, one isolated long chat, the protocol disclosure in Sec. IV applies. Every eviction policy is byte-identical there, so the roadmap’s “cheap LRU tracks it well” is right for an unexpected reason. When eviction order cannot matter, the cheapest policy is automatically the correct one, and the binding constraint is capacity (Table III), just as the roadmap’s “stresses: HBM capacity” anticipated. For agent and document QA the order reverses, and reuse-frequency wins, at 49.36 GB (1.60 ×) and 48.23 GB (1.63 ×) respectively. So two of the roadmap’s three policy recommendations hold Fig. 7: Per-tier hit rate (HBM, DRAM, SSD, and the recom-puted miss), by workload, for the winning policy. DRAM absorbs most of what overflows HBM; SSD is a shallow backstop. Source: results/metrics_all.csv .on the bandwidth axis, chat favouring recency and document QA reuse-frequency. The third does not hold as written: the shipped predicted-reuse policy is byte-identical to recency (verified in code, not assumed), so “predicted-reuse for agent loops” is recency under another name, and on the agent workload recency is narrowly beaten by reuse-frequency. The grid therefore also includes predictive , a genuine predictor built on an EWMA next-touch estimator that provably differs from recency, to test the roadmap’s underlying premise that “recent-context access is predictable” with a policy that actually pre-dicts. The premise survives, but the recommendation still does not: predictive finishes second on both of the workloads the roadmap’s reasoning targets, at 53.16 GB against reuse-frequency’s 49.36 GB on agent and 48.45 GB against 48.23 GB on document QA (a near-tie), and it trails badly on chat (57.76 GB), whose recency structure it has nothing to predict. The prefetch-grid size sweep (Sec. V-E) shows predictive 
+
+taking first on agent at exactly one intermediate cache size, so prediction pays only in a narrow capacity window; at the default size, keeping the frequently-reused core resident beats predicting when each block returns. Table IV states each recommendation beside its measured verdict. 
+
+D. Where the latency goes 
+
+The latency breakdown in Fig. 8 splits per-token decode into compute and fetch stall. Compute dominates, at roughly 13.2445 ms/token across policies, with fetch stall under one percent of TPOT on every workload. Two things follow. First, the tiered fetches are effectively hidden behind compute at this scale, which is the good news for the capacity win: sessions resume without a visible per-token penalty. Second, because stall is so small, TPOT is a poor discriminator between TABLE IV: The roadmap’s practitioner decision table (left) beside the measured verdict (right). “Holds” is judged on PCIe migration traffic, the quantity placement controls at batch one.                                                  
+
+> Workload Recommended Measured verdict Document QA Reuse-frequency +
+> prefetch
+> Policy holds (1.63 ×less traffic); prefetch does not pay (Sec. V-E) Agent loop Predicted-reuse +
+> prefetch
+> Does not hold as written :predicted-reuse ≡recency; a genuine EWMA predictor finishes second; reuse-frequency wins here; prefetch does not pay Long chat Recency (LRU) Holds, scenario-dependent :for the roadmap’s own case (one isolated long chat), ev-ery eviction policy is byte-identical, so cheap LRU is correct by default and ca-pacity is the only lever; un-der concurrent chats recency genuinely wins (2.30 ×less traffic, best TTFT) Tight HBM Deep SSD +
+> prefetch Sessions/GPU win holds (10.77 ×,Sec. V-G); deep SSD matches the recompute SLO on document QA but does not beat it on latency, and never meets it on chat/agent; prefetch does not pay Capacity Cost-latency frontier Agenuine frontier exists (Sec. V-F): it leans SSD-heavy, spanning 8.38 ×in cost for at most 10.1% la-tency
+
+policies; the policy differences that matter live in TTFT (prefill on resume) and in the migration bandwidth of Fig. 5, not here. The DRAM-versus-SSD split of the stall shown in the figure is attributed by hit share and is approximate: the simulator’s per-token stall total does not record which tier caused a given stalled millisecond. 
+
+E. Prefetch and the reuse structure 
+
+The roadmap pairs each policy with “ + prefetch,” so we measured prefetch as written: for each workload we ran the policy grid a third time over a range of cache sizes with three prefetch arms (none, a causal predictor that uses only past accesses, and a future-reading oracle that is an upper bound no real system can build) on a bandwidth-charged model where a speculative fetch competes with demand traffic on the same link. The result is uniformly negative. Across the whole grid the causal predictor captures a positive share of the oracle’s achievable gain in none of the cells, and the oracle itself, despite seeing the future, is slower than not prefetching in over half of them: on a contended link a speculative fetch delays the demand fetch a request is waiting on, and that cost exceeds the stall it removes whenever the workload’s reuse is not tightly predictable. Prefetch is thus the one part of the recommendation the data most clearly refutes at this scale; a moderate lookahead adds stalls here instead of removing Fig. 8: Per-token decode latency split into compute and fetch stall, by policy; the DRAM/SSD share of the stall is attributed by hit rate (approximate). Compute dominates and stall is 
+
+<1% of TPOT, so tiered fetches are hidden behind compute. Source: results/metrics_all.csv .them. This does not contradict systems where prefetch helps, since those overlap transfer with abundant spare bandwidth, but under a link the demand path is already using, “ + prefetch” is not free, and here it is not worth its bandwidth. 
+
+F. The cost-latency frontier 
+
+The ratio sweep above holds tier shape fixed at 1:8:64 and varies only the working set; it cannot show what happens when the same fixed budget is re-shaped across HBM, DRAM, and SSD. E11 asks that question directly: at a fixed budget 
+
+T = 192 blocks, we sweep every (HBM, DRAM, SSD) composition that sums to T , for all 3 workloads × 4 policies, and record cost and P99 TTFT at each of the 24 compositions per group. Figure 9 plots the resulting frontier for the lru 
+
+policy. There is a real trade-off here, and it is a lopsided one. Cost per 1k sessions (usd_per_1k_sessions ) is, we verify in code, a pure function of the composition alone (it does not depend on workload or policy), so every one of the 12 (workload, policy) groups sweeps the identical 8.38 × cost range (from $45,493 to $381,287 per 1k sessions). Against that 8.38 × cost span, P99 TTFT moves by at most 10.1% of its own ceiling across the whole sweep (chat’s lru 
+
+and predicted_reuse groups see the largest movement, 10.1%; several groups move under one percent). The frontier is therefore nearly vertical: dollars buy almost nothing in latency here, so the frontier leans hard toward the SSD-heavy end. The cheapest composition on the frontier has HBM/DRAM/SSD block counts 10/86/96, and it is the cheapest point in every one of the 12 groups, again checked in code; on latency the choice is nearly free. For deployment, pick the cheap, SSD-heavy composition; the HBM-heavy end of the frontier buys 
+
+Fig. 9: The real cost-latency frontier ( lru policy, one colour per workload), sweeping every (HBM, DRAM, SSD) com-position at a fixed budget T = 192 blocks; frontier points connected, dominated points faded. Cost per 1k sessions is a pure function of composition (verified in code, independent of workload/policy) and spans 8.38 ×; P99 TTFT moves at most 10.1% of its ceiling across that same span, so the frontier is nearly vertical and leans toward the cheap, SSD-heavy end. Source: results/e11_cost_frontier.csv .almost no latency for a large multiple of the price. As with the rest of this paper, the $/GB figures behind this trade ($187.50 / $3.50 / $0.08 for HBM/DRAM/SSD) are assumptions carried from cost_model.py ’s default tiers, not a market quote; the shape of the trade depends only on their ratio. 
+
+G. Capacity under a latency SLO: how deep can SSD go? 
+
+E11’s frontier says cost is nearly free to minimise on la-tency; E10 asks the complementary question at the deployment end of that frontier: fixing a tight HBM budget (32 blocks) and DRAM (64 blocks), how deep can SSD go before it stops being able to serve at an acceptable tail latency? E10 is a 1-D slice of E11’s frontier, walking only the SSD axis at one fixed (HBM, DRAM) point and past E11’s own total-budget cap, so its operating points land directly on E11’s grid. The SLO we hold it to is each workload’s own gpu_only 
+
+(HBM-only, recompute-on-miss) baseline P99 TTFT, which avoids picking an arbitrary millisecond figure: 16.40 ms for chat, 56.04 ms for agent, 62.45 ms for document QA. Deep-ening SSD from its shallowest to its deepest swept point does maximise sessions per GPU, by 10.77 × at every workload; the gain is capacity-driven and identical across workloads, as expected from a fixed HBM/DRAM point. But that gain is not free on latency, and it is not uniformly enough: chat and agent never meet the SLO anywhere in the swept SSD-depth range. Document QA is the one workload where SSD fetching is fast enough to match, though not beat, the recompute baseline: it first meets the SLO at SSD depth 64 blocks, and even at the Fig. 10: Tight HBM (32 blocks) and fixed DRAM (64 blocks), SSD depth swept 8 to 1024 blocks: P99 TTFT and ses-sions/GPU vs. SSD depth (log scale), one panel per workload. The SLO (dashed) is each workload’s own gpu_only base-line P99 TTFT; the crossover (dotted), where present, marks the shallowest SSD depth that meets it. Chat and agent never cross; document QA crosses at depth 64 and matches the SLO with 0.000 ms headroom at the deepest point. Source: 
+
+results/e10_capacity.csv .deepest swept point the headroom against the SLO is 0.000 ms, exactly on the line, with a mean stall of 4.42 ms still being paid at that point. So row 4’s “known stall cost” is real and it is small on document QA, where deep SSD is roughly latency-neutral against recompute; on chat and agent, deep SSD never overtakes recompute at all in the swept range, so the sessions-per-GPU win there is bought at a latency premium the SLO does not accept. VI. D ISCUSSION AND LIMITATIONS 
+
+The clearest finding is a separation of concerns. The ca-pacity and cost wins are large (73.02 × more sessions per GPU, 62.04 × lower cost) but they are mechanism wins: they follow from attaching cheap DRAM and SSD, and any correct placement realises them. The placement policy is a second-order, bandwidth-and-latency decision, and there the guide is workload-specific in the direction the roadmap anticipated for two of three cases: recency for chat, reuse-frequency for document QA. The two parts that fail are instructive. “Predicted-reuse” is, as shipped, byte-identical to recency, so it cannot be a distinct winner. We therefore added a policy built on an EWMA next-touch predictor. It does differ from recency, and it still finishes second to reuse-frequency on the agent loop at the default cache size; prediction’s value is confined to a narrow capacity window, and a predictor that wins broadly remains open. “ + prefetch” fails because our model charges speculative fetches on the same contended link as demand traffic; on that model prefetch removes stalls only when spare bandwidth exists, which at batch one it largely does not. Several limitations bound these claims. The policy compar-ison runs on synthetic generators whose reuse structure is, by construction, favourable to the policy that matches it; on real conversation traces reuse is lower and the margins compress, so the synthetic separations are upper bounds on how cleanly the policies divide. The simulator runs at batch one on a single GPU, where decode is compute-bound and fetch stall is under one percent of TPOT; at larger batch or with faster decode kernels the stall share, and hence the value of good placement and of prefetch, would rise. Sessions-per-GPU and cost are capacity-model outputs from fixed tier prices, exact given those inputs but only as representative as the prices. The DRAM/SSD split of decode stall is attributed by hit share, not directly measured. And placement composes with KV quantization and eviction, which shrink blocks before they are placed; we hold those fixed to isolate placement. VII. C ONCLUSION 
+
+We argued that the mechanism for extending the KV cache beyond GPU memory is the easy half and the placement policy the hard one, and built a calibrated tiered simulator over GPU HBM, CPU DRAM, and SSD to test that claim. The measured answer refines it. The mechanism delivers the headline: tiering multiplies sessions per GPU by 73.02 × and lowers cost per session by 62.04 ×, a capacity result independent of policy. The policy is a bandwidth decision, and the recipe that holds is compact: recency for concurrent chat serving (for one isolated long chat, every policy is identical and cheap LRU is right by default), reuse-frequency for repeated document QA, both judged on the PCIe traffic placement actually controls. The two elements of the original recommendation that do not survive (predicted-reuse, which as implemented is recency, and +
+
+prefetch, which on a contended link costs more than it saves) are as useful to report as the parts that hold. The EWMA predictor we added to close the first gap differs from recency yet still loses to reuse-frequency at the default cache size, so the next work is sharper than “build a predictor”: a predictor that wins outside a narrow capacity window, and a prefetch model with spare bandwidth to hide behind. ACKNOWLEDGMENTS 
+
+The authors thank Vizuara AI Labs for mentorship and computational resources. REFERENCES [1] R. Qin et al., “Mooncake: a KVCache-centric disaggregated architecture for LLM serving,” arXiv:2407.00079, 2024. [2] Y. Liu et al., “LMCache: an efficient KV cache layer for enterprise-scale LLM inference,” arXiv:2510.09665, 2025. [3] Y. Sheng et al., “FlexGen: high-throughput generative inference of large language models with a single GPU,” Proc. ICML , 2023. arXiv:2303.06865. [4] W. Lee et al., “InfiniGen: efficient generative inference of large language models with dynamic KV cache management,” Proc. OSDI , 2024. arXiv:2406.19707. [5] B. Gao et al., “Cost-efficient large language model serving for multi-turn conversations with CachedAttention,” Proc. USENIX ATC , 2024. arXiv:2403.19708. [6] W. Kwon et al., “Efficient memory management for large lan-guage model serving with PagedAttention,” Proc. SOSP , 2023. arXiv:2309.06180. [7] J. Yao et al., “CacheBlend: fast large language model serving for RAG with cached knowledge fusion,” Proc. EuroSys , 2025. arXiv:2405.16444. [8] L. Zheng et al., “SGLang: efficient execution of structured language model programs,” Proc. NeurIPS , 2024. arXiv:2312.07104. [9] Y. Fu et al., “ServerlessLLM: low-latency serverless inference for large language models,” Proc. OSDI , 2024. arXiv:2401.14351. [10] Z. Liu et al., “KIVI: a tuning-free asymmetric 2-bit quantization for KV cache,” Proc. ICML , 2024. arXiv:2402.02750. [11] C. Hooper et al., “KVQuant: towards 10 million context length LLM inference with KV cache quantization,” Proc. NeurIPS , 2024. arXiv:2401.18079. [12] Z. Zhang et al., “H2O: heavy-hitter oracle for efficient genera-tive inference of large language models,” Proc. NeurIPS , 2023. arXiv:2306.14048. [13] J. Tang et al., “Quest: query-aware sparsity for efficient long-context LLM inference,” Proc. ICML , 2024. arXiv:2406.10774. [14] T. Dao et al., “FlashAttention: fast and memory-efficient exact attention with IO-awareness,” Proc. NeurIPS , 2022. arXiv:2205.14135. [15] Y. Zhong et al., “DistServe: disaggregating prefill and decoding for goodput-optimized LLM serving,” Proc. OSDI , 2024. arXiv:2401.09670. [16] P. Patel et al., “Splitwise: efficient generative LLM inference using phase splitting,” Proc. ISCA , 2024. arXiv:2311.18677. [17] A. Agrawal et al., “Taming throughput-latency tradeoff in LLM infer-ence with Sarathi-Serve,” Proc. OSDI , 2024. arXiv:2403.02310. [18] S. Luo et al., “Keep the cost down: a review on methods to optimize LLM KV cache space usage,” arXiv:2407.18003, 2024. [19] G. Xiao et al., “Efficient streaming language models with attention sinks,” Proc. ICLR , 2024. arXiv:2309.17453. [20] J. Ainslie et al., “GQA: training generalized multi-query trans-former models from multi-head checkpoints,” Proc. EMNLP , 2023. arXiv:2305.13245. [21] A. Dubey et al., “The Llama 3 herd of models,” arXiv:2407.21783, 2024. [22] A. Yang et al., “Qwen2.5 technical report,” arXiv:2412.15115, 2024. [23] C. Jin et al., “RAGCache: efficient knowledge caching for retrieval-augmented generation,” arXiv:2404.12457, 2024. [24] W. Kwon et al., “PagedAttention and the vLLM serving system,” Proc. SOSP , 2023. arXiv:2309.06180.

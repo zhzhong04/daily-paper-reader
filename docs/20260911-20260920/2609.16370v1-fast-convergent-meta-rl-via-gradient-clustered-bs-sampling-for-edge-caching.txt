@@ -1,0 +1,1367 @@
+Title: Fast-Convergent Meta-RL via Gradient-Clustered BS Sampling for Edge Caching
+
+URL Source: https://arxiv.org/pdf/2609.16370v1
+
+Published Time: Wed, 16 Sep 2026 00:20:38 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+> 1
+
+# Fast-Convergent Meta-RL via Gradient-Clustered BS Sampling for Edge Caching 
+
+Farnaz Niknia, Ping Wang, Fellow, IEEE 
+
+Abstract —Wireless edge caching networks typically consist of many independent Base Stations (BSs), each facing its own request rate and content popularity profile. Training a Rein-forcement Learning (RL) caching agent from scratch at every BS forces each agent to relearn, through slow trial and error, a decision problem that is structurally identical across the network. Meta-reinforcement learning removes this redundancy by learn-ing a shared initialization that adapts to any BS in a few local updates; however, meta-training itself becomes the bottleneck at scale: the meta-gradient must be estimated from a small subset of BSs at each meta-iteration, and sampling this subset uniformly at random yields a high-variance estimate, an issue existing meta-RL caching frameworks leave unaddressed. This paper proposes a meta-reinforcement learning framework for caching across independent, non-overlapping BSs that directly targets this bottleneck. Each BS runs a local Proximal Policy Optimization (PPO) agent, formulated as a Semi-Markov Decision Process (SMDP) over content popularity, size, lifetime, and importance, while a shared meta-policy is learned via a Model-Agnostic Meta-Learning (MAML)-style loop. To scale meta-training and accelerate convergence, we introduce gradient-based clustering, which groups BSs by local gradient similarity and draws from every cluster, in proportion to its size, at each meta-iteration. We prove, via an Analysis of Variance (ANOVA)-style decomposition of gradient variance, that this strategy yields a strictly lower-variance meta-gradient estimator than uniform random sampling under BS heterogeneity. 
+
+Index Terms —Edge caching, meta-reinforcement learning, proximal policy optimization, model-agnostic meta-learning, semi-Markov decision process, gradient-based clustering, BS sampling, multi-base-station networks, convergence analysis. 
+
+I. I NTRODUCTION 
+
+# THE continued expansion of mobile applications and con-nected services has placed mounting strain on backhaul links and core networks, as billions of devices generate an ever-growing volume of content requests that must ultimately be served from centralized data centers. Video streaming platforms, cloud-based applications, and the proliferation of Internet of Things (IoT) devices have driven this surge in demand, motivating network operators to push content storage closer to end users through edge caching. By storing frequently requested content at BSs near the network edge, operators can substantially reduce backhaul load, shorten response times, and improve the overall quality of experience delivered to users. A practical edge caching deployment, however, rarely con-sists of a single cache node. Operators typically deploy many 
+
+Farnaz Niknia and Ping Wang are with the Lassonde School of Engineering at York University, Toronto, ON, M3J 1P3, Canada (email: fniknia@yorku.ca, pingw@yorku.ca) 
+
+BSs across a coverage region, each independently serving its own local population of users with its own request rate and content popularity profile [1]–[3]. A BS situated in a dense urban core, for instance, may experience high request volumes concentrated around a narrow set of trending content, while a BS in a lightly populated suburban area may see sparser, more evenly distributed requests. Training a RL caching agent inde-pendently from scratch at every one of these BSs is wasteful: although the traffic statistics differ from one BS to another, the underlying caching decision problem, namely which files to retain given memory constraints, content attributes, and request patterns, is structurally identical across all BSs. This redundancy suggests that knowledge learned at one BS should, in principle, be transferable to accelerate learning at another, yet most prior multi-node caching frameworks either assume tight coordination between BSs through explicit cooperation or federated aggregation [1], [2], or treat each BS as fully isolated with no mechanism for knowledge transfer at all [4], [5]. Meta-reinforcement learning offers a principled mathemat-ical framework that explicitly optimizes for fast adaptation to new BSs after minimal local updates, rather than sim-ply transferring knowledge as a fixed initialization. The key distinction is fundamental: transfer learning treats the pre-trained policy as a one-time starting point; in contrast, meta-learning solves an outer-loop optimization problem that seeks an initialization θ such that just a few inner-loop gradient steps on a new BS’s local data yield a high-performing policy for that BS. This is formalized as minimizing the post-adaptation loss averaged over all training BSs, which directly incentivizes rapid convergence at new BSs rather than converging quickly to a single fixed policy. Moreover, meta-learning provides for-mal convergence guarantees under the Model-Agnostic Meta-Learning (MAML) framework [6]. In practical terms, this means a meta-trained initialization can adapt to a new BS’s traffic conditions, , such as sudden shifts in content popularity or changes in request rates, with only a small number of local updates while maintaining or improving performance. A transfer-learned policy, by contrast, offers no such guarantee and often requires retraining or careful hyperparameter tuning to avoid negative transfer when the new environment deviates significantly from that observed during training. We exploit this observation through meta-reinforcement learning, specif-ically following the MAML framework [6], which enables fast adaptation to new and unseen BS environments while maintaining theoretical convergence guarantees. Realizing this benefit at scale, however, introduces a design challenge that has received little attention in the existing arXiv:2609.16370v1 [cs.NI] 14 Sep 2026 2
+
+literature. Computing the meta-gradient that drives the outer-loop update of the shared policy requires evaluating local adaptation steps across BSs, and as the number of BSs in the network grows, evaluating every BS at every meta-iteration becomes computationally prohibitive. The standard remedy is to estimate the meta-gradient from a randomly sampled subset of BSs at each iteration. This is where uniform random sampling becomes problematic: when BSs differ substantially in their traffic characteristics, a randomly drawn subset may by chance overrepresent BSs from one traffic regime while leaving others entirely unsampled, producing a meta-gradient estimate that is unrepresentative of the network as a whole and that varies considerably from one meta-iteration to the next. This high-variance estimation directly slows the convergence of the shared policy, yet, most existing work on meta-RL for edge caching relies on uniform random sampling or assumes networks small enough that all BSs can participate in every meta-iteration, leaving the important question of how to effectively select a subset of BSs at each meta-iteration largely unexplored. To address this limitation, we introduce a meta-reinforcement learning framework for caching across a net-work of independent, non-overlapping BSs, in which each BS executes a local Proximal Policy Optimization (PPO) [7] agent that accounts for content popularity, request arrival rate together with key file attributes, including file size, lifetime, and importance, and a shared meta-policy is learned across BSs using a MAML-style outer loop [6]. To make this meta-learning process scale efficiently to large BS populations and accelerate convergence, we propose a gradient-based cluster-ing mechanism that periodically clusters BSs according to the similarity of their most recently computed local gradients and selects BSs from each cluster proportionally to the cluster size when constructing the BS batch at each meta-iteration. We further provide a formal convergence analysis, grounded in an Analysis of Variance (ANOVA)-style decomposition of gradient variance into within-cluster and between-cluster com-ponents, proving that this gradient-clustered sampling strategy yields a strictly lower-variance meta-gradient estimator than uniform random sampling whenever BSs are heterogeneous in their traffic characteristics, and that this variance reduction translates directly into a faster expected decrease of the meta-loss over training. The contributions of this paper are summarized as follows.  
+
+> •
+
+We propose a meta-reinforcement learning framework, built on a MAML-style inner-outer loop structure, that learns a shared policy initialization across all BSs in the network, enabling any individual BS to adapt to its local traffic conditions, or to a shift in those conditions, using only a small number of local gradient updates rather than training a caching policy from scratch.  
+
+> •
+
+We introduce a gradient-based clustering mechanism for selecting the BS batch used to estimate the meta-gradient at each meta-iteration, in which BSs are periodically clustered by the similarity of their local gradients and BSs are sampled from each cluster proportional to its size, ensuring that every traffic regime present in the network is represented in every meta-iteration.  
+
+> •
+
+We prove, via an ANOVA-style decomposition of gra-dient variance into within-cluster and between-cluster components, that gradient-clustered BS sampling yields a lower-variance meta-gradient estimator than uniform ran-dom sampling whenever BSs are traffic-heterogeneous. Alao, the known convergence guarantee for MAML [8] still holds under our sampling scheme, with the total gradient variance replaced by its smaller within-cluster part.  
+
+> •
+
+We evaluate the proposed approach through extensive simulations on a heterogeneous network of independent BSs, and show that it (i) empirically confirms the pre-dicted variance decomposition and reduction, (ii) con-verges faster and more stably than uniform random sam-pling during meta-training, and (iii) matches the strongest baselines in adapted caching performance while avoid-ing the negative transfer that degrades transfer learning, thereby validating our theoretical results. The remainder of this paper is as follows. Section II reviews related work and section III introduces our multi-BS system model, while Section IV formalizes the per-BS caching problem. Section V presents our proposed meta-RL caching algorithm with gradient-clustered BS sampling, together with the accompanying convergence analysis. Section VI describes our experimental setup and results, and Section VII concludes the paper. For reference, Table I provides a comprehensive summary of all notations used throughout the paper. II. R ELATED WORK 
+
+Research on edge caching with reinforcement learning can be organized along three threads relevant to this work: single-node Deep Reinforcement Learning (DRL)-based caching, federated caching across base stations, and meta-learning approaches. Next, we review each in turn. 
+
+A. Single-Node Edge Caching 
+
+DRL has been widely adopted for caching at a single edge node, where an agent observes local request dynamics and learns a policy that maximizes cache efficiency without prior knowledge of the environment. The authors in [9] model the caching of transient data at an edge router as a discrete-time Markov Decision Process (MDP) and develop an actor–critic DRL method that balances communication cost against data freshness. Similarly, the work in [10] employs PPO to jointly improve the cache hit rate and reduce energy consumption while accounting for the limited lifetime of IoT data. Building on this line of research, the study in [11] proposes TD-MEAC, a maximum-entropy actor–critic strategy for transient data that constructs an explicit freshness model and achieves higher hit rates and average freshness than existing DRL-based schemes. More recent efforts have incorporated attention and Trans-former architectures into learning-based caching at a single node. T-CacheNet [12] employs a Transformer-decoder-based DRL framework in which all users request content from a single edge server with limited cache capacity, using self-attention to encode request patterns. The authors in [13] formulate cache replacement as a partially observable MDP 3                                                                                         
+
+> TABLE I TABLE OF NOTATIONS
+> Symbol Description
+> λbPoisson request arrival rate at BS b
+> FContent catalog, F={f1, f 2, . . . , f F}
+> d(t)Popularity vector at time tlfLifetime (validity duration) of content type fzfSize (in storage units) of content type fifImportance (priority weight) of content type fhf(t)Freshness of content type fat time t,hf(t)∈[0 ,1]
+> yf(t)Utility of content type fat time tMCache capacity at each BS (in storage units)
+> ab(t)Cache action at BS b:ab(t)∈ { 0,1}
+> τbinter-interval time between requests at BS brb(t)Instantaneous reward collected by BS bat decision epoch tγDiscount factor
+> πbCaching policy at BS bπ∗
+> bOptimal stationary policy at BS bθShared meta-policy parameters
+> θbBS-specific policy network parameters
+> θ′
+> bAdapted policy parameters after inner-loop update at BS bαInner-loop (BS-specific) learning rate
+> ηOuter-loop (meta) learning rate
+> gb(θ)Local gradient at BS b
+> ˆG(θ)Meta-gradient estimator (sampled over BS batch S)
+> G∗(θ)True population meta-gradient (over all BSs B)
+> SBS batch (subset of BSs sampled for meta-iteration)
+> KNumber of clusters
+> mSampling budget (BS evaluations per meta-iteration),
+> m≪NmkNumber of BSs drawn from cluster Ck:mk=
+> m n k/N NTotal number of BSs, N=|B|
+> C1, . . . , C KClusters of BSs based on gradient similarity
+> nkSize of cluster Ck
+> μkMean gradient within cluster Ck
+> σ2
+> kWithin-cluster gradient variance for cluster Ck
+> σ2Total gradient variance
+> ∆cRe-clustering interval
+
+and propose the miss-triggered Cache Transformer (MTCT), a Transformer-decoder Q-learning agent that encodes recent request histories with self-attention and invokes its policy only upon cache misses. In [14], an attention mechanism aids a DRL agent in jointly optimizing proactive caching and cache replacement in a mobile edge computing network under a cloud–edge–device architecture. 
+
+B. Federated Edge Caching 
+
+A second line of research distributes the learning process across multiple caching nodes, using federated learning to share model parameters rather than raw request traces. The FADE framework in [15] pioneers this direction, letting each edge node train a local DRL caching agent and periodically upload its weights to a central server for aggregation, thereby improving hit rate and offloading backhaul traffic without exposing user data. To account for the differing content pref-erences of neighboring nodes, the authors of [16] propose an attention-weighted federated DRL scheme for device-to-device assisted collaborative caching, in which attention weights determine each participant’s contribution to the aggregated model. Study in [17] integrates recommender systems with edge caching in a two-tier edge–cloud network and adopts a multi-agent actor–critic algorithm trained under federated learning, enabling edge servers to independently learn caching strategies that minimize long-term system cost. In a related effort, [18] models recommendation-enabled caching as apartially observable MDP, applies deep deterministic policy gradient to learn the policy, and employs an Earth mover’s distance criterion for personalized model aggregation. Subsequent work addresses the communication overhead and heterogeneity that federated training introduces. The CE-FDRL method of [19] prunes and quantizes the shared DRL models and lengthens the aggregation interval to reduce the number of transmitted parameters, and provides a global convergence analysis for cooperative caching in fog radio access networks. Similarly, the study in [20] combines elastic federated learning with multi-agent DRL so that fog access points with unequal computational budgets can participate in cooperative caching. Closer to the question of environment heterogeneity, the authors of [21] observe that a single ag-gregated model adapts poorly to edge servers with dissimilar request distributions, and propose a personalized federated training framework in which a Multi-Head Deep Q-Network (MH-DQN) is trained layer-wise, so that shared layers capture global structure while personalized layers specialize to each local environment. Federated approaches thus establish that knowledge ac-quired at one caching node can usefully inform another. However, their objective is to fit a set of policies to the base stations observed during training: aggregation is tied to the participating nodes, and a newly deployed base station, or an existing one whose request statistics have drifted, must either accept a global model that was never optimized for its own dynamics or undergo a fresh round of federated training. Fur-thermore, personalization is achieved by partitioning network layers rather than by optimizing explicitly for adaptability. By contrast, the meta-learning formulation adopted in this paper treats each base station as a task drawn from an underlying task distribution and optimizes the shared initialization so that, by construction, a small number of gradient steps on a previously unseen task recovers a near-optimal policy. Federated learning and meta-learning are therefore complementary rather than competing: the former addresses where computation and data reside, whereas the latter addresses how quickly a policy can adapt to a task it has never seen. 
+
+C. Meta-Reinforcement Learning for Edge Caching 
+
+Several works apply meta-RL to caching at a single node. The scheme in [22] pairs a Deep Deterministic Policy Gradient 4
+
+(DDPG) base learner with a MAML meta-learner for proactive caching in a vehicular network served by one road-side unit. Each BS corresponds to a different Zipf popularity setting, and the meta-learner is trained across these BSs so that the shared initialization can adapt quickly to a new one. Since only the popularity skewness changes from task to task, the request timing is never part of what makes two tasks different. The MRFAC algorithm in [23] likewise models single-node mobile edge caching as an MDP and adds a meta-learner whose gated-recurrent-unit weights encode the prior knowledge transferred to a new BS; tasks are again induced by shifts in the request pattern at one node, and the adaptation performance is evaluated against baselines Least Frequently Used (LFU), First-In First-Out (FIFO), and DDPG. In both cases the model is discrete-time, so the request arrival rate plays no part in what separates one task from another. Three works [24], [25] and [26] operate on multiple nodes and are therefore closer to the present setting; they differ mainly in how tasks and training BS batches are formed. In [24], a task is the request pattern seen at one edge during a short time window. Following [25], the method pairs consec-utive time windows and learns to adapt from the earlier to the later one, using both same-node and neighbor-to-local pairs. Rather than sampling a subset of BSs, it uses all available pairs; the only selection is over neighbors during adaptation, where a learned weight matrix upweights those most similar to the local node. The approach in [26] is a meta-RL scheme in which an inner DDPG model lets several base stations with overlapping coverage cooperatively decide cache replacement, while an outer MAML-style model learns an initialization that generalizes to unseen popularity distributions. Here, tasks differ in their content-popularity distribution, and, unlike [24], each meta-iteration randomly samples a batch of BSs and av-erages the resulting parameter differences to update the meta-parameters. Training and test BSs are drawn from disjoint Zipf skewness ranges to test generalization to unseen popularity. 
+
+D. Motivation 
+
+Two observations follow. First, across all of the aforemen-tioned works, a “task” is induced by varying the popularity skewness while the temporal statistics of the request process are held fixed; because the underlying models are discrete-time, the request rate and hence the interarrival distribution that determines how long a cached file survives before it expires, cannot distinguish one task from another. To address this limitation, we adopt the continuous-time SMDP formulation in this work, and base stations with identical popularity profiles but different arrival rates are genuinely different tasks. Second, existing meta-RL caching methods either enumerate all task pairs [24], draw BSs at random [26], or partition them by a hand-chosen popularity parameter [22], [23]. The framework developed in this paper addresses both points: (i) tasks cor-respond to base stations with heterogeneous popularity and arrival dynamics, (ii) the BSs are sampled using gradient-based clustering rather than random or hand-partitioned sampling, and the resulting meta-policy is theoretically shown to con-verge faster than its counterpart under random sampling.       
+
+> Fig. 1. System model: a central server and Bindependent, non-overlapping BSs, each serving its own users from a local cache and characterized by its own request rate λband content popularity distribution db(t). The BSs do not share cache contents or coordinate their caching decisions.
+
+III. S YSTEM MODEL 
+
+A. Network Architecture 
+
+We consider a heterogeneous wireless network comprising 
+
+N BSs, indexed by B = {1, 2, . . . , N }, all connected to a central content server, as illustrated in Fig. 1. Each BS b ∈ B 
+
+serves a set of end-user devices within its own coverage area, and neighboring BSs have non-overlapping service zones so that every user is associated with exactly one BS. Because the BSs operate independently of one another, there is no inter-BS coordination or content sharing; each BS makes its own caching decisions based solely on the requests generated by its local users. Each BS is equipped with an embedded cache of capacity 
+
+M (in storage units). The central server is assumed to store the complete content catalog and has sufficient capacity to respond to any request forwarded by the BSs [27]. When a user attached to BS b issues a request, the BS first consults its local cache. A cache hit occurs when the requested item is found locally and is served immediately, avoiding a round trip to the server. A cache miss triggers a fetch from the central server, incurring additional transmission delay and consuming backhaul bandwidth. Hereafter, the term cache refers to the storage unit collocated with a BS. Since the BSs are statistically independent (disjoint user populations, no shared cache), the caching problem at each BS is self-contained. Accordingly, the system model and problem formulation that follow are stated for a representative BS b;an identical formulation applies to every other BS in B.Let Ub = {u1, u 2, . . . , u Ub } denote the set of users served by BS b. Requests generated within the coverage area of BS b
+
+arrive in sequence and are indexed by Gb = {g1, g 2, . . . , g Gb },where gg identifies the g-th request irrespective of the originat-ing user. Requests are processed in arrival order (first-come, first-served). The content catalog shared across all BSs is denoted by 
+
+F = {f1, f 2, . . . , f F }, where ff represents the f -th content type. Content items originate from diverse sources (cameras, 5
+
+sensors, and edge computing nodes) and are stored at the central server. Each content type carries four application-specific attributes, defined below. 
+
+Content Attributes: 
+
+1) Popularity ( df ): The number of times content type f is requested within a predefined observation window B at a given BS [28]. Items with high request frequency (such as trending video clips) are considered popular and are stronger candidates for local caching. 2) Lifetime ( lf ): The duration for which content type f
+
+remains valid after leaving the server [29]. Time-critical data (e.g., real-time sensor readings or location updates) expires quickly, whereas archival content may remain relevant indefinitely [30]. 3) Size ( zf ): The amount of cache storage consumed by one instance of content type f . Large items (e.g., high-definition video) compete more aggressively for the limited cache capacity M of a BS than compact items such as text files. 4) Importance ( if ): A scalar reflecting the priority users and operators assign to content type f . Mission-critical or safety-relevant content receives a high importance score, while low-priority entertainment content receives a lower score. A sound caching policy must account for all four attributes jointly. For instance, a content item that is highly popular but large, short-lived, and unimportant may contribute less to overall system performance than a moderately popular item that is compact, long-lived, and important. The popularity vector observed at BS b at time t is 
+
+d(t) = ( d1(t), d 2(t), . . . , d F (t)) , where df (t) records how often content type f was requested during window B at that BS. The lifetime, size, and importance vectors are written as 
+
+l = ( l1, . . . , l F ), z = ( z1, . . . , z F ), and i = ( i1, . . . , i F ),respectively, and are treated as global attributes shared across all BSs. 
+
+Content Utility: The benefit of retaining a content item in the cache of a BS is jointly determined by how fresh the item is and how important it is to the local user population. The 
+
+freshness of content type f at time t is defined as 
+
+hf (t) = t − wfg
+
+lf
+
+!
+
+, 0 ≤ hf (t) ≤ 1, (1) where wfg is the time at which content type f was generated and lf is its lifetime [31]. The freshness value is zero when the item is generated and increases as the item ages, reaching one upon expiration. The utility of content type f cached at BS b at time t is expressed as 
+
+yf (t) = E hf (t), i f
+
+ , (2) where E(·) an increasing function with respect to if and is a decreasing function with respect to hf (t) [31]. 
+
+B. Environment Uncertainties 
+
+Each BS independently faces two key sources of environ-mental uncertainty that can degrade caching performance if left unaddressed. 
+
+1) Content Popularity Dynamics: The popularity distri-bution observed at a BS is non-stationary. User demand shifts in response to social trends, time-of-day effects, and unpredictable events such as breaking news or viral content, causing certain items to surge in request frequency while others rapidly lose traction. When the popularity distribution changes, a caching policy optimized for prior conditions may retain items that are no longer in demand while failing to cache newly popular ones, leading to a degraded cache-hit rate. 
+
+2) Request-Rate Variability: In addition to changes in which content is popular, the rate at which requests arrive at a BS also fluctuates over time. Factors such as user density variations, device connectivity patterns, and time-of-day traf-fic cycles all introduce variability in inter-request intervals. Request arrivals at each BS are modeled as an independent Poisson process with rate λb, a standard assumption for charac-terizing wireless user traffic [32]. Since BSs serve disjoint user populations, the arrival processes at different BSs are mutually independent. Each BS has no prior knowledge of its own λb or of any parameters of the governing Poisson process. A caching policy tuned to a particular arrival rate may either over-replace cached items during periods of low demand or fail to keep pace with high-demand bursts, resulting in suboptimal utilization of the available cache capacity M . Consequently, monitoring and reacting to shifts in λb is as critical as adapting to changes in the local popularity distribution. IV. P ROBLEM FORMULATION 
+
+The caching problem at each BS is inherently sequential: the BS must decide, upon every content request, whether to store the retrieved item locally, taking into account the current cache occupancy, the attributes of the incoming content, and the long-term effect of each decision on future performance. This structure maps naturally onto a SMDP, which generalizes the standard MDP to settings where the time elapsed between consecutive decision epochs is itself a random variable [33]. We adopt the SMDP framework because content requests arrive according to a Poisson process, making transition times non-uniform and ruling out the fixed unit-step assumption of a discrete-time MDP. Since all BSs are statistically independent (disjoint coverage areas, no shared cache, no inter-BS collaboration), the SMDP at each BS b is self-contained and structurally identical. The formulation below therefore describes a single representative BS b; the same model applies to every other BS in B without modification. The SMDP at BS b is defined by the five-tuple 
+
+(S, A, J , R, π ), where S is the state space, A is the action space, J captures state transition probability, R is the reward function, and π denotes the caching policy. Each component is described in detail below. 
+
+1) State Space: At each decision epoch t, the state of BS 
+
+b is 
+
+sb(t) =  Mem b(t), bb(t), yb(t), db(t), i(t), l(t), z(t) ,
+
+(3) where the components are defined as follows. 6
+
+bb(t) ∈ { 0, 1}F is a binary occupancy vector whose f -th entry equals 1 if content type f is currently stored in the cache of BS b and 0 otherwise. 
+
+Mem b(t) is the normalized available cache capacity at BS 
+
+b, given by 
+
+Mem b(t) = M − PFf =1 bfb (t) zf
+
+M , (4) where M is the cache capacity of each BS and zf is the size of content type f . A value of Mem b(t) = 0 indicates a fully occupied cache, while Mem b(t) = 1 corresponds to an empty cache. 
+
+yb(t) tracks the utility of each item currently cached at BS 
+
+b. Specifically, yfb (t) = 0 for any content type f not present in the cache, and yfb (t) > 0 otherwise, with its value determined by the utility function in Eq. 2. 
+
+2) Action Space: At every decision epoch t, the caching agent at BS b chooses one of two actions for the content item associated with the arriving request: 
+
+ab(t) ∈ { 0, 1}, (5) where ab(t) = 1 instructs the BS to store the item in its cache and ab(t) = 0 leaves the cache unchanged. When the cache is full and ab(t) = 1 is selected, the item with the lowest current utility yfb (t) is evicted to free the required space; if the freed space is still insufficient, additional low-utility items are removed until the incoming content can be accommodated [31]. 
+
+3) System Dynamics: State transitions in the SMDP at BS 
+
+b are governed jointly by the transition probability kernel 
+
+P bss ′ and the associated sojourn time τb between consecutive decision epochs. The stochastic inter-arrival times introduced by the Poisson request process make τb a random variable, which is precisely the feature that distinguishes an SMDP from a standard MDP [33]. Because the system dynamics and reward structure are generally unknown in practice, we employ reinforcement learning to estimate them from experience and iteratively refine the caching policy, as detailed in Section V. 
+
+4) Reward Function: The instantaneous reward collected by BS b at decision epoch t is 
+
+r(t) = w1
+
+h
+
+(b(t) · d(t)) ( b(t) · y(t)) T i
+
+− w2 [M em (t)] .
+
+(6) where w1 and w2 are non-negative weights that balance the two competing objectives, and T is a normalization constant. The first term rewards the BS for keeping content that is si-multaneously popular and high-utility in its cache: bb(t)·db(t)
+
+accumulates the popularity of all currently cached items, while 
+
+bb(t) · yb(t) accumulates their utilities, so the product is large only when the cache holds fresh, important, and frequently requested content. The second term penalizes idle cache space: a large Mem b(t) signals that available storage is being wasted, which the reward function discourages. To illustrate, consider two scenarios at BS b in which all parameters are fixed except one. In the first scenario, the cache is fully occupied with items that are both fresh and frequently requested; the first term is maximized and the penalty term vanishes, yielding a high reward. In the second scenario, the same items remain cached but sufficient time has elapsed for their freshness and therefore their utility to decline noticeably; the first term decreases even though cache occupancy and request patterns are unchanged, reflecting the preference for up-to-date content. As a third illustration, suppose some cache slots are vacant even though the cached items are highly useful; the penalty term then reduces the reward, incentivizing the agent to fill available storage with beneficial content. Together, these terms guide the caching agent toward a policy that maintains fresh, important, and popular content in the cache while making efficient use of the finite capacity M .
+
+5) Optimization Objective: Because the caching problem is modeled as an infinite-horizon SMDP (no terminal state exists while the BS is operational), the goal of the caching agent at BS b is to find a stationary policy π∗ 
+
+> b
+
+that maximizes the long-run average reward: 
+
+π∗ 
+
+> b
+
+= arg max 
+
+> πb
+
+lim 
+
+> T0→∞
+
+1
+
+T0
+
+> T0
+
+X
+
+> t=0
+
+rb(t), (7) which simultaneously maximizes the average utility of cached content and minimizes unused cache capacity over time. Since the BSs are independent, solving (7) for each BS b ∈ B 
+
+separately is equivalent to the global multi-BS optimization, and no joint optimization across BSs is required. V. M ETA -R EINFORCEMENT LEARNING WITH 
+
+GRADIENT -C LUSTERED BS S AMPLING FOR MULTI -BS EDGE CACHING 
+
+In our multi-BS network, every BS b ∈ B runs an inde-pendent caching agent that must learn a policy tailored to its own local traffic characteristics, namely its request rate λb and content popularity distribution db(t). At each BS, we adopt PPO [7] as the underlying reinforcement learning algorithm for making caching decisions. We then build on this per-BS PPO agent with a meta-learning layer that enables knowledge to be shared efficiently across BSs, allowing each BS to adapt to its local environment more rapidly and effectively than learning an optimal policy independently from scratch. . Furthermore, we introduce a gradient-based clustering mecha-nism for selecting which BSs participate in each meta-update. This section presents these three components in turn, followed by a theoretical proof establishing why gradient-clustered BS sampling accelerates convergence of the meta-learning process relative to uniform random sampling. 
+
+A. Per-BS Caching Policy via Proximal Policy Optimization 
+
+We rely on PPO as the local reinforcement learning algo-rithm executed independently at every BS. Before describing how knowledge is transferred across BSs, we justify this choice and summarize the mechanics of PPO as applied to the caching decision at a single BS. 
+
+1) Why PPO: Two natural alternatives for the caching agent are DDPG and Double Deep Q-Learning (DDQL). Neither is well suited to our setting. DDPG is built for continuous control problems and requires an action space that varies smoothly; the caching decision at a BS, however, is inherently 7
+
+discrete (cache or do not cache), so adopting DDPG would require artificial discretization of an algorithm not designed for that purpose. DDQL handles discrete actions natively but is known to converge considerably more slowly than policy-gradient methods such as PPO, which is problematic given that our BSs must adapt quickly to shifting traffic conditions. PPO, by contrast, operates directly on discrete action spaces and uses a clipped surrogate objective that constrains the size of each policy update, yielding both fast and stable training even under fluctuations in request rates and content popularity distributions. For these reasons, PPO is the local learning algorithm of choice at every BS in our framework. 
+
+2) PPO Mechanics at a Single BS: Each BS b maintains its own policy network πθb and value network Vθb , updated using locally observed transitions (sb(t), a b(t), r b(t), s b(t+1) , τ b),as defined in Section IV. The policy is updated by maximizing the clipped surrogate objective. Let ρb(θb) denote the proba-bility ratio between the current and previous policies at BS 
+
+b,
+
+ρb(θb) = πθb (ab(t) | sb(t)) 
+
+πθb, old (ab(t) | sb(t)) . (8) The clipped surrogate objective is then 
+
+LPPO  
+
+> b
+
+(θb) = min 
+
+
+
+ρb(θb) ˆAb(t),
+
+clip  ρb(θb), 1 − ϵ, 1 + ϵ ˆAb(t)
+
+
+
+,
+
+(9) where πθb, old denotes the policy prior to the current update, 
+
+ˆAb(t) is the local advantage estimate at BS b, and ϵ is the clipping parameter shared across all BSs. The clipping term restricts how far the updated policy can drift from πθb, old 
+
+within a single update, preventing destructive policy steps while still allowing meaningful progress at each iteration. The advantage estimate is computed as 
+
+ˆAb(t) = rb(t) + γτb Vθb (sb(t + 1)) − Vθb (sb(t)) , (10) where sb(t + 1) denotes the state of BS b following the tran-sition. Because the underlying decision process is an SMDP rather than a standard MDP (Section IV), the discount factor is raised to the power of the sojourn time τb rather than held fixed at one transition per step; this ensures rewards realized after longer inter-request intervals are discounted proportionally more than rewards realized after short ones [34]. The value network at BS b is trained by minimizing the squared discrepancy between its prediction and the boot-strapped target return, 
+
+Lvalue  
+
+> b
+
+(θb) = ( Vθb (sb(t)) − Rb(t)) 2 , (11) 
+
+Rb(t) = rb(t) + γτb Vθb (sb(t + 1)) . (12) so that the predicted value of a state converges toward the sum of the immediate reward and the discounted value of the subsequent state. Equations (9)–(11) together define the local update rule executed independently by every BS at every decision epoch. 
+
+B. Meta-Reinforcement Learning Across Base Stations 
+
+Learning a caching policy from scratch at each new BS requires extensive trial-and-error, during which the system operates suboptimally and wastes computational resources. To avoid this, we require a pretrained policy that is sufficiently general to perform reasonably well across diverse traffic conditions, namely different content popularity distributions and varying request rates, and can serve as a strong starting point for any new BS. Rather than randomly initializing the neural network weights as in learning from scratch, this pretrained policy provides a warm initialization that captures the shared structure of the caching problem. With only a few fine-tuning updates adapted to the new BS’s local traffic characteristics, the policy can quickly achieve performance comparable to the optimal policy trained specifically for that environment. To obtain such a pretrained policy, we employ a meta-reinforcement learning approach built on the MAML framework [6]. However, to make this approach scalable to large networks with many heterogeneous BSs, we modify the standard MAML BS sampling strategy: rather than uniformly sampling BSs at each meta-iteration, we employ a gradient-based clustering mechanism that clusters BSs by similarity of their local gradients and samples BSs from each cluster pro-portional to its size. This modification ensures that all traffic regimes present in the network are represented at every meta-iteration, reducing the variance of the meta-gradient estimator and accelerating convergence of the shared initialization. 
+
+1) Meta-Learning Objective: The goal of meta-learning is to find a single shared policy θ that can quickly adapt to any BS in the network. The learning process has two loops: an inner loop and an outer loop. In the inner loop, for each BS b, the shared policy θ is taken and updated for a few gradient steps using the local traffic data of that BS. The result is a locally adapted policy θ′
+
+> b
+
+, which is simply θ after being fine-tuned to the conditions of BS b:
+
+θ′ 
+
+> b
+
+= θ − α ∇θ Lb(θ), (13) where α is the inner-loop learning rate and Lb(θ) is the local PPO loss at BS b.After adaptation, θ′ 
+
+> b
+
+is tested on BS b with no further weight updates. The loss measured during this test is the post-adaptation loss , and it tells us how well the adapted policy performs on BS b’s actual traffic conditions. The outer loop then updates the shared θ to minimize the average post-adaptation loss across all BSs: 
+
+F (θ) = min 
+
+> θ
+
+1
+
+|B| 
+
+X
+
+> b∈B
+
+Lb(θ′
+
+> b
+
+). (14) 
+
+2) Meta-Gradient Estimation: The outer-loop update to θ
+
+requires the gradient of the objective in (14) with respect to θ,referred to as the meta-gradient. In principle this meta-gradient should be computed using all N = |B| BSs in the network. In practice, however, computing local adaptation steps for every BS at every meta-iteration is costly, particularly as N grows large. We therefore approximate the true meta-gradient using 8
+
+only a subset S ⊂ B of K ≪ N BSs sampled at each meta-iteration: 
+
+ˆG(θ) = 1
+
+K
+
+X
+
+> b∈S
+
+gb(θ), gb(θ) def 
+
+= ∇θ Lb(θ′
+
+> b
+
+), (15) which is then used in the meta-parameter update θ ← θ −
+
+η ˆG(θ), with η being the outer-loop learning rate. The central design question is how the subset S should be chosen at each meta-iteration. The most direct approach is to draw S uni-formly at random from B. However, a gradient-aware sampling strategy yields a meta-gradient estimator with substantially lower variance, leading to faster convergence of the meta-learning process. 
+
+C. Gradient-Based Clustering for BS Sampling 1) Motivation: BSs with similar traffic characteristics, com-parable request rates and similar popularity distributions, tend to produce local gradients gb(θ) that point in similar directions, since their underlying loss landscapes Lb(θ) are themselves similar. Conversely, BSs operating under very different traffic regimes (e.g., a densely populated urban BS versus a lightly loaded suburban BS) produce local gradients that diverge substantially. A meta-gradient estimator built by sampling BSs uniformly at random is, in effect, blind to this structure: it may by chance select several BSs from the same traffic regime while omitting others entirely, producing an estimate that is unrepresentative of the true population gradient G∗(θ) and therefore exhibits high variance from one meta-iteration to the next. 
+
+2) Clustering Procedure: To address this, we periodically group BSs according to the similarity of their most recently computed local gradients, and then sample the batch S in a stratified manner from these groups, ensuring that every traffic regime present in the network is represented at each meta-iteration. Concretely, upon every ∆c meta-iterations, we 1) collect the most recent local gradient gb(θ) computed at each BS b ∈ B ;2) normalize each gradient to unit norm, ˜gb(θ) =
+
+gb(θ)/∥gb(θ)∥, and partition the N BSs into K clusters 
+
+C1, . . . , C K by applying cosine-similarity-based group-ing to the normalized gradient vectors {˜gb(θ)}b∈B , so that BSs whose gradients point in similar directions are grouped together. Normalizing before clustering is necessary because cosine similarity measures only the angle between two gradients and is invariant to their magnitude, whereas the variance decomposition (Section V-D) is stated in terms of Euclidean dis-tance. For unit-norm vectors the two coincide exactly, 
+
+∥˜gi(θ)− ˜gj (θ)∥2 = 2 −2 cos  ˜gi(θ), ˜gj (θ), so clustering on normalized gradients directly minimizes the within-cluster Euclidean variance σ2 
+
+> k
+
+that governs the variance reduction proved in Theorem 3; 3) given a total sampling budget of m BSs per meta-iteration, allocate mk = ⌊m n k/N ⌉ draws to cluster Ck,where nk = |Ck|, where ⌊·⌉ denotes rounding to the nearest integer, ensuring mk ≥ 1 for every non-empty cluster and P 
+
+> k
+
+mk = m. Larger clusters receive propor-tionally more draws; at every meta-iteration occurring between two consecutive re-clustering events, draw mk
+
+BSs independently and uniformly from each cluster Ck,
+
+k = 1 , . . . , K , and form the BS batch as the cluster-size-weighted average of their local gradients, 
+
+ˆGclust (θ) = 
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N
+
+1
+
+mkmkX
+
+> j=1
+
+gbk,j (θ). (16) When the clusters are of equal size and m = K, this allocation reduces to drawing exactly one BS per cluster. Re-clustering every ∆c iterations, rather than at every iter-ation, keeps the computational overhead of the clustering step low while still allowing the cluster assignment to track gradual changes in BS traffic patterns over the course of training. Within a given clustering interval, proportional sampling from every cluster guarantees that the BS batch always spans the full diversity of traffic regimes present in the network, weighted by how prevalent each regime is, in contrast to uniform random sampling, which provides no such guarantee. 
+
+D. Convergence Analysis: Gradient-Clustered Sampling Ver-sus Random Sampling 
+
+We now prove that gradient-clustered BS sampling con-verges faster than uniform random sampling, following the convergence framework of Fallah et al. [8], which established the first theoretical guarantees for gradient-based MAML on nonconvex objectives. The argument has three steps. First, both sampling strategies produce unbiased estimates of the meta-gradient (Lemma 1). Second, we derive the exact variance of each estimator and prove that the clustered estimator has strictly smaller variance, with the gap given in closed form by the between-cluster variance of the local gradients (Theorems 1–3). Substituting the reduced variance into that analysis shows that the convergence guarantee of [8] carries over to clustered sampling with the variance term strictly reduced (Proposition 1). 
+
+1) Setup and Sampling Schemes: Consider a network of 
+
+N = |B| BSs. At a given meta-iteration, each BS b carries a local meta-gradient gb(θ) ∈ Rd, and the quantity both strategies must estimate is the population meta-gradient 
+
+G∗(θ) = 1
+
+N
+
+X
+
+> b∈B
+
+gb(θ). (17) By (13), θ′ 
+
+> b
+
+depends on θ both directly and through the inner-loop gradient ∇L b(θ); applying the chain rule through θ′
+
+> b
+
+,
+
+gb(θ) def 
+
+= ∇θ Lb(θ′
+
+> b
+
+) = 
+
+ ∂θ ′
+
+> b
+
+∂θ 
+
+⊤
+
+∇L b(θ′
+
+> b
+
+), (18) where 
+
+∂θ ′
+
+> b
+
+∂θ = I − α∇2Lb(θ), (19) so that 
+
+gb(θ) =  I − α∇2 
+
+> θ
+
+Lb(θ)∇L b(θ′
+
+> b
+
+). (20) 9
+
+Since F (θ) in (14) averages Lb(θ′
+
+> b
+
+) over b ∈ B , linearity of differentiation gives 
+
+∇F (θ) = ∇ 1
+
+N
+
+X
+
+> b∈B
+
+Lb(θ′
+
+> b
+
+)
+
+!
+
+= 1
+
+N
+
+X
+
+> b∈B
+
+∇L b(θ′
+
+> b
+
+)= 1
+
+N
+
+X
+
+> b∈B
+
+gb(θ) = G∗(θ),
+
+(21) where F (θ) is the meta-loss of (14). Accordingly, G∗(θ) and ∇F (θ) are used interchangeably. The clustering step partitions B into K clusters C1, . . . , C K
+
+by gradient similarity, with nk = |Ck| and PKk=1 nk = N .Both strategies are given the same sampling budget of m BS evaluations per meta-iteration, where m ≥ K.
+
+Random sampling. The batch consists of m BSs b1, . . . , b m
+
+drawn independently and uniformly from B, and the meta-gradient is estimated by the sample mean 
+
+ˆGrand (θ) = 1
+
+m
+
+> m
+
+X
+
+> j=1
+
+gbj (θ). (22) 
+
+Gradient-clustered sampling. The budget is divided among the clusters in proportion to their sizes, 
+
+mk = m nk
+
+N , (23) so that larger clusters receive proportionally more draws; we assume m is chosen so that each mk is a positive integer (in practice mk is rounded and at least one BS is drawn per clus-ter). From each cluster Ck, mk BSs are drawn independently and uniformly, and the estimator is the cluster-size-weighted average 
+
+ˆGclust (θ) = 
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N
+
+1
+
+mkmkX
+
+> j=1
+
+gbk,j (θ), (24) where bk,j denotes the j-th BS drawn from cluster Ck.
+
+2) Assumptions: We adopt the assumption framework un-der which the convergence of gradient-based MAML was first established [8], stated here for the finite BS population. 
+
+A1 ( Bounded initial gap ). 
+
+F is bounded below, and ¯∆ def 
+
+= F (θ0) − inf θ F (θ) < ∞.
+
+A2 ( Smooth local losses ). 
+
+Each local loss Lb is twice continuously differentiable and L-smooth, ∥∇L b(θ) − ∇L b(θ′)∥ ≤ L∥θ − θ′∥ for all θ, θ ′, which holds whenever the policy and value networks use Lipschitz-continuous activations on bounded inputs [35]. 
+
+A3 ( Lipschitz Hessians ). 
+
+Each Hessian ∇2Lb is ρ-Lipschitz continuous. Together with A2 and an inner-loop stepsize α ∈ (0 , 1/(6 L)] , this ensures that the meta-loss F admits the smoothness surrogate and the accompanying stochastic meta-stepsize rule of [8, Lemmas 4.8 and 4.9]. 
+
+A4 ( Bounded BS-gradient dispersion ). 
+
+For all θ, 1
+
+> N
+
+P 
+
+> b∈B
+
+∥gb(θ) − ∇ F (θ)∥2 ≤ σ2. This is the finite-population analogue of [8, Assumption 4.5]. Lemma 2 below refines it as σ2 = σ2 
+
+> W
+
++ σ2 
+
+> B
+
+.
+
+A5 ( Per-BS estimation noise ). 
+
+The stochastic meta-gradient ˆgb that a sampled BS computes from its finite local rollouts satisfies E[ˆ gb | b] = gb(θ) and 
+
+E∥ˆgb − gb(θ)∥2 | b ≤ ˜σ2, the analogue of [8, Assump-tion 4.6]. Following [8, Definition 4.1], a point θϵ is an ϵ-approximate first-order stationary point (ϵ-FOSP) if E[∥∇ F (θϵ)∥] ≤ ϵ.
+
+3) Unbiasedness: Lemma 1 ( Both estimators are unbi-ased ). Under either sampling scheme, E[ ˆG(θ)] = G∗(θ).Proof. For random sampling, each draw bj is uniform on B,so E[gbj (θ)] = 1
+
+> N
+
+P 
+
+> b
+
+gb(θ) = G∗(θ), and averaging over j
+
+preserves this. For clustered sampling, each draw bk,j is uni-form on Ck, so E[gbk,j (θ)] = μk, where μk = 1
+
+> nk
+
+P 
+
+> i∈Ck
+
+gi(θ)
+
+is the cluster mean. Substituting into (24), 
+
+E[ ˆGclust (θ)] = 
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N μk = 1
+
+N
+
+> K
+
+X
+
+> k=1
+
+X
+
+> i∈Ck
+
+gi(θ) = G∗(θ),
+
+(25) where the last equality uses the fact that the clusters together contain every BS exactly once. 
+
+4) Variance Decomposition of the Gradient Population: 
+
+Since the gradients are vectors, we quantify the fluctuation of an estimator by its total variance, 
+
+Var[ ˆG(θ)] def 
+
+= E
+
+h ˆG(θ) − E[ ˆG(θ)] 2i
+
+, (26) i.e. the expected squared distance of the estimate from its mean, equal to the trace of its covariance matrix. Define the within-cluster variance of cluster Ck and the population variance of the whole network as 
+
+σ2 
+
+> k
+
+= 1
+
+nk
+
+X
+
+> i∈Ck
+
+gi(θ) − μk
+
+> 2
+
+, (27) 
+
+σ2 = 1
+
+N
+
+X
+
+> b∈B
+
+gb(θ) − G∗(θ) 2. (28) 
+
+Lemma 2 ( Exact ANOVA decomposition ). For any partition of B into clusters C1, . . . , C K ,
+
+σ2 = σ2 
+
+> W
+
++ σ2 
+
+> B
+
+, (29) 
+
+where 
+
+σ2 
+
+> W
+
+=
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N σ2
+
+> k
+
+, σ2 
+
+> B
+
+=
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N μk − G∗(θ) 2. (30) Here σ2 
+
+> W
+
+is the size-weighted average of the variances within the clusters and σ2 
+
+> B
+
+is the size-weighted variance of the cluster means around the population mean. 
+
+Proof. For i ∈ Ck, write gi(θ) − G∗(θ) =  gi(θ) − μk
+
+ + μk − G∗(θ) and expand the squared norm: 
+
+gi(θ) − G∗(θ) 2 = gi(θ) − μk 
+
+> 2
+
++ μk − G∗(θ) 2
+
++ 2 gi(θ) − μk, μ k − G∗(θ) . (31) Summing over i ∈ Ck, the inner-product term vanishes. To see why, note that μk − G∗(θ) is the same vector for every i
+
+in the cluster, so it can be factored out of the sum: 
+
+X
+
+> i∈Ck
+
+2 gi(θ) − μk, μ k − G∗(θ)
+
+= 2 
+
+D X 
+
+> i∈Ck
+
+ gi(θ) − μk
+
+, μ k − G∗(θ)
+
+E
+
+.
+
+(32) 10 
+
+By the definition of μk, the sum of deviations from the cluster mean is exactly zero. Since μk = 1
+
+> nk
+
+P 
+
+> i∈Ck
+
+gi(θ), we have 
+
+P 
+
+> i∈Ck
+
+gi(θ) = nkμk, and therefore P
+
+> i∈Ck
+
+ gi(θ) − μk
+
+ =
+
+nkμk − nkμk = 0 , since deviations above and below the mean always cancel. The inner product with the zero vector is zero, so the entire cross term vanishes. What remains after summing over i ∈ Ck is 
+
+X
+
+> i∈Ck
+
+gi(θ) − G∗(θ) 2 = X
+
+> i∈Ck
+
+gi(θ) − μk
+
+> 2
+
++ X
+
+> i∈Ck
+
+μk − G∗(θ) 2. (33) For the first sum, recall from (27) that σ2 
+
+> k
+
+=
+
+> 1
+> nk
+
+P 
+
+> i∈Ck
+
+∥gi(θ) − μk∥2, so P 
+
+> i∈Ck
+
+∥gi(θ) − μk∥2 = nkσ2
+
+> k
+
+.For the second sum, ∥μk − G∗(θ)∥2 does not depend on i, so summing the same quantity nk times gives nk∥μk − G∗(θ)∥2.Therefore 
+
+X
+
+> i∈Ck
+
+gi(θ) − G∗(θ) 2 = nkσ2 
+
+> k
+
++ nk μk − G∗(θ) 2. (34) Summing over all K clusters and dividing by N gives (29)– (30). 
+
+5) Theorem 1 (Variance of Random Sampling) : The random-sampling estimator (22) satisfies 
+
+Var 
+
+h ˆGrand (θ)
+
+i
+
+= σ2
+
+m . (35) 
+
+Proof. The draws b1, . . . , b m are independent and identically distributed, uniform on B. A single draw has mean G∗(θ)
+
+and total variance E∥gbj (θ) − G∗(θ)∥2 = σ2 by (27). For independent vector-valued random variables, the total variance of the sum equals the sum of the total variances, and scaling by 1/m scales the variance by 1/m 2. Hence 
+
+Var 
+
+h ˆGrand (θ)
+
+i
+
+= 1
+
+m2
+
+> m
+
+X
+
+> j=1
+
+σ2 = σ2
+
+m . (36) 
+
+6) Theorem 2 (Variance of Gradient-Clustered Sampling) :The clustered-sampling estimator (24) with proportional allo-cation (23) satisfies 
+
+Var 
+
+h ˆGclust (θ)
+
+i
+
+= σ2
+
+> W
+
+m . (37) 
+
+Proof. All draws are independent, within and across clusters. The draws from cluster Ck are uniform on Ck, so each has total variance σ2
+
+> k
+
+, and their average over mk draws has variance σ2
+
+> k
+
+/m k. By independence across clusters, the variance of (24) is the weighted sum 
+
+Var 
+
+h ˆGclust (θ)
+
+i
+
+=
+
+> K
+
+X
+
+> k=1
+
+ nk
+
+N
+
+2 σ2
+
+> k
+
+mk
+
+. (38) Substituting the proportional allocation mk = m n k/N 
+
+from (23), 
+
+Var 
+
+h ˆGclust (θ)
+
+i
+
+=
+
+> K
+
+X
+
+> k=1
+
+ nk
+
+N
+
+2 σ2 
+
+> k
+
+Nm n k
+
+= 1
+
+m
+
+> K
+
+X
+
+> k=1
+
+nk
+
+N σ2 
+
+> k
+
+= σ2
+
+> W
+
+m ,
+
+(39) using the definition of σ2 
+
+> W
+
+in (30). 
+
+7) Theorem 3 (Exact and Universal Variance Reduction) :For any cluster sizes n1, . . . , n K and any budget m,
+
+Var 
+
+h ˆGrand (θ)
+
+i
+
+− Var 
+
+h ˆGclust (θ)
+
+i
+
+= σ2
+
+> B
+
+m ≥ 0, (40) 
+
+with strict inequality if and only if at least one cluster mean 
+
+μk differs from G∗(θ).Proof. Subtracting (37) from (35) and applying the ANOVA identity of Lemma 2, 
+
+σ2
+
+m − σ2
+
+> W
+
+m = σ2 − σ2
+
+> W
+
+m = σ2
+
+> B
+
+m . (41) Since σ2 
+
+> B
+
+is a size-weighted sum of the non-negative terms 
+
+∥μk − G∗(θ)∥2, it is non-negative, and it equals zero if and only if every cluster mean coincides with the population mean. Theorem 3 is exact: it involves no approximation, no finite-population correction, and no assumption on the cluster sizes. It also makes precise the role of the clustering criterion. The reduction σ2 
+
+> B
+
+/m is large exactly when the cluster means are far apart, and grouping BSs by gradient similarity is the mechanism that drives the cluster means apart: BSs whose gradients point in similar directions are absorbed into the same cluster, making each cluster internally homogeneous (small 
+
+σ2
+
+> k
+
+, hence small σ2 
+
+> W
+
+) and the clusters mutually distinct (large 
+
+σ2 
+
+> B
+
+). By Lemma 2 these two effects are two sides of the same identity, since σ2 
+
+> W
+
++ σ2 
+
+> B
+
+= σ2 is fixed by the gradient population: every unit of variance the clustering removes from within the clusters is transferred to the between-cluster term, and by Theorem 3 that transferred variance is precisely what the estimator no longer pays for. 
+
+8) Corollary 1 (Batch-to-Batch Stability) : The variance comparison of Theorem 3 admits a direct interpretation in terms of how much the sampled BS batch changes the meta-update from one meta-iteration to the next. Let ˆG(1) (θ) and 
+
+ˆG(2) (θ) denote the meta-gradient estimates produced by two independent samplings at the same iterate θ. For any unbi-ased estimator, the expected squared difference between two independent realizations equals twice the variance, 
+
+E
+
+h ˆG(1) (θ) − ˆG(2) (θ) 2i
+
+= 2 Var 
+
+h ˆG(θ)
+
+i
+
+, (42) which follows by expanding the square and using the indepen-dence of the two samplings. Substituting Theorems 1 and 2, 
+
+E
+
+h ˆG(1) clust − ˆG(2) clust 
+
+> 2
+
+i
+
+= 2σ2
+
+> W
+
+m , (43) 
+
+E
+
+h ˆG(1) rand − ˆG(2) rand 
+
+> 2
+
+i
+
+= 2σ2
+
+m . (44) Under clustered sampling, successive BS batches therefore produce meta-updates that differ only by the within-cluster term 2σ2 
+
+> W
+
+/m : because every cluster is represented in the same proportion at every meta-iteration, the composition of the batch is essentially fixed, and consecutive updates point in nearly the same direction. Under random sampling, the cluster composition of the batch itself fluctuates, and successive up-dates additionally differ by the between-cluster term 2σ2 
+
+> B
+
+/m ,causing the update direction to swing between meta-iterations. This stability is achieved without sacrificing randomness: by 11 
+
+Lemma 1, the clustered estimator remains unbiased, and within each cluster the draw is uniformly random, so every BS in the network continues to be sampled over the course of training. Clustered sampling thus retains the exploration benefits of stochastic BS selection while removing the batch-composition fluctuation, and this reduction in the variability of the update direction is formally characterized in Proposition 1 below. 
+
+9) Proposition 1 ( ϵ-FOSP Complexity Under Clustered BS Sampling) : Let Assumptions A1–A5 hold, let α ∈ (0 , 1/(6 L)] ,and let the meta-stepsize be chosen by the rule of [8, Lemma 4.9]. Then the guarantee of [8, Theorem 4.12] for MAML applies unchanged to gradient-clustered proportional BS sampling of budget m, with the BS-selection variance term 
+
+σ2/m replaced by σ2 
+
+> W
+
+/m : for any ϵ ∈ (0 , 1) , an ϵ-FOSP θϵ
+
+satisfying 
+
+E∥∇ F (θϵ)∥ ≤ O
+
+r σ2
+
+> W
+
+m + ν
+
+!
+
++ ϵ, (45) 
+
+is found after at most O( ¯∆L/ϵ 2) meta-iterations, where ν
+
+collects the remaining per-BS rollout-noise 1 and inner-loop-bias terms of [8, Theorem 4.12]. Under uniform random BS sampling, the same substitution recovers the original guaran-tee, with σ2 = σ2 
+
+> W
+
++ σ2 
+
+> B
+
+in place of σ2 
+
+> W
+
+; since σ2 
+
+> W
+
+< σ 2
+
+whenever σ2 
+
+> B
+
+> 0 (Theorem 3), the accuracy attainable under clustered sampling at any fixed budget m is strictly better than under uniform random sampling. Justification. This is an application of [8, Theorem 4.12] rather than an independent result: the cited argument depends on the BS-selection rule only through the second moment of the batch-averaged per-BS meta-gradient about ∇F (θk),which for any unbiased sampler with independent draws decomposes into a BS-selection variance and the sampler-independent contribution ν. The gradient-clustered propor-tional sampler satisfies the three properties this argument requires: unbiasedness (Lemma 1), independence of the draws across and within clusters (by construction), and a BS-selection variance of σ2 
+
+> W
+
+/m (Theorem 2); identically dis-tributed draws are not required, as the argument does not use this property. The remaining ingredients of the cited proof, namely the smoothness surrogate, the stochastic-stepsize mo-ment bounds, and the inner-loop bias control of [8, Lem-mas 4.8–4.10], involve only quantities local to the individually sampled BSs and are therefore independent of the selection rule. Substituting σ2 
+
+> W
+
+/m for σ2/m yields the claim. 
+
+10) Discussion: Proposition 1 shows that gradient-clustered BS sampling preserves the best-known iteration complexity 
+
+O( ¯∆L/ϵ 2) of MAML for nonconvex objectives [8] while strictly reducing the floor to which the expected gradient norm 
+
+E[∥∇ F (θϵ)∥] can be driven at any fixed sampling budget m.The magnitude of this gain is governed by the between-cluster variance σ2 
+
+> B
+
+. Three limiting cases confirm the result is sharp: (i) If all BSs produce identical gradients, then σ2 
+
+> B
+
+= 0 , 
+
+> 1Rollout noise arises because each sampled BS estimates its local meta-gradient from a finite number of environment interactions rather than from the true expected gradient; since this noise depends only on the rollout length at the individually sampled BS and not on how the batch was assembled, ν
+> is independent of the BS-selection rule and cancels out of any comparison between the two samplers.
+
+both samplers coincide, and the advantage vanishes, as it must when there is no diversity to stratify over. (ii) If the clustering is uninformative, so that every cluster mean happens to equal the population mean, then again σ2 
+
+> B
+
+= 0 and nothing is gained, which shows the benefit is attributable to the quality of the clustering rather than to stratification per se. (iii) In the regime relevant to multi-BS edge caching, where BSs differ substantially in request rate λb and popularity distribution 
+
+db(t), the local losses Lb and hence the local gradients differ markedly across traffic regimes; gradient-similarity clustering separates these regimes into distinct clusters with distinct means, making σ2 
+
+> B
+
+large. Two practical remarks complete the picture. First, the guarantee at iteration t is stated with respect to the cluster assignment in effect at that iteration; between re-clustering events the assignment may become stale as θ evolves, which can shrink the realized σ2 
+
+> B
+
+(θt) but can never make clustered sampling worse than random, since Theorems 1–3 hold for any partition, and the re-clustering interval ∆c thus trades clustering overhead against staleness. Second, by Corollary 1, the improvement manifests during training as BS batches whose composition is essentially fixed across meta-iterations, so consecutive meta-updates point in nearly the same direction while every BS continues to be sampled over time, yielding the more stable meta-training that Proposition 1 quantifies. The connection between the variance reduction and con-vergence is made explicit through Proposition 1: reducing the estimator variance from σ2/m to σ2 
+
+> W
+
+/m directly lowers the irreducible floor O(pσ2/m + ν) to O(pσ2 
+
+> W
+
+/m + ν), which is the lowest value of E[∥∇ F (θ)∥] that any number of meta-iterations can achieve at budget m. Both samplers reach this floor at the same iteration rate O( ¯∆L/ϵ 2), but the floor itself is strictly lower under clustered sampling whenever σ2 
+
+> B
+
+> 0. The variance analysis of Theorems 1–3 therefore does not merely characterize the estimator: it directly determines how close to a stationary point of the meta-loss the training process can converge. To see explicitly how convergence is improved, note that the bound in (45) has two parts: the term ϵ, which can be made arbitrarily small by running more meta-iterations (at a cost of O( ¯∆L/ϵ 2) iterations), and the irreducible floor 
+
+O(pσ2 
+
+> W
+
+/m + ν), which cannot be reduced by running longer regardless of how many iterations are used. This floor is the fundamental limit imposed by the finite sampling budget m
+
+and the finite rollout length. Under uniform random sampling the identical argument applies with σ2 in place of σ2 
+
+> W
+
+, giving a strictly higher floor O(pσ2/m + ν). Since σ2 
+
+> W
+
+< σ 2 when-ever σ2 
+
+> B
+
+> 0 (Theorem 3), gradient-clustered sampling attains a lower irreducible floor at the same budget m and the same number of iterations. In other words, both methods converge at the same rate O( ¯∆L/ϵ 2), but they converge to different lim-iting values of the expected gradient norm: clustered sampling converges to a point closer to a stationary point of the meta-loss than random sampling can reach at the same cost. The gap between the two floors, O(pσ2/m + ν) − O(pσ2 
+
+> W
+
+/m + ν),grows with σ2 
+
+> B
+
+, i.e., with the degree of heterogeneity among the BSs, so the convergence advantage is largest precisely in the heterogeneous multi-BS deployments that motivate this 12 
+
+work. VI. E XPERIMENTAL SETUP AND RESULTS 
+
+This section outlines the experimental setup used to eval-uate the proposed gradient-based clustered meta-RL caching framework, followed by the baseline methods and the eval-uation criteria. The multi-BS environment and all learning agents were implemented in Python 3 using the TensorFlow framework [36]. 
+
+A. Configuration and Parameters 
+
+We simulate a network of N = 62 BSs, of which 60 
+
+are used for meta-training and 2 are held out as unseen test environments. Heterogeneity is induced along the two axes discussed in Section III: each BS b is assigned its own Zipf popularity skewness ζb ∈ [0 .1, 3.0] and its own mean request inter-arrival time 1/λ b ∈ [0 .05 , 2.0] s, with arrivals following an independent Poisson process of rate λb [32]. Each BS serves F = 50 content types, and its cache have a capacity of M = 10 ,000 storage units. Content lifetimes, sizes, and importance values are drawn from {1, 10 , 15 , 20 , 25 , 30 },
+
+{100 , 200 , 700 , 1000 }, and {0.3, 0.5, 0.7, 0.9}, respectivelys. The utility function E(·) of (2) grows linearly with importance and decays exponentially with age, following [31]. The local PPO updates of (9)–(11) use discount factor γ =0.99 , and minibatch size 64 .For the meta-learning loop of Section V-B, each sampled BS performs one inner-loop update of (13) with α = 10 −3
+
+on a support rollout of 200 transitions, and its local meta-gradient is evaluated on a disjoint query rollout of 100 
+
+transitions. The meta-parameters are updated with Adam at outer-loop rate η = 10 −4. Following Section V-C, the BSs are partitioned into K = 6 clusters by applying k-means to the normalized local gradients ˜gb(θ), so that BSs are grouped by the cosine similarity of their gradients, and the partition is refreshed every ∆c = 10 meta-iterations from the most recently observed gradients; before any gradient is available, the BSs are partitioned uniformly at random. The sampling budget is m = 10 BS evaluations per meta-iteration. 
+
+B. Baselines 
+
+To separate the contribution of gradient-clustered BS sam-pling from that of meta-learning itself, we compare against the following baselines. All methods share the same environment, the per-BS SMDP formulation of Section IV, the network architecture, and the hyperparameters of Table II; they differ only in how, and whether, knowledge is shared across BSs.  
+
+> •
+
+MAML with Random Sampling (MAML-RS): a meta-RL caching baseline adapted from the cooperative meta-RL scheme of [26]. Whereas the original method operates in a multi-agent setting with cooperation among nodes, we implement it here without the multi-agent component, consistent with our system model in which BSs are inde-pendent, so that the meta-training BS batch is selected by uniform random sampling. Comparing against it isolates the benefit of replacing random BS selection with the proposed gradient-clustered proportional sampler.                                
+
+> TABLE II PARAMETER SETTINGS
+> Notation Value
+> N62 (2 held out)
+> F50
+> M10,000
+> ζb[0 .1,3.0] 1/λ b[0 .05 ,2.0]
+> lf{1,10 ,15 ,20 ,25 ,30 }
+> zf{100 ,200 ,700 ,1000 }
+> if{0.3,0.5,0.7,0.9}
+> γ0.99 Batch size 64
+> α10 −3
+> Inner-loop steps 1
+> η10 −4
+> Support / query rollout 200 / 100 transitions
+> K6
+> ∆c10
+> •
+
+Learning from Scratch (LfS): the policy at the target BS is trained with randomly initialized actor and critic networks and no prior knowledge [7].  
+
+> •
+
+Transfer Learning (TL): a baseline adapted from our previous work [34]. Rather than transferring demonstra-tion data from the source environment as in [34], here we transfer only the actor and critic networks trained to convergence at a single source BS to initialize the networks at the target BS, which are then fine-tuned on the target’s local traffic. This isolates the impact of the neural network initialization alone on performance in the new environment.  
+
+> •
+
+Meta-learning with Gradient-Clustered Sampling (MGCS): our proposed approach, in which the shared meta-policy is trained with the MAML outer loop while the BS batch at each meta-iteration is selected by the gradient-clustered proportional sampler of Section V-C, rather than uniformly at random. 
+
+C. Evaluation Criteria 
+
+The performance of the proposed approach is assessed using the following criteria.  
+
+> •
+
+Meta-training convergence: the outer-loop meta-loss of (14), averaged over the sampled BS batch, as a function of meta-iterations. A method that attains a lower meta-loss at the same iteration count, or reaches a given level in fewer iterations, converges faster.  
+
+> •
+
+Empirical meta-gradient variance: the sample variance of the meta-gradient estimator across meta-iterations at a fixed iterate, reported for the clustered and the uniform random sampler at equal budget m. This validates the predicted variance gap empirically σ2 
+
+> B
+
+/m of Theorem 3 and the batch-to-batch stability of Corollary 1.  
+
+> •
+
+Adaptation on held-out BSs: two BSs are held out from meta-training and reserved for evaluating adapta-tion to unseen environments. The post-adaptation loss 13  
+
+> Fig. 2. Meta-training loss of gradient-clustered sampling versus uniform random sampling. Curves show the moving average of the outer-loop meta-loss over a window of ten meta-iterations; shaded regions denote one standard deviation within the window. Gradient-clustered sampling converges faster, reaches a lower meta-loss, and exhibits markedly smaller iteration-to-iteration fluctuation.
+
+and average reward attained at the held-out BSs, whose traffic configurations are never used during meta-training, reported as a function of the number of local adaptation steps. This measures the quality of the learned initializa-tion, which is the operational goal of the meta-learning framework of Section V-B.  
+
+> •
+
+Average reward: for each training trial, the average of all instantaneous rewards (6) accumulated up to that point, consistent with the long-run objective (7). The goal of the reinforcement learning agent is to maximize the average of the instantaneous rewards over the long run, so an approach that converges to a higher average reward yields a better caching policy. Since a higher reward corresponds to a higher cache hit rate, an algorithm achieving a higher long-term average reward demonstrates superior caching performance.  
+
+> •
+
+Convergence of the average reward: the stability of the average-reward curve over training. In reinforcement learning, convergence is essential: a curve that keeps oscillating or trends downward indicates that the agent has failed to settle on a stable policy, whereas a curve that flattens and remains steady indicates that a consistent policy has been learned. An approach whose average reward converges to a stable value is therefore preferable to one whose reward continues to fluctuate or decline. 
+
+D. Results 1) Meta-Training Convergence: Fig. 2 compares the meta-training loss of the proposed gradient-clustered sampler against uniform random sampling over the course of meta-training. Both methods use an identical environment, network architecture, sampling budget m, and set of hyperparameters, and differ only in how the BS batch is selected at each meta-iteration; each curve shows the moving average of the outer-loop meta-loss (14) over a window of ten iterations, and the shaded region denotes the standard deviation of the meta-loss within that window. Two effects predicted by the convergence analysis of Sec-tion V-D are visible. First, gradient-clustered sampling con-verges faster and to a lower meta-loss: it drops below a meta-loss of 1800 within the first 20 meta-iterations, whereas random sampling requires substantially longer and stabilizes at a markedly higher level, with final values of 1447 ± 122 
+
+and 1961 ± 300 , respectively, a reduction of roughly 26% in the converged meta-loss. Second, the meta-loss of the clustered sampler fluctuates far less from iteration to iteration: its shaded band is consistently narrower than that of random sampling across the entire training run. This reduced fluctuation is the empirical signature of the lower meta-gradient variance established in Theorem 3, whereby drawing a size-proportional number of BSs from every cluster removes the between-cluster component σ2 
+
+> B
+
+from the variance of the meta-gradient estimator; the update direction therefore varies less between consecutive iterations, in agreement with the batch-to-batch stability of Corollary 1. The two effects reinforce each other. Under random sam-pling, the BS batch composition swings from one meta-iteration to the next as different BSs enter and leave the batch, so the meta-gradient estimate is noisier and progress is slower and less monotone, as reflected in the large oscillations of the random-sampling curve. Under gradient-clustered sampling, the batch always spans the full range of traffic regimes in proportion to their prevalence, which yields a more accurate and more stable descent direction and, in turn, a faster and smoother convergence observed in Fig. 2. 
+
+2) Adaptation to an Unseen Base Station: We evaluate adaptation on two held-out BSs that were not seen during meta-training, chosen to span the difficulty range of the target task: one whose traffic makes the caching problem relatively easy, and one whose traffic makes it considerably harder. In both cases, the meta-learning methods deploy their learned 14 
+
+initialization and fine-tune on the held-out BS’s local traffic, TL is initialized from a source BS and fine-tuned, and LfS is trained from a random initialization. 
+
+a) Easy BS: Fig. 3 reports the average reward of the four methods when adapting to a held-out BS whose traffic configuration, a Zipf skewness of ζb = 1 and a request rate of 
+
+λb = 5 , was not seen during meta-training. This configuration makes the caching problem relatively easy: the high Zipf skewness concentrates demand on a small set of files, so the most popular files are requested far more often than the rest, and the shorter time between consecutive requests means cached files remain valid longer before they expire. The agent therefore faces little ambiguity about which files to cache and when, and a good caching policy is straightforward to learn. Three observations follow. First, MGCS and MAML-RS are essentially indistinguishable throughout adaptation, both converging to the highest reward of roughly 64 at a similar rate. This is the intended outcome: gradient-clustered sampling changes only which BSs are drawn during meta-training and leaves the meta-objective unchanged, so it is expected to reduce meta-gradient variance without altering the quality of the learned initialization. Second, LfS performs close to both meta-learning methods, adapting at a similar rate and reaching a comparable final reward. Because adaptation here involves a single stationary BS, the task is relatively easy, so a from-scratch agent can learn a reasonable policy from a random initialization without the benefit of meta-training, which is why its curve stays close to those of MGCS and MAML-RS. Third, TL settles at a substantially lower reward than the other methods, plateauing near 40 while the others exceed 60 ,and its reward curve declines over the course of adaptation rather than rising toward a stable value. A falling reward curve is a clear signature of negative transfer: instead of building on the transferred initialization, the target agent is driven away from a good policy, so that fine-tuning degrades performance rather than improving it. This illustrates that the effectiveness of transfer learning depends strongly on the similarity between the source and target environments. Here the source BS has ζ = 0 .22 and λ = 3 .22 , whereas the target has ζ = 1 and λ = 5 ; the large gap between the two traffic regimes causes the transferred initialization to steer the target agent toward a policy suited to the source rather than the target, so the transferred knowledge actively harms adaptation. Negative transfer is the principal failure mode of transfer learning and is difficult to predict in advance, since it requires knowing the target environment before committing to a source. Meta-learning avoids this pitfall by construction: rather than transferring from one fixed source, it learns an initialization optimized for adaptation across the whole population of traffic regimes, so its performance does not depend on any single source-target pairing. Table III reports the number of cache hits for 1000 requests for held-out BSs after adaptation. Consistent with the reward curves for easy task (Fig. 3), MGCS, MAML-RS, and LfS all perform comparably (607, 593, and 596 hits for the easy task). Because this task is easy, a from-scratch agent reaches essentially the same caching quality as the meta-learning meth-        
+
+> Fig. 3. Average reward during adaptation to a held-out BS with ζb= 1
+> and λb= 5 . MGCS and MAML-RS overlap and reach the highest reward, confirming that gradient-clustered sampling preserves adaptability; both meta-learning methods adapt faster than LfS; and TL converges to a lower reward due to negative transfer from a dissimilar source ( ζ= 0 .22 ,λ= 3 .22 ).
+
+ods, and MGCS and MAML-RS remain indistinguishable. TL again trails the other methods (550 hits), consistent with the negative transfer observed in its reward curve. 
+
+b) Difficult BS: Fig. 4 reports adaptation to a held-out BS with ζb = 0.22 and λb = 1.13 , whose traffic makes the caching problem substantially harder. The small Zipf skewness means the popularities of the files are much closer to one another, so there is no small set of clearly popular files to prioritize and the agent has only a weak signal to decide what to cache. In addition, the longer time between consecutive requests means cached files are more likely to expire before they are requested again, so the agent must also decide carefully when to cache each file. Together, these two factors make the caching decision considerably more difficult than on the easy target. Here the value of a meta-trained initialization becomes clear. MGCS and MAML-RS again overlap and adapt fastest, reaching the highest reward of roughly 39 , confirming once more that gradient-clustered sampling preserves adaptability regardless of task difficulty. LfS, however, now lags markedly behind: from a random initialization it improves only slowly and plateaus around 30 ,well below the meta-learning methods, because on this harder task a from-scratch agent cannot quickly discover a good policy from local interaction alone. The gap between the meta-learning methods and LfS, which was negligible on the easy target, is now substantial and persists throughout adaptation, showing that the benefit of a meta-trained initialization grows with task difficulty. TL again fails to converge, its reward declining over the course of adaptation and ending lowest of all methods near 15 , a further instance of negative transfer. In Table III, MGCS and MAML-RS achieve the highest and essentially identical performance (366 and 367 hits) for the difficult task, confirming that gradient-clustered sampling matches the caching quality of uniform random sampling. Both meta-learning methods outperform LfS (333 hits), and all three 15 
+
+TABLE III CACHE HITS AFTER ADAPTATION AT THE EASY AND DIFFICULT HELD -OUT BS S
+
+Method Easy BS ( ζb = 1 , λb = 5 ) Difficult BS ( ζb = 0 .22 , λb = 1 .13 )
+
+TL 550 294 LfS 596 333 MAML-RS 593 367 MGCS 607 366 
+
+Fig. 4. Average reward during adaptation to a difficult held-out BS with 
+
+ζb = 0 .22 and λb = 4 .54 . MGCS and MAML-RS overlap and adapt fastest; LfS lags markedly because the low-skewness traffic makes the task hard to learn from scratch; and TL declines under negative transfer. 
+
+substantially exceed TL (294 hits), which is degraded by the negative transfer discussed above. The near-identical performance of MGCS and MAML-RS in Figs. 3 and 4 confirms that gradient-clustered sampling remains unbiased, as does uniform random sampling, and therefore produces a meta-trained initialization of comparable quality. At the same time, MGCS achieves this performance with substantially fewer training steps, demonstrating the training-efficiency benefit of gradient-clustered sampling. VII. C ONCLUSION 
+
+This paper addressed the high-variance meta-gradient esti-mation that slows meta-training when a shared caching policy is learned across many independent, heterogeneous BSs. We proposed a meta-reinforcement learning framework in which each BS runs a local PPO agent while a shared meta-policy is trained with a MAML-style outer loop whose BS batch is se-lected by gradient-based clustering, drawing from each cluster in proportion to its size. Through an ANOVA-style decompo-sition of the gradient variance, we proved that this sampler yields a strictly lower-variance meta-gradient estimator than uniform random sampling under BS heterogeneity, with the gap given in closed form by the between-cluster variance, and showed that the known MAML convergence guarantee still holds with the total variance replaced by its smaller within-cluster part. Extensive simulations confirmed the predicted variance reduction, showed faster and more stable meta-training than random sampling, and demonstrated that the resulting meta-policy adapts to unseen BSs as effectively as the strongest baselines while avoiding the negative transfer that degrades transfer learning. Several directions are left for future investigation. First, this work fixes the number of clusters and the re-clustering interval as treated hyperparameters; a principled method for selecting them adaptively based on the observed gradient dispersion could be studied in future work. Second, the variance-reduction principle underlying gradient-clustered sampling has only been applied here to edge caching; whether it yields similar benefits in other heterogeneous wire-less network optimization tasks, such as resource allocation or handover management, could be further explored. REFERENCES [1] M. K. Somesula, D. V. L. N. Somayajulu et al. , “Cooperative caching algorithm for mobile edge networks based on multi-agent meta rein-forcement learning,” Computer Networks , vol. 242, p. 110237, 2024. [2] W. Feng et al. , “Federated deep reinforcement learning for multimodal content caching in edge-cloud networks,” IEEE Transactions on Network Science and Engineering , vol. 12, no. 3, pp. 2188–2201, 2025. [3] Z. Qian, G. Li et al. , “Federated deep reinforcement learning-based cost-efficient proactive video caching in energy-constrained mobile edge networks,” Computer Networks , vol. 258, p. 111040, 2025. [4] X. Zhou, M. Bilal, R. Dou, J. J. Rodrigues, Q. Zhao, J. Dai, and X. Xu, “Edge computation offloading with content caching in 6g-enabled iov,” 
+
+IEEE Transactions on Intelligent Transportation Systems , vol. 25, no. 3, pp. 2733–2747, 2023. [5] C. Zhong, M. C. Gursoy, and S. Velipasalar, “Deep reinforcement learning-based edge caching in wireless networks,” IEEE Transactions on Cognitive Communications and Networking , vol. 6, no. 1, pp. 48–61, 2020. [6] C. Finn, P. Abbeel, and S. Levine, “Model-agnostic meta-learning for fast adaptation of deep networks,” in Proceedings of the 34th International Conference on Machine Learning (ICML) , 2017. [7] J. Schulman, F. Wolski, P. Dhariwal, A. Radford, and O. Klimov, “Prox-imal policy optimization algorithms,” arXiv preprint arXiv:1707.06347 ,2017. [8] A. Fallah, A. Mokhtari, and A. Ozdaglar, “On the convergence theory of gradient-based model-agnostic meta-learning algorithms,” in Interna-tional conference on artificial intelligence and statistics . PMLR, 2020, pp. 1082–1092. [9] H. Zhu, Y. Cao, X. Wei, W. Wang, T. Jiang, and S. Jin, “Caching transient data for Internet of Things: A deep reinforcement learning approach,” IEEE Internet Things J. , vol. 6, no. 2, pp. 2074–2083, Apr. 2019. [10] H. Wu, A. Nasehzadeh, and P. Wang, “A deep reinforcement learning-based caching strategy for IoT networks with transient data,” IEEE Trans. Veh. Technol. , vol. 71, no. 12, pp. 13 310–13 319, Dec. 2022. [11] Y. Zhang, N. Chen, S. Yu, and L. Hu, “Transient data caching based on maximum entropy actor–critic in Internet-of-Things networks,” Int. J. Comput. Intell. Syst. , vol. 17, no. 1, p. 20, 2024. [12] H. Kim, T.-J. Sun, and E.-N. Huh, “T-CacheNet: Transformer-based deep reinforcement learning for next-generation Internet content caching,” in 
+
+Proc. 13th Int. Conf. Netw., Commun. Comput. (ICNCC) , Dec. 2024, pp. 9–16. 16 
+
+[13] ——, “Miss-triggered content cache replacement under partial observ-ability: Transformer-decoder q-learning,” Mathematics , vol. 13, no. 19, p. 3217, 2025. [14] Z. Teng, J. Fang, H. Yang, L. Yu, H. Chen, and W. Xiang, “Atten-tion mechanism-aided deep reinforcement learning for dynamic edge caching,” IEEE Internet Things J. , vol. 11, no. 6, pp. 10 197–10 213, Mar. 2024. [15] X. Wang, C. Wang, X. Li, V. C. M. Leung, and T. Taleb, “Federated deep reinforcement learning for Internet of Things with decentralized cooperative edge caching,” IEEE Internet Things J. , vol. 7, no. 10, pp. 9441–9455, Oct. 2020. [16] X. Wang, R. Li, C. Wang, X. Li, T. Taleb, and V. C. M. Leung, “Attention-weighted federated deep reinforcement learning for device-to-device assisted heterogeneous collaborative edge caching,” IEEE J. Sel. Areas Commun. , vol. 39, no. 1, pp. 154–169, Jan. 2021. [17] C. Sun, X. Li, J. Wen, X. Wang, Z. Han, and V. C. M. Leung, “Federated deep reinforcement learning for recommendation-enabled edge caching in mobile edge-cloud computing networks,” IEEE J. Sel. Areas Commun. , vol. 41, no. 3, pp. 690–705, Mar. 2023. [18] H. Zhou, H. Wang, Z. Yu, G. Bin, M. Xiao, and J. Wu, “Federated distributed deep reinforcement learning for recommendation-enabled edge caching,” IEEE Trans. Services Comput. , vol. 17, no. 6, pp. 3640– 3656, 2024. [19] M. Zhang, Y. Jiang, F.-C. Zheng, D. Wang, M. Bennis, A. Jamalipour, and X. You, “Communication-efficient federated deep reinforcement learning based cooperative edge caching in fog radio access networks,” 
+
+IEEE Trans. Wireless Commun. , vol. 23, no. 12, pp. 18 409–18 422, Dec. 2024. [20] Q. Wu, W. Wang, P. Fan, Q. Fan, H. Zhu, and K. B. Letaief, “Coop-erative edge caching based on elastic federated and multi-agent deep reinforcement learning in next-generation networks,” IEEE Trans. Netw. Service Manag. , vol. 21, no. 4, pp. 4179–4196, Aug. 2024. [21] Z. Li, T. Li, H. Liu, and T.-T. Chan, “Personalized federated deep rein-forcement learning for heterogeneous edge content caching networks,” in 
+
+Proc. IEEE Int. Conf. Mobility, Sens. Netw. (MSN) , 2024, also available as arXiv:2412.12543. [22] H. Sakr and M. Elsabrouty, “Meta-reinforcement learning for edge caching in vehicular networks,” J. Ambient Intell. Humaniz. Comput. ,vol. 14, no. 4, pp. 4607–4619, Apr. 2023. [23] B. Ye, Z. Wei, Z. Lyu, Y. Zhao, L. Feng, and Z. Wei, “Fast adap-tive caching algorithm for mobile edge networks based on meta-reinforcement learning,” in Collaborative Computing: Networking, Ap-plications and Worksharing (CollaborateCom 2024) , vol. 624. Springer, 2026. [24] Y. Mao, B. He, S. Zhou, C. Ma, and Z. Wang, “Collaborative edge caching: A meta reinforcement learning approach with edge sampling,” in Proc. IEEE Int. Conf. Multimedia Expo (ICME) , 2023, pp. 972–977. [25] M. Al-Shedivat, T. Bansal, Y. Burda, I. Sutskever, I. Mordatch, and P. Abbeel, “Continuous adaptation via meta-learning in nonstationary and competitive environments,” in Proc. Int. Conf. Learn. Represent. (ICLR) , 2018. [26] Z. Wei, Y. Zhao, Z. Lyu, X. Yuan, Y. Zhang, and L. Feng, “Cooperative caching algorithm for mobile edge networks based on multi-agent meta reinforcement learning,” Comput. Netw. , vol. 242, p. 110247, 2024. [27] X. Wei, J. Liu, Y. Wang, C. Tang, and Y. Hu, “Wireless edge caching based on content similarity in dynamic environments,” Journal of Systems Architecture , vol. 115, p. 102000, May 2021. [28] S. Li, J. Xu, M. Van Der Schaar, and W. Li, “Popularity-driven content caching,” in Proceedings of the 35th Annual IEEE International Conference on Computer Communications (INFOCOM) , 2016, pp. 1–9. [29] A. Nasehzadeh and P. Wang, “A deep reinforcement learning-based caching strategy for internet of things,” in Proceedings of the IEEE/CIC International Conference on Communications in China (ICCC) , 2020, pp. 969–974. [30] S. Vural, N. Wang, P. Navaratnam, and R. Tafazolli, “Caching transient data in internet content routers,” IEEE/ACM Transactions on Network-ing , vol. 25, no. 2, pp. 1048–1061, Apr. 2017. [31] F. Niknia, P. Wang, Z. Wang, A. Agarwal, and A. S. Rezaei, “Attention-enhanced prioritized proximal policy optimization for adaptive edge caching,” IEEE Transactions on Vehicular Technology , 2025, early access, Apr. 2, 2025. [32] H. Gomaa, G. G. Messier, C. Williamson, and R. Davies, “Estimating instantaneous cache hit ratio using Markov chain analysis,” IEEE/ACM Transactions on Networking , vol. 21, no. 5, pp. 1472–1483, Oct. 2013. [33] M. L. Puterman, Markov Decision Processes: Discrete Stochastic Dy-namic Programming . Hoboken, NJ, USA: Wiley, 2014. [34] F. Niknia and P. Wang, “Edge caching optimization with PPO and transfer learning for dynamic environments,” IEEE Internet Things J. ,vol. 12, no. 16, pp. 33 605–33 620, Aug. 2025. [35] H. Wu and P. Wang, “Node selection toward faster convergence for federated learning on non-IID data,” IEEE Transactions on Network Science and Engineering , vol. 9, no. 5, pp. 3099–3111, 2022. [36] M. Abadi, P. Barham, J. Chen, Z. Chen, A. Davis, J. Dean, M. Devin, S. Ghemawat, G. Irving, M. Isard et al. , “ {TensorFlow }: a system for {Large-Scale } machine learning,” in 12th USENIX symposium on operating systems design and implementation (OSDI 16) , 2016, pp. 265– 283.

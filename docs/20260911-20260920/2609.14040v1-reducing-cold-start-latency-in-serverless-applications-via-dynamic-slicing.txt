@@ -1,0 +1,929 @@
+Title: Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing
+
+URL Source: https://arxiv.org/pdf/2609.14040v1
+
+Published Time: Tue, 15 Sep 2026 01:00:16 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+## Georgios Alexopoulos 1 Konstantinos Karakatsanis 1 Nikolaos Alexopoulos 2
+
+## Dimitris Mitropoulos 1 Thodoris Sotiropoulos 
+
+> 1
+
+University of Athens, and National Infrastructures for Research and Technology 
+
+> 2
+
+Athens University of Economics and Business, and National Cybersecurity Authority of Greece {grgalex, konkara, dimitro}@ba.uoa.gr alexopoulos@aueb.gr theosotir@windowslive.com 
+
+## Abstract 
+
+We present PyXtrim, a system that reduces the cold-start latency of serverless applications through debloating. We focus on Python, a dominant language for serverless appli-cations whose dynamic features and extensive use of native extensions make traditional static debloating particularly challenging. PyXtrim frames debloating as a dynamic slicing 
+
+problem, using the application’s externally visible behavior as the slicing criterion. Everything outside the resulting slice is removed, both from the application and its dependencies. Our key technical contribution is that the slice is computed by a cross-language dynamic dependence engine that tracks data and control dependences across Python and native code and identifies operations that interact with the operating sys-tem, which form the slicing criterion. As a result, PyXtrim can effectively handle real-world applications that rely on dynamic features such as reflection, interoperate with native code and interact with system resources. Across 31 applica-tions on AWS Lambda, PyXtrim reduces cold-start latency by 21.7% and peak memory usage by 17.1% at the median. This is more than double the reduction achieved by the state of the art, while debloating each application in minutes. 
+
+## 1 Introduction 
+
+Serverless computing lets developers run event-driven func-tions through entry points called handlers , without provision-ing or managing the underlying servers, with usage-based billing. This approach has become a mainstream deploy-ment model, with platforms such as AWS Lambda, Azure Functions, and Google Cloud Functions widely used in pro-duction [19]. 
+
+Cold-start latency: This deployment model introduces a well-known challenge: cold-start latency . When no initialized execution environment is available, the cloud provider must provision a new environment, fetch the deployment pack-age, and initialize the runtime, before invoking the handler. Providers may keep an initialized environment for a limited period afterwards, so that a later request reuses it and in-vokes the handler directly (a warm start ). Figure 1 shows the cold-start lifecycle of a real-world Python handler. Its initialization phase loads a lightgbm model, executing the top-level statements of the handler’s module and of every module its imports transitively load for the first time.           
+
+> package download runtime init handler init handler execution platform-level application-level
+> import lightgbm as lgb
+> import scipy
+> import numpy MODEL = lgb.Booster(model_file=...)
+> def handler(...):
+> 65.6% 40.7% 29.8% 0% 0% initialization time contributes to the output does not
+
+Figure 1. Lifecycle of a serverless function on a cold start. A warm invocation starts at handler execution . The handler init phase is expanded to show the module-level statements executed before the handler is invoked. Cold-start latency is among the primary concerns for cloud developers and operators [18]. First, a cold start delays the response observed by the user, increasing latency by up to 80% over a warm invocation [37]. Since most serverless ap-plications have latency requirements [23], this delay matters even when cold starts affect only a fraction of a handler’s requests: they worsen tail latency, which is often used to define service-level objectives [28, 51]. Second, initialization can also increase execution costs. When initialization time is billed, developers pay for both the initialization phase (Figure 1) and the handler’s execution [6, 7]. Initialization ac-counts for 53.8% of the billed duration for the median Python handler in [37]. 
+
+Contributing factors: Several factors contribute to cold-start latency. Platform-level factors include the time the provider spends provisioning execution environments, scheduling them, and allocating resources. Application-level 
+
+factors are those developers can influence, namely the de-ployment package and the work done during handler ini-tialization. Both can contain unnecessary components. Ap-plications often depend on large dependency trees, and more than 95% of the library functions they ship are never used [20]. However, unused code is only part of the problem. arXiv:2609.14040v1 [cs.DC] 12 Sep 2026 Alexopoulos et al. 
+
+Prior work identifies code that does execute during initial-ization and never influences the handler’s behavior, such as third-party setup that runs as a side effect of importing a library [37, 51]. In Figure 1, this waste accounts for 30% to 66% of the initialization each import triggers. Providers accordingly advise developers to trim dependencies and ini-tialization work [9, 25]. 
+
+Limitations: Existing application-level approaches have several limitations. 𝜆 -trim [37] debloats an application by delta debugging [61] over the top-level statements of one module at a time, so it cannot remove code whose deletion requires coordinated changes across modules. FaaSLight [38] stubs the bodies of statically unreachable functions and loads them on demand, to avoid compiling code that never runs. This is a wrong assumption, since deployed applications ship with pre-compiled bytecode. Worse, a stub called during initialization must compile its body from source, making cold starts slower rather than faster. SlimStart [51] defers expensive imports until their first use, which delays their side effects and can change observable behavior [13]. 
+
+Approach: We instead view debloating as a dynamic pro-gram slicing [1, 33, 56] problem, where the slicing criterion is the set of operations within a handler that produce externally visible effects. We realize this in PyXtrim, which computes the slice by observing the handler’s execution on a given set of workloads. A shadow interpreter runs alongside CPython, recording the data and control dependences of every exe-cuted instruction. Because native extensions are invisible to it, a C-API interceptor patches the dispatch tables of loaded extensions, recording every Python object that native code reads or writes. The same interception identifies the oper-ations that reach the outside world and form the criterion. PyXtrim then deletes every statement on which no such operation depends, directly or transitively, leaving an appli-cation that behaves identically on the observed workloads but loads and executes far less code. 
+
+Results: On 31 serverless applications deployed on AWS Lambda, PyXtrim reduces cold-start latency by 21.7% and peak memory by 17.1% at the median, and never makes either worse. This is more than twice the reduction of 𝜆 -trim, which achieves 8.5% and 5.4% reductions on the same applications. PyXtrim is also twelve times faster at debloating (5 minutes versus 62 at the median), because 𝜆 -trim re-executes the ap-plication for every candidate removal while PyXtrim needs a single profiling run. An ablation confirms that both parts of the analysis are needed. Replacing our criterion with a proxy that keeps whatever is read halves the reduction, and dis-abling the C-API interceptor breaks 19 of the 31 applications because of uncaptured dependences. 
+
+Contributions: We make the following contributions: 
+
+• Conceptually, we formulate cold-start minimization as a dynamic slicing problem, with a criterion that captures a handler’s externally visible behavior instead of approx-imating it by static reachability or output equivalence. (Section 3). 
+
+• Technically, we present PyXtrim, a realization of the ap-proach for Python. It records dependences over CPython bytecode and recovers those created inside native exten-sions, so it handles real-world handlers that use dynamic features and interoperate with compiled code. (Section 4). 
+
+• Empirically, we evaluate PyXtrim on 31 applications, run-ning 𝜆 -trim, FaaSLight, and SlimStart on the same suite. Against the original handlers, PyXtrim reduces cold-start latency by 21.7% and peak memory by 17.1% at the median, more than twice 𝜆 -trim’s reduction (Section 5). 
+
+## 2 Background and Motivation 
+
+We state the problem of cold-start minimization, and list its challenges. We then discuss the limitations of prior work. 
+
+Problem statement: Our goal is to reduce cold-start la-tency by focusing on the application-level factors: identifying and removing statements in the handler’s initialization code and its dependency tree that either (1) never execute, or (2) execute but never influence the handler’s observable behav-ior. We call this process debloating . We focus on removing import statements and function definitions, because initial-ization code consists almost entirely of these. Imports are the most impactful target, since each one triggers the execution of another module’s top-level code, so removing a single redundant import can eliminate hundreds or thousands of executed statements. Overall, debloating brings two benefits: (1) the deployment package becomes smaller, reducing down-load time, and (2) less code executes during initialization, reducing handler initialization time. 
+
+Running Example: Figure 2 shows the running example we use throughout the paper to explain our approach (let us ignore the graph for now). It is a Python handler whose top-level code imports a couple of dependencies, not all of which are needed for its observable behavior. The module 
+
+legacy is imported at m3 and its function legacy.parse is referenced and bound to the variable parser at m7 , but it is never actually called. Consequently, statement l3 is never executed, and while statements m3 , m7 , and l1 do execute, they have no impact on the handler’s output. 
+
+Challenges: Automatically identifying and removing such redundant statements (i.e., import legacy ) involves sev-eral challenges. 
+
+C1 Dependent statements. Removing a statement is not a local decision. Every statement that transitively depends on a removed one must be removed too. In Figure 2a, deleting the import at m3 requires deleting m7 .
+
+C2 Side effects and ordering. A statement can be needed without producing any value the handler consumes. The Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing                                    
+
+> # main.py
+> import plugins # m1
+> import registry # m2
+> import legacy # m3
+> def handler(name): # m4 fn = registry.HOOKS["title"] # m5 n = fn(name) # m6 parser = legacy.parse # m7
+> return n# m8 handler("ada") # i1
+> (a)
+> # registry.py HOOKS = {} # r1 # plugins.py
+> import registry # p1
+> def title(s): # p2
+> return s.title() # p3 registry.HOOKS["title"] = title # p4 # legacy.py
+> import xmlkit # l1
+> def parse(doc): # l2
+> return xmlkit.parse(doc) # l3
+> (b) m1 p1 p2 r1 p4 m4 m2 m5 m6 p3 m8 m7 m3 l1 l2 xmlkit i1 (c)
+
+Figure 2. (a) and (b) show a Python handler and its dependencies. The highlighted line i1 is the platform invoking the handler on a workload. (c) shows the resulting dynamic dependence graph discussed in Section 3: solid edges denote data dependences, and dashed edges denote control dependences. The orange node is the sink, red nodes correspond to unneeded steps. module plugins is imported at m1 (Figure 2a) and never ref-erenced again in main.py . However, its top-level code reg-isters title in registry.HOOKS at p4 (Figure 2b), which the handler reads at m5 . Removing the import would break the handler, although no statement uses the name plugins .Ordering matters too. Deferring the import elsewhere can make the write at p4 occur after the read at m5 , so the handler fails with KeyError .
+
+C3 Native extensions. Python handlers routinely depend on other packages (e.g., numpy , torch ) containing code written in C or Rust [4]. These native extensions can read and write Python objects and import other Python modules, without any of these operations appearing in the Python code. A debloater must consider both sides of the language boundary, or it misses these dependences and removes needed code. 
+
+C4 Handler’s observable behaviors. Before deciding what to remove, we must know what the handler is expected to produce. The handler’s return value is one part, but a handler may also write to storage, call a remote service or log. Unlike the return value, operations that influence the handler’s observable behavior have no syntactic marker and are scattered through the application and its dependencies. 
+
+Existing work and limitations: Existing work leaves these challenges unaddressed. 𝜆 -trim [37] has no notion of dependences ( C1 ). Removing m3 leaves m7 untouched, the handler crashes with a NameError , and 𝜆 -trim reverts the removal, keeping the unneeded import of legacy . Slim-Start [51] defers an import together with the side effects of the module it loads ( C2 ). Making the import of plugins 
+
+lazy means p4 never registers title , and the handler fails with a KeyError at m5 . Such side effects are common, since widely used Python packages rely on them heavily [13] and they are hard to detect. FaaSLight [38] avoids a compilation cost that deployed applications never pay, so it brings no benefit and makes cold starts worse (Section 5). 
+
+## 3 Debloating as a Dynamic Slicing Problem 
+
+Motivated by these challenges and the limitations of existing work, we now formulate our debloating approach. Server-less applications are written predominantly in dynamic lan-guages [18, 28], where reflection makes a static approach un-able to prove either that code is unreachable or that reachable code is unneeded. Therefore, we take a dynamic approach, observing the handler’s execution. Our insight is that de-bloating can be cast as dynamic slicing [1, 27], a program analysis technique that computes the statements directly or transitively affecting a given criterion .
+
+Dynamic dependence graph: Our formulation relies on the notion of a dynamic dependence graph (DDG) [1], which captures the dependences (defined below) among a program’s statement instances. A statement instance, step 
+
+for short, is one execution occurrence of a statement: the statement is syntax, written once, while a step is one of the times it actually ran. For example, a statement in a loop body contributes one step per iteration. Formally, a DDG is defined as DDG = (𝑉 , 𝐸 ). The nodes 𝑉 
+
+are the steps of the execution, and the edges 𝐸 ⊆ 𝑉 × 𝑉 × 𝐿 
+
+are labeled with a dependence kind taken from 𝐿 = {d, c}.We write 𝑠 𝑙 
+
+→ 𝑠 ′ for an edge (𝑠, 𝑠 ′, 𝑙 ) ∈ 𝐸 , and the two labels capture the following relationships between steps. 
+
+Data dependences. A step 𝑠 is data-dependent on step 𝑠 ′
+
+(denoted as 𝑠 d
+
+→ 𝑠 ′), if 𝑠 reads a cell (e.g., a variable, a memory location) and 𝑠 ′ is the most recent step preceding 𝑠 in the execution that writes to that cell. 
+
+Control dependences. A step 𝑠 is control-dependent on step 
+
+𝑠 ′ (denoted as 𝑠 c
+
+→ 𝑠 ′), if 𝑠 ′ decides whether 𝑠 executes. This Alexopoulos et al. 
+
+arises in two cases: 𝑠 ′ is the test of the nearest enclosing branch or loop that lets 𝑠 execute, or 𝑠 belongs to the body of a function and 𝑠 ′ is the call step that invoked it. 
+
+Example: Figure 2c shows the DDG for our running exam-ple. Step m8 is control-dependent on i1 , the call the platform issues, while m6 is data-dependent on it, since the argument 
+
+name it reads is bound by that call. Our definition treats an import as a call, since it triggers the execution of a mod-ule’s top-level statements. The graph contains only steps that actually occurred, which is why l3 is absent. 
+
+Slicing formulation: A DDG turns the question of which statements are needed into a reachability query over its steps. The query needs a criterion , a set of steps that must be present in the debloated program no matter what. This translates to the steps whose effects are visible outside the handler, since removing one of those would change what the caller of the handler observes. We call these steps sinks and assume for now that they are given (Section 4.3). Given a set of sinks 
+
+𝑇 , the backward slice (bslice (𝑇 )) is the set of steps the sinks depend on, directly or transitively. This corresponds to the minimal set that must be kept. However, not every statement contributes equally to cold-start latency, which is dominated by the initialization of unneeded dependency code [6, 13, 37, 38, 44, 51]. That cost is paid by import statements and by the module top-level code they execute, most of which consists of function definitions. We therefore restrict removal to these two kinds of state-ments. We call their steps sources 𝑆 and compute the forward slice fslice (𝑆 ), i.e., the steps that depend on a source, directly or transitively. Since anything we remove lies in fslice (𝑆 ),we trace forward from 𝑆 and build the subgraph it induces. 
+
+Debloating: The two slices yield the following formulation. 
+
+Definition 3.1 (Debloating) . Given a program 𝑃 , a set of workloads 𝑊 , a set of sources 𝑆 , and a set of sinks 𝑇 , the 
+
+unneeded statements 𝑅 ⊆ 𝑃 are the largest set such that, for every 𝜎 ∈ 𝑅 :(1) steps (𝜎 ) ⊆ fslice (𝑆 ) \ bslice (𝑇 ); and (2) stmt (𝑠 ′) ∈ 𝑅 for every edge 𝑠 ′ 𝑙 
+
+→ 𝑠 with 𝑠 ∈ steps (𝜎 ),where steps (𝜎 ) denotes the steps of statement 𝜎 across these executions and stmt (𝑠 ) the statement of step 𝑠 .The debloated program is then given by 𝑃 ′ = 𝑃 \ 𝑅 , and the unneeded steps 𝑈 are the steps of the statements in 𝑅 .Condition (1) makes a statement a candidate when it orig-inates at a source and contributes nothing to a sink, and condition (2) removes a candidate only if every statement depending on it is unneeded too. Through these conditions, the debloated program is an executable subprogram that reproduces 𝑃 ’s computations on each workload in 𝑊 [33]. Statements that never execute have no steps and no depen-dents, so they are removed too. In Figure 2c, 𝑈 is the set of red nodes, so import legacy is removed. Online Offline Dynamic Analysis Engine Shadow Interpreter Sink Detector C-API Interceptor Rewriter CPython (Executes P)    
+
+> stream of executed bytecode native extensions (.so )Sources S
+> Program PWorkloads W
+> P’
+> (debloated program) Sinks Tpartial DDG
+> Fallback Mechanism Trimmer
+
+Figure 3. High-level architecture of PyXtrim. 
+
+Guarantees and assumptions: Our debloating formula-tion addresses challenges C1 and C2 (Section 2) by construc-tion. No surviving statement can depend on a removed one (C1 ), since a statement’s dependents lie in the same forward slice, and condition (2) requires them to be removed together with it. Side effects ( C2 ) need no special treatment, as a heap update is a write to a cell, so its later uses appear as data dependences. Ordering is also preserved because deletion does not reorder the statements in the debloated program. For example, in Figure 2c, the sink ( m8 ) needs the hook that 
+
+plugins.py stored in registry.HOOKS at import time ( p4 ), captured by the path m5 d
+
+→ p4 c
+
+→ m1 , so the import at m1 is kept, even though main.py never calls plugins directly. Challenges C3 and C4 concern realizing the model on an actual runtime, which Section 4 addresses. 
+
+## 4 System Design 
+
+Overview: PyXtrim realizes the debloating process of Sec-tion 3, and is shown in Figure 3. It takes a Python serverless application 𝑃 , together with its dependencies, and a set of workloads 𝑊 , and proceeds in two phases. In the online 
+
+phase, PyXtrim runs 𝑃 on each workload in 𝑊 under the stock CPython interpreter, while a dynamic analysis engine 
+
+monitors the execution at the level of bytecode. The engine has three components. A shadow interpreter (Section 4.1) pro-cesses every executed instruction and computes the partial DDG induced by fslice (𝑆 ) of the given sources 𝑆 . A sink de-tector (Section 4.3) identifies the sinks on the fly, since, unlike the sources, they are not known syntactically ( C4 ). A C-API interceptor (Section 4.2) records the heap accesses that native code performs ( C3 ), which the shadow interpreter turns into data and control dependences. In the offline phase, a rewriter deletes the unneeded state-ments from the application and its dependencies. Its trimmer 
+
+(Section 4.4) traverses the recorded DDG backwards from Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing                             
+
+> 1RESUME
+> 2p1: LOAD_CONST 0
+> 3LOAD_CONST None
+> 4IMPORT_NAME registry
+> 5STORE_NAME registry
+> 6p2: LOAD_CONST <code title>
+> 7MAKE_FUNCTION
+> 8STORE_NAME title
+> 9p4: LOAD_NAME title
+> 10 LOAD_NAME registry
+> 11 LOAD_ATTR HOOKS
+> 12 LOAD_CONST 'title '
+> 13 STORE_SUBSCR
+> 14 RETURN_CONST None
+
+(a) Bytecode of plugins .Heap    
+
+> <module registry> HOOKS
+> Shadow Frame Call Stack
+> α1plugins <module>
+> α3main <module>
+> Locals Operand Stack
+> registry title
+> “title”
+> α2
+> α3
+> α2
+> α3
+> α1
+> α2
+> dict { "title": α3}<function title>
+
+(b) CPython interpreter state. Shadow Frame Shadow Heap Control Context p1 p4 p2 m1 p2  
+
+> α2
+> α3
+> Store Operand Stack
+> registry title
+> r1 p2
+
+(c) Shadow state maintained by PyXtrim. main plugins registry  
+
+> p1 p2 p4 m1 r1
+
+(d) Partial DDG recorded so far. 
+
+Figure 4. Interpreter and shadow state while performing the import at m1 , which loads module plugins (Figure 2b). The state is captured at step p4 , right after STORE_SUBSCR updates registry.HOOKS . The greyed slots are the operands it popped. In (d), shaded nodes come from the imported module registry (r1 , Figure 2). the sinks to obtain bslice (𝑇 ) and applies Definition 3.1, while its fallback mechanism re-invokes the original application for inputs that reach removed code. The result is a debloated program 𝑃 ′, which is deployed to the cloud. 
+
+4.1 Shadow Interpreter 
+
+To build the partial DDG, the shadow interpreter propagates 
+
+labels over Python bytecode. We work at this level because a single statement may perform several independent reads and writes, and line-level tracing cannot tell which of them the result depends on. Bytecode makes each read and write a separate instruction, so each dependence is attributed to the operation that created it. Figure 4a shows the bytecode compiled from the plugins.py module of Figure 2b, which we use as an example throughout this section. 
+
+Labels: To build the partial DDG, the shadow interpreter must know which step produced a value whenever an in-struction consumes it. It records this by attaching to each value a label, which is the step that produced it. A step is a source location [45] together with an occurrence number, since one location may execute many times. 
+
+State: The shadow interpreter mirrors CPython’s state. Wherever the real interpreter holds a value, the shadow holds that value’s label. A shadow frame , one per real frame (a function invocation or a module’s top-level execution), contains (1) a shadow store mapping each local name to the label of its current value, and (2) a shadow operand stack holding one label per real operand stack slot. A shadow heap 
+
+mimics CPython’s heap, mapping addresses of objects that outlive a frame (e.g., object attributes) to the label of the step that last wrote them. A control context records why the current instruction is executing. It is a sequence of steps in which each step caused the next to be reached, including the calls and imports that entered the frames on the call stack, interleaved with the predicates of the branches in effect. Fig-ure 4c shows the shadow interpreter’s state just after the 
+
+STORE_SUBSCR at line 13 (Figure 4a), which performs the update of the registry.HOOKS dictionary ( p4 , Figure 2b). According to the shadow store, the local variable registry 
+
+carries the label p1 , recording that its value was produced by the import statement at p1 (Figure 2b). 
+
+Sources: Labels are not created everywhere. Since our goal is to find the statements that depend on imports and func-tion definitions (Section 2), only two opcodes introduce them. Every form of Python import (e.g., import m as n ) com-piles to an IMPORT_NAME (line 4, Figure 4a), and every func-tion definition and lambda to a MAKE_FUNCTION (line 7, Fig-ure 4a). Executing either labels the value it produces with the executing step. We call these instructions sources. No other instruction introduces a label, so a value carries one only if it descends from an import or a function definition. 
+
+Recording dependences: The shadow interpreter aug-ments CPython’s operational semantics with rules that oper-ate on labels. Whenever an instruction at step 𝑠 reads a label 
+
+ℓ from the shadow operand stack, the shadow store, or the shadow heap, it records a data dependence from 𝑠 to ℓ.Regarding control dependences, the shadow interpreter records them lazily, acting only at stores that are escaping ,Alexopoulos et al. 
+
+meaning they write to a cell that outlives the current frame. Examples include (1) a store to a name in a module’s names-pace, such as registry at p1 (line 5, Figure 4a), because a module’s namespace stays reachable via sys.modules ,or (2) a store to an attribute of a heap object, such as 
+
+registry.HOOKS at p4 (line 13, Figure 4a). To record why an escaping store executed, the interpreter reads the control context, which holds the steps that led to 𝑠 .An escaping store at 𝑠 is control-dependent on the innermost step of the control context, that step on the one enclosing it, and so on outward. Writing the control context as ⟨ℓ1, . . . , ℓ 𝑘 ⟩
+
+from outermost to innermost, the engine adds the edges 
+
+𝑠 c
+
+→ ℓ𝑘 and ℓ𝑖 +1
+
+> c
+
+→ ℓ𝑖 for every 𝑖 < 𝑘 , a set of edges denoted as chain (𝑠 ). Because the control context spans the whole call stack, chain (𝑠 ) makes 𝑠 reach the import or call that triggered the escaping store. Appendix A gives representative rules. 
+
+Complete example: Figure 4 traces the top level of 
+
+plugins up to the STORE_SUBSCR at line 13. The sources at lines 4 and 7 create the labels p1 and p2 , which the following 
+
+STORE_NAME instructions bind to registry and title in the shadow store. Both stores are module-level, so their cells escape. Since there is no enclosing branch, each receives a single control edge to m1 (Figure 2), which corresponds to the statement that entered the module. Step p4 then updates registry.HOOKS . The LOAD_ATTR 
+
+at line 11 reads registry , records a data edge to its la-bel p1 , and pushes r1 , the label the shadow heap holds for 
+
+registry.HOOKS . The STORE_SUBSCR at line 13 consumes 
+
+r1 and p2 (⊥ for the constant key, which carries no label), records a data edge to each, and relabels that cell to p4 . The cell belongs to a heap object, so this store escapes too, and 
+
+p4 receives a control edge to m1 as well. 
+
+4.2 C-API Interceptor The problem: Our shadow interpreter (Section 4.1) ob-serves only Python bytecode, yet serverless applications routinely employ native extensions ( C3 , Section 2) whose code is opaque to it. Native code is entered in two ways: (1) a native call , a CALL instruction whose callee has no byte-code of its own, and (2) a native import , an IMPORT_NAME 
+
+that resolves to a compiled module ( .so ) rather than a .py 
+
+file. For the latter, CPython loads the shared library with 
+
+dlopen and runs its initialization function PyInit_<name> ,which does what a Python module does with its top-level statements. In both cases, a natural first attempt is to over-approximate: record a data dependence from the entry point to every labeled argument it receives. This is not sufficient, because an extension can reach back into the Python heap by importing modules on its own and accessing objects within them. Those accesses are invisible to the shadow interpreter, so the dependences they create are missed, leading to the removal of statements that are needed (Section 4.4). shadow interpreter         
+
+> p4: STORE_SUBSCR p5: IMPORT_NAME cplug
+> C-API interceptor
+> w_dlopen w_GetAttr w_SetItem 1libpython.so
+> delegate
+> 3patch GOT
+> 6
+> getAccesses() :
+> (R, α1), (W, α2)
+> GOT [n] [m]
+> 5
+> cplug.so
+> 123456
+> PyMODINIT_FUNC PyInit_cplug(void) { reg = PyImport_ImportModule("registry"); hooks = PyObject_GetAttr(reg,"HOOKS"); PyDict_SetItem(hooks,"png",fn); return PyModule_Create(&cplug_def); }
+> 2
+> loads
+> 4
+> runs
+
+Figure 5. High-level overview of our C-API interceptor when importing a native extension called cplug.so . The example assumes that cplug is imported after line p4 of Figure 2b. 
+
+Interception: What an extension can touch is not arbitrary: every attribute it reads, every module it imports, every ob-ject it accesses must go through CPython’s C API [40] (e.g., 
+
+PyObject_GetAttr , PyImport_Import ), and those calls are dispatched through the extension’s global offset table 
+
+(GOT). Our interceptor exploits this by rewriting the GOT, as Figure 5 shows for an extension cplug.so imported by the module plugins . A GOT exists only once its extension is loaded, so our engine wraps dlopen at startup ( 1 ). The import at p5 therefore enters our w_dlopen , which loads the library ( 2 ) and patches its GOT ( 3 ), replacing the entries of the API functions that access Python objects with our own wrappers. When CPython then runs PyInit_cplug ( 4 ), its API calls resolve to those wrappers ( 5 ), each of which records the access and delegates to the original function. The shadow interpreter obtains the recorded accesses through 
+
+getAccesses() ( 6 ): here the set {( 𝑅, 𝛼 1), (𝑊 , 𝛼 2)} contains the addresses of (1) the module registry the extension read and (2) the dictionary registry.HOOKS it wrote. 
+
+Modeling native code: The shadow interpreter treats both entry points uniformly, as a single opaque step 𝑠 that depends on everything it read and produces everything it wrote. Let 
+
+𝑅 and 𝑊 be the addresses read and written during the native execution. For every address in 𝑅 ∪ 𝑊 whose shadow heap cell holds a label, the interpreter adds a data dependence from 
+
+𝑠 to it. For every address in 𝑊 , it writes 𝑠 into the cell. Finally, it adds the edges in chain (𝑠 ), exactly as for an escaping store (Section 4.1). In Figure 5, only 𝛼 2 holds a label, namely p4 , so 
+
+p5 gains a data dependence on p4 , the cell at 𝛼 2 is relabeled to p5 , and chain (p5 ) adds a control dependence to m1 .Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Builtin functions: CPython’s built-in functions and the methods of built-in types (e.g., len , list.append ) are com-piled into the interpreter and do not call through the C API, so the interceptor has nothing to patch. For these, the shadow interpreter applies transfer rules derived from the Python documentation. For example, list.append(lst, x) rela-bels the cell of lst and adds chain (𝑠 ) if the write escapes. Appendix B lists representative rules. 
+
+4.3 Sink Detector 
+
+The trimmer (Section 4.4) also needs the sinks, that is, the steps whose effects are observable outside the handler. Ef-fects escape in two ways. First, through the handler’s re-turn value or an uncaught exception, which the runtime reports to the caller. Such sinks are known statically: the 
+
+RETURN_VALUE and RETURN_CONST instructions of the han-dler’s body, and the instructions that propagate an uncaught exception. Second, through interaction with the outside world ,such as a call to a remote service or a write to storage. Such sinks are not known statically, but our key insight is that aPython program can only reach the outside world by leaving Python : every file operation, socket operation, and write to stdout is ultimately performed by libc .That boundary is the one the C-API interceptor (Sec-tion 4.2) already patches, so we extend it, wrapping the libc 
+
+functions for the file system ( open , write ) and for sockets (socket , send , connect ) in the GOT of libpython.so as well as in that of every loaded extension. Its output then reports whether a native call produced an external effect, and the shadow interpreter marks that step as a sink. 
+
+4.4 Trimmer and Fallback Mechanism 
+
+After the online phase (Figure 3), PyXtrim proceeds to trim-ming. This phase runs offline on the resulting partial DDG. PyXtrim parses each Python source file into an abstract syn-tax tree (AST) and deletes the unneeded statements of Defini-tion 3.1. It computes the unneeded statements 𝑅 as a greatest fixpoint. Starting from the statements whose steps all lie in fslice (𝑆 ) \ bslice (𝑇 ), it iteratively drops every statement violating condition (2) (Definition 3.1) until it converges. Deletion is sound for everything the DDG carries, but two cases in Python’s semantics fall outside Definition 3.1. 
+
+Constructs with compilation-time effects: Some Python constructs influence how their enclosing function is com-piled, regardless of whether execution reaches them. The fragments below illustrate this with global .          
+
+> def foo (): #s1
+> global avar #s2 avar =1#s3
+
+−→             
+
+> s1: RESUME
+> s3: LOAD_CONST 1
+> STORE_GLOBAL avar
+> def foo (): #s1 avar =1#s2
+
+−→     
+
+> s1: RESUME
+> s2: LOAD_CONST 1
+> STORE_FAST avar
+
+The declaration global avar has no runtime represen-tation, so it contributes no step to the DDG. A trimmer rely-ing solely on Definition 3.1 would delete it. Such a deletion silently changes the semantics, as the assignment that fol-lows is compiled to STORE_FAST rather than STORE_GLOBAL .This leads to a write to a local slot in foo ’s frame instead of the module namespace. To tackle these cases, PyXtrim treats statements involving constructs that influence compila-tion (e.g., global , nonlocal , from __future__ import ,
+
+yield , or await ) as needed, regardless of Definition 3.1. 
+
+Value-dependent constructs: A star import ( from mod import * ) is unusual in that its semantics depend on a run-time value: the interpreter reads mod.__all__ and looks up every name it lists, binding each in the importing module. If the trimmer removes a definition from mod whose name is still included in mod.__all__ , the lookup fails and the star import raises AttributeError . Instead of reasoning about the contents of __all__, our trimmer rewrites a star import into a regular import as follows.         
+
+> 1from .umath import * # 97 new bindings
+> 2from .umath import NAN, PINF, sin # 3 new bindings
+
+It lists exactly the names on which a surviving step of the importing module has a data dependence. With no star im-port left to consult them, each __all__ variable becomes an ordinary list, kept or deleted like any other value. 
+
+Fallback mechanism: Our debloating process relies on ob-servations from executing the serverless application on the given workloads 𝑊 . However, once deployed to the cloud, the debloated application may receive inputs other than those in 𝑊 , and reach code that PyXtrim removed. To pre-vent such failures, PyXtrim adopts a fallback mechanism similar to that of 𝜆 -trim [37]. It wraps the serverless function in an exception handler and, on failures attributed to the removed code, falls back to the original application. 
+
+4.5 Implementation Details and Discussion 
+
+PyXtrim is implemented as a command-line tool using 15k lines of Python code and 2k lines of C code. The shadow in-terpreter is pure Python, built on the sys.monitoring [41] framework, which hooks every executed bytecode instruc-tion. The C-API interceptor (Section 4.2) is a native extension in C, and the trimmer uses Python’s ast module. We defer the reader to Appendix C for further details on PyXtrim, as well as additional optimizations. 
+
+Soundness of debloating: For every workload in 𝑊 on which the application is deterministic, 𝑃 ′ returns the same value and performs the same external effects as 𝑃 . The guar-antee relies on Definition 3.1, which ensures that no step of a surviving statement depends on a removed one [33]. The invariant holds as long as the recorded DDG over-approximates the true dependences. The shadow interpreter (Section 4.1) sees every executed instruction and CPython’s complete state, so it captures every dependence carried by Alexopoulos et al. 
+
+bytecode. The C-API interceptor (Section 4.2) records every access a native extension makes to a Python object, which the shadow interpreter turns into a dependence. CPython also exposes macros, such as PyList_GET_ITEM , that read an object directly and leave no call to intercept. These ac-cesses are covered too, since a macro operates on a pointer the extension already holds, and a pointer can be acquired only as an argument or through an intercepted function (e.g., 
+
+PyImport_Import , PyObject_GetAttr ). We record the de-pendence when the pointer is acquired, on the whole object rather than the element read. Furthermore, every external effect leaves the Python world through an intercepted libc 
+
+call (Section 4.3) and becomes a sink. Where the analysis is imprecise, it retains code rather than removing it. 
+
+Limitations: As a dynamic tool, PyXtrim reasons only about the executions it observed. Inputs beyond 𝑊 , or non-deterministic behavior, can reach code that was removed. Our fallback (Section 4.4) converts such cases into a re-deployment of the original application. This protects cor-rectness rather than latency, since 𝜆 -trim measures such a fallback at 50 ms of setup plus a second cold start [37]. The inputs that trigger it in production can be added to 𝑊 
+
+for a re-debloating, and users can also pair PyXtrim with deployment strategies such as canary releases [11]. PyXtrim debloats only the Python code of a handler and its dependencies. Debloating native extensions would require combining it with existing binary debloating tools [5, 42]. 
+
+Generalizability and extensibility: PyXtrim currently supports Python 3.12+. Because our rules dispatch on byte-code instructions, porting to a new version requires updating them, not the design itself. The underlying concepts (Sec-tion 3) are not specific to Python and could be applied to languages such as JavaScript, although the engine would have to be re-implemented for each execution environment. We target Python because it is the dominant serverless run-time and the source of most production cold starts [18, 28]. 
+
+## 5 Evaluation 
+
+We aim to answer the following questions. 
+
+RQ1 Does PyXtrim preserve the handler’s behavior, and how long does debloating take? (Section 5.2) 
+
+RQ2 How effective is PyXtrim at reducing cold-start latency in real-world handlers? (Section 5.3) 
+
+RQ3 How does PyXtrim affect warm invocations? (Sec-tion 5.4) 
+
+RQ4 How much do PyXtrim’s sink detector and C-API in-terceptor contribute to its results? (Section 5.5) 
+
+Table 1. Success rate and debloating time. A tool succeeds on an application when it produces a program that returns the answer of the unmodified one. The last column is PyXtrim’s median time on the applications the other tool handles.                          
+
+> Tool Successful Debloating time PyXtrim
+> median min max median
+> PyXtrim 31/31 7 min 13 s 2.2 h
+> 𝜆 -trim 28/31 62 min 1 s 13.8 h 5 min FaaSLight 10/31 78 s 47 s 13 min 28 s SlimStart 7/31 35 s 10 s 57 s 27 s
+
+5.1 Experimental Setup Baselines: For RQs 1–3, we compare PyXtrim against the three state-of-the-art tools discussed in Section 2. 𝜆 -trim [37] removes top-level statements by delta debug-ging [61], FaaSLight [38] loads statically unreachable func-tions on demand, and SlimStart [51] defers the imports of the libraries that cost the most to initialize. 
+
+Dataset: We evaluate on 31 serverless applications, the union of those used by the three tools above, plus applica-tions from SeBS [17] and FunctionBench [32]. We exclude duplicates, micro-benchmarks, and applications that need external infrastructure (e.g., databases). The set covers a wide range of library use, including machine learning inference, document and image processing. Unmodified, their cold start latency ranges from 164 ms to 6.3 s. The benchmarks also provide handler inputs. PyXtrim, 𝜆 -trim and SlimStart an-alyze each application on all of its available inputs, while FaaSLight is static and needs none for its analysis. More details about our benchmarks can be found in Appendix D. 
+
+Environment Setup: We run the debloating tools on a local machine, a 16-core Intel Xeon E5-2650 at 2.30 GHz with 40 GB of memory running Debian 13, and measure the time spent in analyzing each benchmark. We then deploy every debloated application on AWS Lambda (RQ2 and RQ3), as a container image with 3008 MB of memory and a timeout of 300 s in region us-east-1 , the same memory and region as 𝜆 -trim’s artifact. Since AWS Lambda scales CPU with memory and allocates one vCPU at 1 ,769 MB [8], every run is configured with the same 1.7 vCPUs. To show that the results are not tied to one platform, we repeat these experiments on the local machine, inside the official AWS Lambda Python 3.12 base image (Appendix E). 
+
+Metrics: For every application and tool we report the de-bloating time, the cold-start and warm-start latency, and the peak memory. Latency, peak memory, and the initialization portion of the cold start all come from AWS’s own report on each invocation. Every metric is the median over 500 invocations of an application and tool. We resample these observations 10 ,000 times to obtain 95% bootstrap confidence intervals and consider a change statistically significant when its interval excludes zero. AWS reports peak memory in Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Table 2. Cold start, initialization and peak memory on AWS Lambda. Each tool column gives the median (500 runs) and its change against the unmodified application. Share is the part of the unmodified cold start that initialization accounts for. Green cells indicate cases where a tool is better than both the unmodified application and the other tool with statistical significance. A † marks a change that is not statistically significant. Peak memory counts only above 2 MB. Rows are ordered by the unmodified cold start. 
+
+Cold start (ms) Initialization (ms) Peak memory (MB) Application original PyXtrim 𝜆 -trim original share PyXtrim 𝜆 -trim original PyXtrim 𝜆 -trim ocrmypdf 6,332 6,307 ( −0.4%) † 6,310 ( −0.3%) † 750 12% 744 ( −0.8%) † 745 ( −0.7%) † 190 169 ( −11 .1%) 185 ( −2.6%) huggingface 5,363 4,339 ( −19 .1%) 4,987 ( −7.0%) 4,902 91% 3,862 ( −21 .2%) 4,489 ( −8.4%) 869 780 ( −10 .2%) 851 ( −2.1%) resnet 5,149 4,249 ( −17 .5%) n/a 3,972 77% 3,048 ( −23 .3%) n/a 955 859 ( −10 .1%) n/a 
+
+tensorflow 4,072 3,207 ( −21 .2%) 3,519 ( −13 .6%) 4,066 100% 3,200 ( −21 .3%) 3,512 ( −13 .6%) 606 501 ( −17 .3%) 559 ( −7.8%) heart-failure 3,970 2,787 ( −29 .8%) n/a 3,060 77% 1,878 ( −38 .6%) n/a 398 265 ( −33 .4%) n/a 
+
+rnn-generate 3,065 2,555 ( −16 .7%) 2,399 ( −21 .7%) 3,034 99% 2,520 ( −17 .0%) 2,366 ( −22 .0%) 621 572 ( −7.9%) 576 ( −7.2%) ffmpeg 2,546 2,521 ( −1.0%) 2,515 ( −1.2%) 205 8% 176 ( −14 .1%) 173 ( −15 .8%) 291 288 ( −1.0%) 288 ( −1.0%) wine 2,298 1,519 ( −33 .9%) 2,049 ( −10 .8%) 2,271 99% 1,497 ( −34 .1%) 2,015 ( −11 .3%) 258 164 ( −36 .4%) 245 ( −5.0%) qiskit-nature 2,257 1,529 ( −32 .3%) 1,890 ( −16 .3%) 1,826 81% 1,280 ( −29 .9%) 1,391 ( −23 .8%) 288 195 ( −32 .3%) 258 ( −10 .4%) sensor-telemetry 1,992 1,258 ( −36 .8%) n/a 1,800 90% 1,086 ( −39 .7%) n/a 214 142 ( −33 .6%) n/a 
+
+spacy 1,874 1,461 ( −22 .0%) 1,574 ( −16 .0%) 1,862 99% 1,449 ( −22 .2%) 1,562 ( −16 .1%) 209 181 ( −13 .4%) 186 ( −11 .0%) scikit 1,774 1,327 ( −25 .2%) 1,731 ( −2.4%) 1,772 100% 1,324 ( −25 .2%) 1,729 ( −2.4%) 187 128 ( −31 .6%) 182 ( −2.7%) sentiment-gzip 1,656 1,144 ( −30 .9%) 1,663 ( +0.4%) † 1,651 100% 1,139 ( −31 .0%) 1,657 ( +0.4%) † 176 124 ( −29 .5%) 176 ( +0.0%) skimage 1,546 1,044 ( −32 .5%) 1,069 ( −30 .9%) 1,247 81% 793 ( −36 .4%) 771 ( −38 .2%) 185 137 ( −25 .9%) 143 ( −22 .7%) cve-bin-tool 1,423 1,114 ( −21 .7%) 1,140 ( −19 .9%) 1,107 78% 770 ( −30 .4%) 827 ( −25 .3%) 133 98 ( −26 .3%) 110 ( −17 .3%) chdb-olap 1,170 1,135 ( −3.0%) 1,128 ( −3.6%) 1,141 97% 1,104 ( −3.2%) 1,097 ( −3.8%) 304 300 ( −1.3%) 300 ( −1.3%) jsym 856 598 ( −30 .2%) 816 ( −4.7%) 606 71% 412 ( −31 .9%) 547 ( −9.7%) 100 58 ( −42 .0%) 96 ( −4.0%) pandas 747 571 ( −23 .5%) 672 ( −10 .0%) 703 94% 531 ( −24 .4%) 615 ( −12 .6%) 121 94 ( −22 .3%) 114 ( −5.8%) epub-pdf 742 542 ( −27 .0%) 699 ( −5.9%) 660 89% 471 ( −28 .6%) 618 ( −6.4%) 106 84 ( −20 .8%) 99 ( −6.6%) lxml 589 557 ( −5.4%) 552 ( −6.3%) 356 60% 327 ( −8.3%) 319 ( −10 .4%) 71 68 ( −4.2%) 66 ( −7.0%) 
+
+textblob 588 445 ( −24 .3%) 523 ( −11 .1%) 481 82% 355 ( −26 .1%) 432 ( −10 .3%) 88 71 ( −19 .3%) 82 ( −6.8%) image-resize 579 469 ( −19 .0%) 556 ( −3.9%) 502 87% 392 ( −21 .9%) 481 ( −4.2%) 96 84 ( −12 .5%) 93 ( −3.1%) lightgbm 558 419 ( −25 .0%) 396 ( −29 .0%) 526 94% 379 ( −27 .8%) 362 ( −31 .2%) 105 87 ( −17 .1%) 85 ( −19 .0%) 
+
+face-detection 536 494 ( −7.8%) 514 ( −4.1%) 387 72% 344 ( −11 .1%) 364 ( −6.0%) 97 91 ( −6.2%) 95 ( −2.1%) dna-visualization 370 261 ( −29 .5%) 279 ( −24 .8%) 352 95% 239 ( −32 .1%) 260 ( −26 .1%) 68 53 ( −22 .1%) 57 ( −16 .2%) shapely-numpy 305 242 ( −20 .6%) 271 ( −11 .0%) 301 99% 236 ( −21 .6%) 266 ( −11 .4%) 61 53 ( −13 .1%) 58 ( −4.9%) 110.dynamic-html 221 161 ( −27 .3%) 168 ( −24 .0%) 217 98% 156 ( −27 .9%) 163 ( −24 .7%) 50 39 ( −22 .0%) 40 ( −20 .0%) igraph 209 167 ( −20 .1%) 175 ( −16 .2%) 205 98% 163 ( −20 .5%) 172 ( −16 .3%) 47 42 ( −10 .6%) 43 ( −8.5%) markdown 176 175 ( −0.7%) † 176 ( +0.3%) † 155 88% 153 ( −0.9%) † 155 ( +0.3%) † 40 39 ( −2.5%) 40 ( +0.0%) encrypt 174 172 ( −1.5%) † 177 ( +1.5%) † 160 92% 161 ( +0.5%) † 161 ( +0.6%) † 46 45 ( −2.2%) 46 ( +0.0%) compression 164 158 ( −3.8%) 160 ( −2.6%) 153 93% 148 ( −3.6%) 149 ( −3.0%) 43 42 ( −2.3%) 42 ( −2.3%) 
+
+Median −21 .7% −8.5% 91% −23 .3% −10 .9% −17 .1% −5.4% 
+
+Best 22 /31 2/28 21 /31 4/28 22 /31 2/28 
+
+whole megabytes and it varies little across invocations, so we count a difference only from 2 MB. RQ1’s success rate counts a tool run as successful when the debloated program returns the same output and produces the same side effects as the unmodified one on every invocation. 
+
+5.2 RQ1: Success Rate and Debloating Time 
+
+PyXtrim debloats all 31 applications successfully (Table 1). On the other hand, 𝜆 -trim succeeds on 28 of them, produc-ing no debloated artifact for heart-failure, resnet and sensor-telemetry. FaaSLight and SlimStart succeed only on 10 and on 7 applications, respectively. Almost all of these failures stem from implementation defects. Debloating is an offline cost that is paid once, but it is not free. PyXtrim is faster than 𝜆 -trim on 27 of the 28 ap-plications it debloats (median 5 minutes against 62). This is because 𝜆 -trim treats the application as a black box: each candidate removal requires another application run to check whether the observed behavior is preserved. FaaSLight and SlimStart report lower medians, 78 and 35 seconds, but only over the 10 and 7 applications they handle, which are among the cheapest of the dataset. PyXtrim needs 28 and 27 seconds on those same applications. 
+
+Takeaway. PyXtrim is the only tool that debloats every appli-cation successfully, and it is faster than every other tool. Alexopoulos et al. 
+
+5.3 RQ2: Effectiveness of PyXtrim Relative to the original application, PyXtrim reduces cold-start latency on 28 of the 31 applications with statistical significance (Table 2). For half of the 31 applications, the reduction is more than 21.7% (median) and reaches 36.8% on sensor-telemetry, while no application becomes slower. The gain comes from initialization, which PyXtrim reduces by 23.3% and which accounts for a median of 91% of the baseline cold start. ocrmypdf and ffmpeg are the exception, spending only 12% and 8% of their cold start on initialization. Regarding peak memory, the median reduction is 17.1%. 
+
+𝜆 -trim reduces the cold start by 8.5% at the median, against PyXtrim’s 21.7%, and peak memory follows the same pattern (5.4% vs. 17.1%). Table 2 marks the applications for which a tool performs significantly better than both the original application and the other tool. With respect to cold-start time, PyXtrim is the best in 22 of the 31, three of them un-contested since 𝜆 -trim produced no artifact, while 𝜆 -trim is the best in two. In those two cases, 𝜆 -trim wins because PyXtrim retains a small number of imports that its depen-dence analysis cannot prove unnecessary, and those imports carry a large transitive cost. Neither FaaSLight nor SlimStart improves the cold start of a single application significantly, and are thus omitted from the table for readability and report their results in Ap-pendix F. Cold start latency grows by 16.5% at the median under FaaSLight, while SlimStart has a minor effect ( +1.3%) on the seven applications it handles. 
+
+Takeaway. PyXtrim removes about a fifth of the cold start. That is more than twice as much as the next best tool. 
+
+5.4 RQ3: Warm-Start Performance 
+
+A warm start invokes the handler directly in an already ini-tialized execution environment. Reducing warm-start time is not a focus of PyXtrim. However, Table 3 reports the effect on warm-start time for all tools. At the median PyXtrim slightly improves warm starts, being 1.0% faster. Individual applications move in both directions, with PyXtrim being the best on 15 of 31 applications and slower than the orig-inal application on three. 𝜆 -trim is neutral, 0.2% slower at the median, and slightly slower than the original on four applications. Upon further inspection on the cases where PyXtrim is slower than the baseline, we made an interesting observa-tion regarding the root cause. On dna-visualization, its worst case, where execution time increases by 7.1%, the trimmed program executes fewer bytecode instructions, 163 ,666 against 163 ,688, and uses less memory, which is normally beneficial. However, the smaller heap crosses the 128 KB threshold at which glibc releases unused memory back to the kernel. Those pages have to be brought back, leading to about 280 additional page faults per call. This case is not a limit on PyXtrim’s ability to remove unnecessary 
+
+Table 3. Warm invocations. The first column is the median handler time of the unmodified application and the rest the change against it. Green marks the fastest option and orange a tool slower than the unmodified one, both with statistical significance. A † marks a change that is not significant.                                                                                                                                                                           
+
+> original change (%) Application (ms) PyXtrim 𝜆 -trim FaaSL. SlimS.
+> ocrmypdf 5,119 +0.5†+0.1†n/a n/a
+> ffmpeg 2,190 +0.4†+0.4†+1.5−0.5†
+> heart-failure 781 −0.7n/a n/a n/a
+> skimage 222 −1.6−0.5†n/a n/a
+> huggingface 216 −4.1+0.5†n/a n/a
+> resnet 144 −4.3n/a n/a n/a
+> sensor-telemetry 125 −4.4n/a n/a n/a
+> face-detection 98.6 +0.5†+2.6−1.7n/a
+> qiskit-nature 90.5 −8.1+0.3†n/a n/a
+> cve-bin-tool 74.5 +1.4+0.8n/a n/a
+> epub-pdf 58.0 −0.9+0.4†n/a n/a
+> image-resize 43.3 +0.2†−0.0†n/a n/a
+> pandas 29.9 −8.5−0.5†n/a n/a
+> chdb-olap 28.6 +1.9+2.8+1.6+0.0†
+> lxml 21.8 −1.4†−1.0†n/a −0.0†
+> markdown 18.2 −0.1†+0.3†+1295 .3+1.3wine 15.1 −8.4+2.5n/a n/a
+> dna-visualization 14.0 +7.1+0.2†−1.6n/a
+> lightgbm 13.0 −0.2†−0.5†n/a n/a
+> jsym 12.4 −4.0+0.0†n/a n/a
+> rnn-generate 11.8 −2.7−0.2†n/a n/a
+> spacy 7.57 −4.4−0.9†n/a n/a
+> compression 6.82 −0.3†−0.3†+39 .4−1.2†
+> textblob 4.04 −4.0−1.5n/a n/a
+> 110.dynamic-html 3.37 −5.6+0.0†+51 .3n/a
+> tensorflow 2.22 −0.5†+0.9†n/a n/a
+> sentiment-gzip 2.09 −1.0†+0.5†n/a n/a
+> scikit 1.94 −2.1−0.5†n/a n/a
+> shapely-numpy 1.85 −1.9−2.2+107 .6n/a
+> igraph 1.78 +0.6†+0.6†−0.6†+0.6†
+> encrypt 1.66 −0.3†+0.3†+28 .7+1.6
+> Median −1.0+0.2+15 .2−0.0
+> Best 1/31 15 /31 0/28 2/10 0/7
+
+code, and preventing the page faults is an optimization that applies separately from debloating. 
+
+Takeaway. PyXtrim slightly improves warm starts for roughly half the applications, while 𝜆 -trim and SlimStart leave them practically unchanged. FaaSLight degrades performance. 
+
+5.5 RQ4: Ablation Study 
+
+We disable one part of PyXtrim’s analysis at a time (Table 4). 
+
+LOAD is sink replaces the criterion of Section 4.3 with a proxy, keeping a statement whenever any other statement reads its result. No C-API keeps the criterion but disables the interceptor of Section 4.2. Each configuration fails in its own way. LOAD is sink 
+
+stays safe but removes far less, because almost every import is read somewhere. Its reductions roughly halve, from Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Table 4. Effect of each dataflow-tracking configuration com-pared against the original applications. Live mod. is the num-ber of modules loaded at runtime. Reductions are averaged over the 12 applications where all configurations succeed, using 100 local cold starts.                 
+
+> Tracking succeeds change (%) live mod. cold init
+> Full (PyXtrim) 31/31 −27 .8−22 .3−28 .7LOAD is sink 31/31 −10 .9−10 .5−14 .2No C-API 12/31 −27 .9−21 .1−28 .4
+
+27.8% to 10.9% for live modules, from 22.3% to 10.5% for the cold start, and from 28.7% to 14.2% for initialization. Such a criterion cannot remove a statement together with its dependents ( C1 , Section 2), so it keeps import legacy (m3 , Figure 2a) because m7 reads it. No C-API has the opposite profile. Disabling the interceptor can only make the slice smaller, yet it removes almost no extra code, producing the same module sets as PyXtrim on 10 of the 12 applications where it survives. What it loses is soundness, succeeding on 12 of 31 applications instead of all of them. In numpy , for instance, the _multiarray_umath 
+
+extension reads numpy.exceptions.TooHardError 
+
+through PyObject_GetAttr . No bytecode performs that read, so the analysis deletes the definition at 
+
+numpy/exceptions.py:97 , and every application importing numpy then fails with an AttributeError .     
+
+> Takeaway. The sink detector is what makes PyXtrim effective, and the C-API interceptor is what keeps it safe.
+
+5.6 Discussion Lazy imports: Deferring an import is the alternative to removing it, and PEP 810 [44] will bring it to Python 3.15 as the lazy keyword on an individual import, a release sched-uled for October 2026 [55]. Deferral cannot reduce what the platform downloads, and it postpones the cost of an im-port rather than removing it, so the cost returns on the first invocation that needs the library. Applying it everywhere is also unsafe. PEP 690 [14], its rejected predecessor, calls lazy imports a potentially breaking semantic change, since the side effects of a module are deferred with it, and warns that libraries break in unexpected ways. We tested this on Python 3.15.0rc1 by making every eligible import lazy in each application’s dependency tree. Fifteen of the 29 applica-tions we could build then failed before returning a result. All failures occurred because deferring an import changed when a module was initialized, breaking programs that depended on its initialization side effects or on a particular module initialization order. The two techniques are nonetheless com-plementary, since PyXtrim could identify the imports that are safe to defer. 
+
+Threats to validity: PyXtrim removes what the inputs it is given never need, so a wider set may exercise more code and leave it less to remove. We also measure a single cloud configuration, one region, one memory size and one runtime. Less memory would mean a smaller CPU share, which would lengthen initialization and change the gains. The AWS platform is also noisy. The reductions we claim are an order of magnitude larger, and they reproduce on other hardware and off the AWS platform (Appendix E). 
+
+## 6 Related Work 
+
+Application-level techniques: The closest line of work modifies the application itself, as an effort to reduce cold-start latency. This line is represented by 𝜆 -trim, FaaSLight, and SlimStart, which are described in detail in Section 2. 
+
+Platform-level cold-start mechanisms: Platform-level work reduces cold-start latency without touching the appli-cation, by changing how the platform creates and reuses the execution environments in which a function runs. Snapshot-and-restore systems skip initialization by restoring a pre-initialized image, from gVisor checkpoints [21] and VM snapshots [12, 49, 54] to unikernels [16] and AWS Lambda’s SnapStart [10]. Provisioning and keep-alive policies instead reduce how often initialization is paid, by forking new en-vironments from cached Zygote containers [39], by sharing containers or their layers across functions [2, 36, 60], and by deciding which environments to keep warm [24, 43]. All of these are orthogonal to our work, which changes the ap-plication itself, and they compose with it, since a smaller artifact yields a smaller snapshot and a faster environment load. 𝜆 -trim measures an 11% smaller checkpoint and up to 42% off the cost of running with SnapStart [37], and PyXtrim removes three times as much peak memory. 
+
+Software debloating: Debloating approaches differ in the oracle that decides what to remove. Static reachability retains code that may execute [15, 52, 53], and coverage-based approaches retain code that executes in observed runs [42, 50]. Test-oracle approaches retain whatever passes a test [26, 37, 58]. PyXtrim uses a dependence-based oracle, removing a statement only when no DDG path connects its steps to a sink. PyTrim [29] works at the coarser granularity of declared dependencies. 
+
+Information-flow tracking: PyXtrim’s shadow inter-preter falls within the broader class of dynamic information-flow tracking systems [3, 30, 31, 46, 47], with labels that are DDG steps rather than taint tags and with control depen-dences recorded. For Python, DynaPyt [22] rewrites source code to insert instrumentation hooks, while Resin [59] mod-ifies the interpreter to check policies at a boundary that covers every I/O channel. Unlike this prior work, PyXtrim observes bytecode through sys.monitoring [48] with the application and its dependencies unmodified. Alexopoulos et al. 
+
+Tracking dependencies across the Python–C boundary poses an additional challenge. PolyCruise [35] requires na-tive extensions to be rebuilt through LLVM and tracks only explicit flows. TruffleTaint [34] requires every language, in-cluding C, to execute under interpretation on GraalVM [57]. PyXtrim’s C-API interceptor instead recovers native depen-dences from prebuilt wheels. 
+
+## 7 Conclusion 
+
+Cold-start latency is a major concern in serverless comput-ing, yet much of what a handler runs before serving a re-quest never affects its behavior. PyXtrim removes that code, slicing across data and control dependences in Python and native code alike. On 31 applications it cuts cold-start latency by 21.7% and peak memory by 17.1% at the median, more than twice the best prior tool, showing that dynamic slicing is an effective basis for optimizing serverless programs. The dependence analysis behind PyXtrim is not specific to de-bloating, and could serve other purposes, such as source-sink vulnerability detection. 
+
+## References 
+
+[1] Hiralal Agrawal and Joseph Robert Horgan. 1990. Dynamic Program Slicing. In Proceedings of the ACM SIGPLAN’90 Conference on Program-ming Language Design and Implementation (PLDI), White Plains, New York, USA, June 20-22, 1990 , Bernard N. Fischer (Ed.). ACM, 246–256. doi: 10.1145/93542.93576 
+
+[2] Istemi Ekin Akkus, Ruichuan Chen, Ivica Rimac, Manuel Stein, Klaus Satzke, Andre Beck, Paarijaat Aditya, and Volker Hilt. 2018. SAND: Towards High-Performance Serverless Computing. In Proceedings of the 2018 USENIX Annual Technical Conference, USENIX ATC 2018, Boston, MA, USA, July 11-13, 2018 , Haryadi S. Gunawi and Benjamin C. Reed (Eds.). USENIX Association, 923–935. https://www.usenix.org/ conference/atc18/presentation/akkus 
+
+[3] Mark W. Aldrich, Alexi Turcotte, Matthew Blanco, and Frank Tip. 2022. Augur: Dynamic Taint Analysis for Asynchronous JavaScript. In 37th IEEE/ACM International Conference on Automated Software Engineering, ASE 2022, Rochester, MI, USA, October 10-14, 2022 . ACM, 153:1–153:4. doi: 10.1145/3551349.3559522 
+
+[4] Georgios Alexopoulos, Thodoris Sotiropoulos, Georgios Gousios, Zhendong Su, and Dimitris Mitropoulos. 2026. PyXray: Practical Cross-Language Call Graph Construction through Object Layout Analysis. In 
+
+Proceedings of the IEEE/ACM 48th International Conference on Software Engineering (Rio de Janeiro, Brazil) (ICSE ’26) . Association for Com-puting Machinery, New York, NY, USA. doi: 10.1145/3744916.3764555 
+
+[5] Anil Altinay, Joseph Nash, Taddeus Kroes, Prabhu Rajasekaran, Dixin Zhou, Adrian Dabrowski, David Gens, Yeoul Na, Stijn Volckaert, Cris-tiano Giuffrida, Herbert Bos, and Michael Franz. 2020. BinRec: dy-namic binary lifting and recompilation. In Proceedings of the Fifteenth European Conference on Computer Systems (Heraklion, Greece) (Eu-roSys ’20) . Association for Computing Machinery, New York, NY, USA, Article 36, 16 pages. doi: 10.1145/3342195.3387550 
+
+[6] Amazon Web Services. 2025. AWS Lambda Standardizes Billing for INIT Phase. AWS Compute Blog. https://aws.amazon.com/blogs/ compute/aws-lambda-standardizes-billing-for-init-phase/ . Effective August 1, 2025. Accessed 2026-09-10. [7] Amazon Web Services. 2026. AWS Lambda Pricing. https://aws. amazon.com/lambda/pricing/ . Accessed 2026-08-27. [8] Amazon Web Services. 2026. Configure AWS Lambda Function Mem-ory. https://docs.aws.amazon.com/lambda/latest/dg/configuration-memory.html . Accessed 2026-09-03. [9] Amazon Web Services. 2026. Define Lambda function handler in Python—Code best practices for Python Lambda functions. AWS Lambda Developer Guide. https://docs.aws.amazon.com/lambda/ latest/dg/python-handler.html . Accessed 2026-08-27. [10] Amazon Web Services. 2026. Improving Startup Performance with Lambda SnapStart. https://docs.aws.amazon.com/lambda/latest/dg/ snapstart.html . Accessed 2026-08-26. [11] Inc. Amazon Web Services. 2026. Canary Deployments. 
+
+https://docs.aws.amazon.com/whitepapers/latest/overview-deployment-options/canary-deployments.html . Accessed 2026-09-10. [12] Lixiang Ao, George Porter, and Geoffrey M. Voelker. 2022. FaaSnap: FaaS made fast using snapshot-based VMs. In EuroSys ’22: Seventeenth European Conference on Computer Systems, Rennes, France, April 5 - 8, 2022 , Yérom-David Bromberg, Anne-Marie Kermarrec, and Christos Kozyrakis (Eds.). ACM, 730–746. doi: 10.1145/3492321.3524270 
+
+[13] Germán Méndez Bravo. 2024. Lazy is the New Fast: How Lazy Im-ports and Cinder Accelerate Machine Learning at Meta. Engineering at Meta. https://engineering.fb.com/2024/01/18/developer-tools/lazy-imports-cinder-machine-learning-meta/ . Accessed 2026-08-26. [14] Germán Méndez Bravo and Carl Meyer. 2022. PEP 690 – Lazy Imports. 
+
+https://peps.python.org/pep-0690/ . Rejected. [15] Bobby R. Bruce, Tianyi Zhang, Jaspreet Arora, Guoqing Harry Xu, and Miryung Kim. 2020. JShrink: in-depth investigation into debloating modern Java applications. In ESEC/FSE ’20: 28th ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering, Virtual Event, USA, November 8-13, 2020 , Prem Devanbu, Myra B. Cohen, and Thomas Zimmermann (Eds.). ACM, 135–146. doi: 10.1145/3368089.3409738 
+
+[16] James Cadden, Thomas Unger, Yara Awad, Han Dong, Orran Krieger, and Jonathan Appavoo. 2020. SEUSS: skip redundant paths to make serverless fast. In EuroSys ’20: Fifteenth EuroSys Conference 2020, Her-aklion, Greece, April 27-30, 2020 , Angelos Bilas, Kostas Magoutis, Evan-gelos P. Markatos, Dejan Kostic, and Margo I. Seltzer (Eds.). ACM, 32:1–32:15. doi: 10.1145/3342195.3392698 
+
+[17] Marcin Copik, Grzegorz Kwasniewski, Maciej Besta, Michal Pod-stawski, and Torsten Hoefler. 2021. SeBS: A serverless benchmark suite for function-as-a-service computing. In Proceedings of the 22nd Inter-national Middleware Conference . 64–78. doi: 10.1145/3464298.3476133 
+
+[18] Datadog. 2023. The State of Serverless. https://www.datadoghq.com/ state-of-serverless/ . Accessed 2026-05-22. [19] Datadog. 2025. State of Containers and Serverless. https://www. datadoghq.com/state-of-containers-and-serverless/ . Accessed 2026-05-22. [20] Georgios-Petros Drosos, Thodoris Sotiropoulos, Diomidis Spinellis, and Dimitris Mitropoulos. 2024. Bloat beneath Python’s Scales: A Fine-Grained Inter-Project Dependency Analysis. Proc. ACM Softw. Eng. 1, FSE, Article 114 (July 2024), 24 pages. doi: 10.1145/3660821 
+
+[21] Dong Du, Tianyi Yu, Yubin Xia, Binyu Zang, Guanglu Yan, Chenggang Qin, Qixuan Wu, and Haibo Chen. 2020. Catalyzer: Sub-millisecond Startup for Serverless Computing with Initialization-less Booting. In 
+
+ASPLOS ’20: Architectural Support for Programming Languages and Operating Systems, Lausanne, Switzerland, March 16-20, 2020 , James R. Larus, Luis Ceze, and Karin Strauss (Eds.). ACM, 467–481. doi: 10.1145/ 3373376.3378512 
+
+[22] Aryaz Eghbali and Michael Pradel. 2022. DynaPyt: a dynamic analysis framework for Python. In Proceedings of the 30th ACM Joint European Software Engineering Conference and Symposium on the Foundations of Software Engineering, ESEC/FSE 2022, Singapore, Singapore, November 14-18, 2022 , Abhik Roychoudhury, Cristian Cadar, and Miryung Kim (Eds.). ACM, 760–771. doi: 10.1145/3540250.3549126 
+
+[23] Simon Eismann, Joel Scheuner, Erwin van Eyk, Maximilian Schwinger, Johannes Grohmann, Nikolas Herbst, Cristina L. Abad, and Alexandru Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Iosup. 2021. Serverless Applications: Why, When, and How? IEEE Software 38, 1 (2021), 32–39. doi: 10.1109/MS.2020.3023302 
+
+[24] Alexander Fuerst and Prateek Sharma. 2021. FaasCache: keeping serverless computing alive with greedy-dual caching. In ASPLOS ’21: 26th ACM International Conference on Architectural Support for Pro-gramming Languages and Operating Systems, Virtual Event, USA, April 19-23, 2021 , Tim Sherwood, Emery D. Berger, and Christos Kozyrakis (Eds.). ACM, 386–400. doi: 10.1145/3445814.3446757 
+
+[25] Google Cloud. 2026. Functions best practices. Cloud Run documenta-tion. https://cloud.google.com/run/docs/tips/functions-best-practices .Accessed 2026-08-27. [26] Kihong Heo, Woosuk Lee, Pardis Pashakhanloo, and Mayur Naik. 2018. Effective Program Debloating via Reinforcement Learning. In 
+
+Proceedings of the 2018 ACM SIGSAC Conference on Computer and Communications Security, CCS 2018, Toronto, ON, Canada, October 15-19, 2018 , David Lie, Mohammad Mannan, Michael Backes, and XiaoFeng Wang (Eds.). ACM, 380–394. doi: 10.1145/3243734.3243838 
+
+[27] Susan Horwitz, Thomas W. Reps, and David W. Binkley. 1990. Inter-procedural Slicing Using Dependence Graphs. ACM Trans. Program. Lang. Syst. 12, 1 (1990), 26–60. doi: 10.1145/77606.77608 
+
+[28] Artjom Joosen, Ahmed Hassan, Martin Asenov, Rajkarn Singh, Luke Darlow, Jianfeng Wang, Qiwen Deng, and Adam Barker. 2025. Server-less Cold Starts and Where to Find Them. In Proceedings of the Twen-tieth European Conference on Computer Systems (Rotterdam, Nether-lands) (EuroSys ’25) . Association for Computing Machinery, New York, NY, USA, 938–953. doi: 10.1145/3689031.3696073 
+
+[29] Konstantinos Karakatsanis, Georgios Alexopoulos, Ioannis Karyotakis, Foivos Timotheos Proestakis, Evangelos Talos, Panos Louridas, and Dimitris Mitropoulos. 2025. PyTrim: A Practical Tool for Reducing Python Dependency Bloat. In 40th IEEE/ACM International Conference on Automated Software Engineering, ASE 2025, Seoul, Korea, Republic of, November 16-20, 2025 . IEEE, 4070–4073. doi: 10.1109/ASE63991.2025. 00377 
+
+[30] Rezwana Karim, Frank Tip, Alena Sochurková, and Koushik Sen. 2020. Platform-Independent Dynamic Taint Analysis for JavaScript. IEEE Trans. Software Eng. 46, 12 (2020), 1364–1379. doi: 10.1109/TSE.2018. 2878020 
+
+[31] Vasileios P. Kemerlis, Georgios Portokalidis, Kangkook Jee, and Ange-los D. Keromytis. 2012. libdft: practical dynamic data flow tracking for commodity systems. In Proceedings of the 8th International Conference on Virtual Execution Environments, VEE 2012, London, UK, March 3-4, 2012 (co-located with ASPLOS 2012) , Steven Hand and Dilma Da Silva (Eds.). ACM, 121–132. doi: 10.1145/2151024.2151042 
+
+[32] Jeongchul Kim and Kyungyong Lee. 2019. FunctionBench: A suite of workloads for serverless cloud function service. In 2019 IEEE 12th International Conference on Cloud Computing (CLOUD) . IEEE, 502– 504. doi: 10.1109/CLOUD.2019.00091 https://github.com/ddps-lab/ serverless-faas-workbench .[33] Bogdan Korel and Janusz W. Laski. 1988. Dynamic Program Slicing. Inf. Process. Lett. 29, 3 (1988), 155–163. doi: 10.1016/0020-0190(88)90054-3 
+
+[34] Jacob Kreindl, Daniele Bonetta, Lukas Stadler, David Leopoldseder, and Hanspeter Mössenböck. 2020. Multi-language dynamic taint analysis in a polyglot virtual machine. In MPLR ’20: 17th International Conference on Managed Programming Languages and Runtimes, Virtual Event, UK, November 4-6, 2020 , Stefan Marr (Ed.). ACM, 15–29. doi: 10. 1145/3426182.3426184 
+
+[35] Wen Li, Jiang Ming, Xiapu Luo, and Haipeng Cai. 2022. Poly-Cruise: A Cross-Language Dynamic Information Flow Analysis. In 
+
+31st USENIX Security Symposium, USENIX Security 2022, Boston, MA, USA, August 10-12, 2022 , Kevin R. B. Butler and Kurt Thomas (Eds.). USENIX Association, 2513–2530. https://www.usenix.org/conference/ usenixsecurity22/presentation/li-wen 
+
+[36] Zijun Li, Linsong Guo, Quan Chen, Jiagan Cheng, Chuhao Xu, Deze Zeng, Zhuo Song, Tao Ma, Yong Yang, Chao Li, and Minyi Guo. 2022. Help Rather Than Recycle: Alleviating Cold Startup in Serverless Computing Through Inter-Function Container Sharing. In Proceedings of the 2022 USENIX Annual Technical Conference, USENIX ATC 2022, Carlsbad, CA, USA, July 11-13, 2022 , Jiri Schindler and Noa Zilber-man (Eds.). USENIX Association, 69–84. https://www.usenix.org/ conference/atc22/presentation/li-zijun-help 
+
+[37] Xuting Liu, Spyros Pavlatos, Yuhao Liu, and Vincent Liu. 2025. 𝜆 -trim: Optimizing Function Initialization in Serverless Applications With Cost-driven Debloating. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 3 (Rotterdam, Netherlands) (ASPLOS ’25) .Association for Computing Machinery, New York, NY, USA, 129–146. doi: 10.1145/3676642.3736129 
+
+[38] Xuanzhe Liu, Jinfeng Wen, Zhenpeng Chen, Ding Li, Junkai Chen, Yi Liu, Haoyu Wang, and Xin Jin. 2023. FaaSLight : General Application-level Cold-start Latency Optimization for Function-as-a-Service in Serverless Computing. ACM Trans. Softw. Eng. Methodol. 32, 5 (2023), 119:1–119:29. doi: 10.1145/3585007 
+
+[39] Edward Oakes, Leon Yang, Dennis Zhou, Kevin Houck, Tyler Harter, Andrea C. Arpaci-Dusseau, and Remzi H. Arpaci-Dusseau. 2018. SOCK: Rapid Task Provisioning with Serverless-Optimized Containers. In 
+
+Proceedings of the 2018 USENIX Annual Technical Conference, USENIX ATC 2018, Boston, MA, USA, July 11-13, 2018 , Haryadi S. Gunawi and Benjamin C. Reed (Eds.). USENIX Association, 57–70. https://www. usenix.org/conference/atc18/presentation/oakes 
+
+[40] Python Software Foundation. 2026. Python/C API Reference Manual. 
+
+https://docs.python.org/3/c-api/index.html . Accessed 2026-09-10. [41] Python Software Foundation. 2026. sys.monitoring—Execution event monitoring. https://docs.python.org/3/library/sys.monitoring.html .Accessed 2026-09-10. [42] Chenxiong Qian, Hong Hu, Mansour Alharthi, Pak Ho Chung, Taesoo Kim, and Wenke Lee. 2019. RAZOR: a framework for post-deployment software debloating. In Proceedings of the 28th USENIX Conference on Security Symposium (Santa Clara, CA, USA) (SEC’19) . USENIX Association, USA, 1733–1750. https://www.usenix.org/conference/ usenixsecurity19/presentation/qian 
+
+[43] Rohan Basu Roy, Tirthak Patel, and Devesh Tiwari. 2022. IceBreaker: warming serverless functions better with heterogeneity. In ASPLOS ’22: 27th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Lausanne, Switzerland, 28 February 2022 - 4 March 2022 , Babak Falsafi, Michael Ferdman, Shan Lu, and Thomas F. Wenisch (Eds.). ACM, 753–767. doi: 10.1145/3503222. 3507750 
+
+[44] Pablo Galindo Salgado, Germán Méndez Bravo, Thomas Wouters, Dino Viehland, Brittany Reynoso, Noah Kim, and Tim Stumbaugh. 2025. PEP 810 – Explicit Lazy Imports. https://peps.python.org/pep-0810/ .Accepted for Python 3.15. [45] Pablo Galindo Salgado, Batuhan Taskaya, and Ammar Askar. 2021. PEP 657 — Include Fine Grained Error Locations in Tracebacks. https: //peps.python.org/pep-0657 .[46] Edward J. Schwartz, Thanassis Avgerinos, and David Brumley. 2010. All You Ever Wanted to Know about Dynamic Taint Analysis and Forward Symbolic Execution (but Might Have Been Afraid to Ask). In 
+
+31st IEEE Symposium on Security and Privacy, SP 2010, 16-19 May 2010, Berkeley/Oakland, California, USA . IEEE Computer Society, 317–331. doi: 10.1109/SP.2010.26 
+
+[47] Koushik Sen, Swaroop Kalasapur, Tasneem G. Brutch, and Simon Gibbs. 2013. Jalangi: a selective record-replay and dynamic analysis framework for JavaScript. In Joint Meeting of the European Software Engineering Conference and the ACM SIGSOFT Symposium on the Foun-dations of Software Engineering, ESEC/FSE’13, Saint Petersburg, Russian Federation, August 18-26, 2013 , Bertrand Meyer, Luciano Baresi, and Mira Mezini (Eds.). ACM, 488–498. doi: 10.1145/2491411.2491447 Alexopoulos et al. 
+
+[48] Mark Shannon. 2021. PEP 669 – Low Impact Monitoring for CPython. 
+
+https://peps.python.org/pep-0669/ .[49] Wonseok Shin, Wook-Hee Kim, and Changwoo Min. 2022. Fireworks: a fast, efficient, and safe serverless framework using VM-level post-JIT snapshot. In EuroSys ’22: Seventeenth European Conference on Computer Systems, Rennes, France, April 5 - 8, 2022 , Yérom-David Bromberg, Anne-Marie Kermarrec, and Christos Kozyrakis (Eds.). ACM, 663–677. doi: 10.1145/3492321.3519581 
+
+[50] César Soto-Valero, Thomas Durieux, Nicolas Harrand, and Benoit Baudry. 2023. Coverage-Based Debloating for Java Bytecode. ACM Trans. Softw. Eng. Methodol. 32, 2 (2023), 38:1–38:34. doi: 10.1145/ 3546948 
+
+[51] Syed Salauddin Mohammad Tariq, Ali Al Zein, Soumya Sripad Vaidya, Arati Khanolkar, Zheng Song, and Probir Roy. 2025. Efficient Serverless Cold Start: Reducing Library Loading Overhead by Profile-guided Optimization. In 45th IEEE International Conference on Distributed Computing Systems, ICDCS 2025, Glasgow, United Kingdom, July 21-23, 2025 . IEEE, 297–307. doi: 10.1109/ICDCS63083.2025.00037 
+
+[52] Frank Tip, Chris Laffra, Peter F. Sweeney, and David Streeter. 1999. Practical Experience with an Application Extractor for Java. In Pro-ceedings of the 1999 ACM SIGPLAN Conference on Object-Oriented Pro-gramming Systems, Languages & Applications, OOPSLA 1999, Denver, Colorado, USA, November 1-5, 1999 , Brent Hailpern, Linda M. Northrop, and A. Michael Berman (Eds.). ACM, 292–305. doi: 10.1145/320384. 320414 
+
+[53] Alexi Turcotte, Ellen Arteca, Ashish Mishra, Saba Alimadadi, and Frank Tip. 2022. Stubbifier: debloating dynamic server-side JavaScript applications. Empir. Softw. Eng. 27, 7 (2022), 161. doi: 10.1007/S10664-022-10195-6 
+
+[54] Dmitrii Ustiugov, Plamen Petrov, Marios Kogias, Edouard Bugnion, and Boris Grot. 2021. Benchmarking, analysis, and optimization of serverless function snapshots. In ASPLOS ’21: 26th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Virtual Event, USA, April 19-23, 2021 , Tim Sherwood, Emery D. Berger, and Christos Kozyrakis (Eds.). ACM, 559–572. doi: 10. 1145/3445814.3446714 
+
+[55] Hugo van Kemenade. 2025. PEP 790 – Python 3.15 Release Schedule. 
+
+https://peps.python.org/pep-0790/ .[56] Mark D. Weiser. 1984. Program Slicing. IEEE Trans. Software Eng. 10, 4 (1984), 352–357. doi: 10.1109/TSE.1984.5010248 
+
+[57] Thomas Würthinger, Christian Wimmer, Andreas Wöß, Lukas Stadler, Gilles Duboscq, Christian Humer, Gregor Richards, Doug Simon, and Mario Wolczko. 2013. One VM to rule them all. In ACM Symposium on New Ideas in Programming and Reflections on Software, Onward! 2013, part of SPLASH ’13, Indianapolis, IN, USA, October 26-31, 2013 ,Antony L. Hosking, Patrick Th. Eugster, and Robert Hirschfeld (Eds.). ACM, 187–204. doi: 10.1145/2509578.2509581 
+
+[58] Qi Xin, Myeongsoo Kim, Qirun Zhang, and Alessandro Orso. 2020. Subdomain-Based Generality-Aware Debloating. In 35th IEEE/ACM International Conference on Automated Software Engineering, ASE 2020, Melbourne, Australia, September 21-25, 2020 . ACM, 224–236. doi: 10. 1145/3324884.3416644 
+
+[59] Alexander Yip, Xi Wang, Nickolai Zeldovich, and M. Frans Kaashoek. 2009. Improving application security with data flow assertions. In 
+
+Proceedings of the 22nd ACM Symposium on Operating Systems Prin-ciples 2009, SOSP 2009, Big Sky, Montana, USA, October 11-14, 2009 ,Jeanna Neefe Matthews and Thomas E. Anderson (Eds.). ACM, 291– 304. doi: 10.1145/1629575.1629604 
+
+[60] Hanfei Yu, Rohan Basu Roy, Christian Fontenot, Devesh Tiwari, Jian Li, Hong Zhang, Hao Wang, and Seung-Jong Park. 2024. Rainbowcake: Mitigating cold-starts in serverless with layer-wise container caching and sharing. In Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 . 335–350. doi: 10.1145/3617232.3624871 
+
+[61] Andreas Zeller and Ralf Hildebrandt. 2002. Simplifying and Isolat-ing Failure-Inducing Input. IEEE Trans. Softw. Eng. 28, 2 (Feb. 2002), 183–200. doi: 10.1109/32.988498 
+
+## A Shadow Interpreter Rules 
+
+Table 5 gives the rules the shadow interpreter applies for representative instructions using the notation introduced in Section 4.1. IMPORT_NAME pushes the step that enters a module’s top-level code, CALL the step that enters a function frame, and the conditional jumps the label of the predicate under test, which stays on the context while the branch is in effect. RETURN_VALUE is the one rule shown that pops. The ten instructions in the table stand for the 122 opcodes for which the engine registers a rule. The remaining ones neither move labeled values nor affect control, and a default rule keeps the shadow stack aligned with the real one using the instruction’s declared stack effect. 
+
+## B Transfer Rules for CPython Built-in Callees 
+
+CPython’s built-in functions and methods of built-in types execute inside the interpreter rather than through the C API interception layer. The shadow interpreter therefore models their effects using transfer rules derived from the Python 3.12 documentation and, where necessary, the CPython in-terpreter source. The rules specify which shadow-heap cells are read or written and how the labels of returned values are derived. Table 6 lists representative rules. The complete table is generated from the registered summaries. The rules are applied at the call site. Each rule declares its read scope per operand; in the absence of a narrower declara-tion, an operand is treated as a whole-object read. For exam-ple, len(x) does not read the interior of 𝑥 , while dict.get 
+
+reads the requested mapping cell and the mapping’s whole-object cell. Writes similarly identify the whole-object or field cell that is actually mutated. When a call can match multiple rules, their outcomes are conservatively unioned. 
+
+## C Implementation Details 
+
+Accessing CPython’s operand stack: Although 
+
+sys.monitoring exposes information about the call stack, each instruction’s source location, and the locals of the executing frame, it does not expose CPython’s operand stack. PyXtrim adds a C extension that peeks the top 𝑛 
+
+values from the operand stack. Access to the real operands lets the engine resolve dynamic accesses. For example, a 
+
+getattr(obj, name) call, whose attribute is computed at runtime, is handled similarly to a static attribute access (via LOAD_ATTR ), and the same holds for eval and dynamic imports. 
+
+Redundant import chains: Side-effecting imports (Sec-tion 2) force the trimmer to keep import statements that no data dependence points to. The module performing the side Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Table 5. Effect of representative instructions. The rules assume execution in the top-level code of a module mod , which affects only STORE_NAME : inside a function frame it writes to the shadow store alone and not to the heap, since the binding does not escape. ℓ𝑣 is the label of value 𝑣 , while bare 𝑣 is the real object, read from CPython’s operand stack. The helper id (·) gives an object’s address 𝛼 , store [𝑛 ] looks up the name 𝑛 in the shadow store, and heap [𝛼 ] looks up the address 𝛼 in the shadow heap.                                                                                                         
+
+> Category Instruction Shadow frame Shadow heap Control context Dependences recorded
+> Source IMPORT_NAME 𝑛 push 𝑠 –push 𝑠 –
+> MAKE_FUNCTION push 𝑠 –––Locals LOAD_NAME 𝑛 push store [𝑛 ]––𝑠 d
+> →store [𝑛 ]
+> STORE_NAME 𝑛 pop ℓval ;store [𝑛 ] ← ℓval heap [id (mod .𝑛 )] ← ℓval –𝑠 d
+> →ℓval ;chain (𝑠 )
+> Heap LOAD_ATTR 𝑛 pop ℓobj ; push heap [id (obj .𝑛 )] ––𝑠 d
+> →ℓobj ,heap [id (obj .𝑛 )]
+> STORE_ATTR 𝑛 pop ℓval , ℓ obj heap [id (obj .𝑛 )] ← 𝑠 –𝑠 d
+> →ℓval , ℓ obj ;chain (𝑠 )
+> Compute BINARY_OP pop ℓ𝑎 , ℓ 𝑏 ; push 𝑠 ––𝑠 d
+> →ℓ𝑎 , ℓ 𝑏
+> Jump POP_JUMP_IF_* pop ℓpred –push ℓpred 𝑠 d
+> →ℓpred
+> Function CALL pop ℓfn , ℓ args ; new frame with store ←ℓargs –push 𝑠 𝑠 d
+> →ℓfn , ℓ args
+> RETURN_VALUE pop ℓret ; drop frame; push ℓret –pop 𝑠 d
+> →ℓret
+
+Table 6. Representative transfer rules for CPython built-in calls. Notation follows Table 5: ℓ𝑣 is the label set of value 𝑣 ,
+
+heap [id (𝑜.𝑛 )] the shadow-heap cell for field 𝑛 of object 𝑜 , and 𝑠 the executing shadow step. We write w(𝑜 ) = heap [id (𝑜. ∗)] for the whole-object cell of 𝑜 . A dash means the rule declares nothing for that column, so the default applies; ∅ means an explicitly empty set. 
+
+Callee Read scope Shadow heap Result Dependences recorded 
+
+setattr( 𝑜, 𝑛, 𝑣 ) – heap [id (𝑜.𝑛 )] ← ℓ𝑣 ∅ chain (𝑠 )
+
+getattr( 𝑜, 𝑛, 𝑑 ) heap [id (𝑜.𝑛 )] ; w(𝑜 ) – ℓ𝑜 ∪ heap [id (𝑜.𝑛 )] ∪ 
+
+w(𝑜 ) ∪ ℓ𝑑 
+
+𝑠 d
+
+→ heap [id (𝑜.𝑛 )] , w(𝑜 )
+
+dict.get( 𝑑, 𝑘, 𝑥 ) heap [id (𝑑.𝑘 )] ; w(𝑑 ) – ℓ𝑑 ∪ heap [id (𝑑.𝑘 )] ∪ 
+
+w(𝑑 ) ∪ ℓ𝑥 
+
+𝑠 d
+
+→ heap [id (𝑑.𝑘 )] , w(𝑑 )
+
+dict.update( 𝑑, 𝑜 ) heap [id (𝑜.𝑘 )] for 
+
+𝑘 ∈ 𝑜 ; w(𝑜 )
+
+heap [id (𝑑.𝑘 )] ← 
+
+heap [id (𝑜.𝑘 )] ∪ ℓ𝑜 
+
+∅ chain (𝑠 ) on written cells 
+
+list.append( 𝑙, 𝑣 ) – w(𝑙 ) ← ℓ𝑣 ∅ 𝑠 d
+
+→ w(𝑙 )
+
+set.add( 𝑡, 𝑣 ) – w(𝑡 ) ← ℓ𝑣 ∅ 𝑠 d
+
+→ w(𝑡 )
+
+len( 𝑥 ) w(𝑥 ) – ℓ𝑥 𝑠 d
+
+→ w(𝑥 )
+
+effect must be loaded, but reaching it may require loading a chain of intermediates that contribute nothing else, and are paid for on every cold start. Figure 6 shows such a case, a variant of our running ex-ample in which main.py reaches the side-effecting module 
+
+plugins (recall the update at p4 , Figure 2b) not directly, but through a and then b. Here, main.py imports a, but does not directly access any of its contents. Therefore, the steps 
+
+m1 , a1 , and b1 survive only because they lie on the path that triggers p4 . Notably, nothing else in a or b is needed (red lines in Figure 6), yet both are still loaded on every cold start. Our trimmer addresses this redundant chain of import statements with a rewrite we call import collapsing , which is applied while parsing each module. When the trimmer reaches a surviving import statement, it first checks the DDG for a data dependence on the imported module. A data dependence indicates that a surviving step in the importing module reads a name that the import statement binds. In such a case, the import statement stays as written. Otherwise the import is kept only for the side effect it triggers, and the trimmer looks for where that effect actually lives. Since an import step controls every top-level step of the module it loaded (Figure 2c), its outgoing control edges lead to that module, one hop at a time. The walk stops as soon as it reaches a module with more than one surviving step. The trimmer then rewrites the original import to load the module where the walk stopped. In Figure 6, the statement import a at m1 is kept but no step in main.py reads the name a. Therefore, the walk follows the control dependences from m1 to a1 , the only surviving step of a, then to b1 , the only surviving step of 
+
+b, and reaches plugins , which has more than one needed Alexopoulos et al.                 
+
+> # main.py
+> import a⇝import plugins m1
+> import registry m2
+> # a.py
+> import ba1
+> def helper(x): ... VERSION = "2.1" # b.py
+> import plugins b1
+> class Cache: ... # plugins.py
+> import registry p1
+> def title(s): ... p2
+> registry.HOOKS["title"] = title p4
+
+Figure 6. Shortening redundant import chains. Arrows de-note the import direction, i.e., the reverse of the control-dependence edges of Figure 2c. step. So import a becomes import plugins , and neither 
+
+a nor b is ever loaded. 
+
+## D Benchmark Provenance and Characteristics 
+
+Table 7 details the provenance, dependency counts, and sizes of the 31 benchmark applications introduced in Section 5.1. For each application, it reports the benchmark suite or pa-per that introduced it, the prior debloaters evaluated on it, the total size of the installed dependency tree, the number of package dependencies, the static count of import state-ments across those dependencies, and the number of modules loaded at runtime. 
+
+## E Measurements on the Local Machine 
+
+We repeat the campaign off the platform, inside the same Lambda base image on the machine of Section 5.1, with two CPUs and 3008 MB. Every application and tool runs 50 cold and 300 warm times. Table 8 reports the cold start, while Table 9 the warm invocations. PyXtrim takes 24.7% off the cold start at the median and 𝜆 -trim 8.2%, while FaaSLight adds 37.0% and SlimStart 3.0%. Warm invocations move as little as they do on AWS, by −1.2% for PyXtrim and +0.6% for 𝜆 -trim. Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Table 7. The 31 benchmark applications, their provenance, and their footprint. Introduced by is the suite or paper that first published the application; Used by lists the prior debloaters/frameworks evaluated on it. All 31 are evaluated by PyXtrim. 
+
+Size (MB) is the total size of the installed dependency tree, Deps is the count of package dependencies, Imports is the static number of import statements in that tree, and Live is the number of modules actually loaded at runtime. Suites: FaaSLight [38], FunctionBench [32], 𝜆 -trim [37], RainbowCake [60], SeBS [17], SlimStart [51]. 
+
+Application Introduced by Used by Size (MB) Deps Imports Live 110.dynamic-html SeBS SeBS 51.19 14 11,529 99 chdb-olap 𝜆 -trim 𝜆 -trim 632.53 15 11,252 82 compression SeBS RainbowCake, 𝜆 -trim 54.73 17 11,214 11 cve-bin-tool SlimStart SlimStart 277.48 94 50,389 1,393 dna-visualization SeBS SeBS, RainbowCake, 𝜆 -trim, SlimStart 284.14 51 29,243 226 encrypt 𝜆 -trim 𝜆 -trim 63.85 19 11,972 62 epub-pdf 𝜆 -trim 𝜆 -trim 95.04 27 16,169 645 face-detection FunctionBench FunctionBench 288.75 14 15,833 200 ffmpeg SeBS SeBS, RainbowCake, 𝜆 -trim 53.91 16 12,788 85 heart-failure SlimStart SlimStart 1,582.72 41 81,845 1,898 huggingface FaaSLight FaaSLight, 𝜆 -trim 5,037.33 66 115,541 2,095 igraph SeBS SeBS, RainbowCake, 𝜆 -trim 59.53 17 11,818 129 image-resize FaaSLight FaaSLight, 𝜆 -trim 49.39 15 11,287 342 jsym 𝜆 -trim 𝜆 -trim 124.26 16 45,898 602 lightgbm FaaSLight FaaSLight, 𝜆 -trim 304.09 19 27,877 380 lxml FaaSLight FaaSLight, 𝜆 -trim 64.99 23 11,842 292 markdown RainbowCake RainbowCake, 𝜆 -trim 50.84 15 11,363 66 ocrmypdf SlimStart SlimStart 191.65 45 28,380 865 pandas 𝜆 -trim 𝜆 -trim 191.57 20 33,721 543 qiskit-nature 𝜆 -trim 𝜆 -trim 698.62 33 77,797 2,244 resnet SeBS SeBS, RainbowCake, 𝜆 -trim 4,892.75 46 83,675 1,999 rnn-generate FunctionBench FunctionBench 4,902.96 42 88,857 1,064 scikit FaaSLight FaaSLight, 𝜆 -trim 409.65 22 37,710 1,047 sensor-telemetry SlimStart SlimStart 416.33 35 58,231 1,048 sentiment-gzip 𝜆 -trim 𝜆 -trim 410.29 23 37,726 980 shapely-numpy 𝜆 -trim 𝜆 -trim 127.08 16 16,915 169 skimage FaaSLight FaaSLight, 𝜆 -trim 448.17 33 34,204 950 spacy 𝜆 -trim 𝜆 -trim 231.56 58 29,425 906 tensorflow FaaSLight FaaSLight, 𝜆 -trim 2,051.63 65 64,142 2,906 textblob RainbowCake RainbowCake, 𝜆 -trim 74.45 28 16,434 431 wine FaaSLight FaaSLight, 𝜆 -trim 422.42 65 55,520 1,598 Alexopoulos et al. 
+
+Table 8. Cold start on the local machine, the module-level code plus the handler, over 50 runs of each application and tool. The first column is the median of the unmodified appli-cation and the rest the change against it. A † marks a change that is not statistically significant. 
+
+original change (%) Application (ms) PyXtrim 𝜆 -trim FaaSL. SlimS. 
+
+huggingface 7,752 −17 .6 −8.2 n/a n/a 
+
+ocrmypdf 6,738 −3.7 +1.0† n/a n/a 
+
+resnet 6,014 −18 .4 n/a n/a n/a 
+
+ffmpeg 3,606 −3.9† −0.5† −7.8 +9.3heart-failure 3,356 −24 .7 n/a n/a n/a 
+
+tensorflow 3,324 −25 .2 −18 .7 n/a n/a 
+
+rnn-generate 2,443 −26 .4 −36 .6 n/a n/a 
+
+qiskit-nature 2,288 −26 .6 −13 .6 n/a n/a 
+
+wine 2,283 −32 .4 −11 .4 n/a n/a 
+
+spacy 1,772 −23 .5 −14 .3 n/a n/a 
+
+scikit 1,690 −25 .8 −1.2† n/a n/a 
+
+sentiment-gzip 1,652 −26 .8 −1.0† n/a n/a 
+
+sensor-telemetry 1,645 −26 .2 n/a n/a n/a 
+
+skimage 1,474 −25 .1 −18 .8 n/a n/a 
+
+cve-bin-tool 1,187 −22 .9 −19 .1 n/a n/a 
+
+chdb-olap 952 −11 .5† −7.2† −8.0† −17 .4jsym 714 −28 .0 −5.2 n/a n/a 
+
+face-detection 707 −2.5† −2.3† +107 .4 n/a 
+
+pandas 645 −18 .6 −8.3 n/a n/a 
+
+epub-pdf 559 −33 .9 −15 .3 n/a n/a 
+
+lightgbm 524 −29 .0 −30 .9 n/a n/a 
+
+lxml 463 −7.1 −6.7 n/a +0.8†
+
+image-resize 436 −26 .9 −7.5 n/a n/a 
+
+textblob 418 −29 .3 −13 .5 n/a n/a 
+
+dna-visualization 335 −26 .1 −25 .2 +33 .1 n/a 
+
+shapely-numpy 291 −12 .4 −6.7 +40 .9 n/a 
+
+110.dynamic-html 89.4 −46 .1 −41 .4 +21 .7 n/a 
+
+igraph 89.0 −16 .8 −16 .0 +57 .0 +3.0†
+
+markdown 70.2 −8.2† −8.0 +463 .7 +4.7†
+
+encrypt 46.0 −8.9† +1.4† +43 .3 +5.7†
+
+compression 31.9 +0.5† +5.6† +27 .7 −0.8†
+
+Median −24 .7 −8.2 +37 .0 +3.0
+
+applications 31 28 10 7
+
+Table 9. Warm invocations on the local machine, over 300 runs of each application and tool. The first column is the median handler time of the unmodified application and the rest the change against it. A † marks a change that is not statistically significant. 
+
+original change (%) Application (ms) PyXtrim 𝜆 -trim FaaSL. SlimS. 
+
+ocrmypdf 5,940 −1.5 −1.4 n/a n/a 
+
+ffmpeg 3,407 −1.3† +1.4† −1.8† +8.3huggingface 2,299 −4.3 −4.3 n/a n/a 
+
+resnet 1,094 −16 .9 n/a n/a n/a 
+
+heart-failure 1,087 −3.5 n/a n/a n/a 
+
+qiskit-nature 416 −2.3† −1.1† n/a n/a 
+
+lxml 248 −0.2† −0.0† n/a +0.5†
+
+skimage 237 +0.0† −1.6 n/a n/a 
+
+sensor-telemetry 170 +0.9† n/a n/a n/a 
+
+face-detection 117 −2.8 −0.7† −2.4 n/a 
+
+cve-bin-tool 112 −3.4 +20 .3 n/a n/a 
+
+rnn-generate 101 −1.0 +0.1† n/a n/a 
+
+image-resize 56.8 +5.0 +2.4 n/a n/a 
+
+epub-pdf 55.5 +12 .1 +4.7† n/a n/a 
+
+chdb-olap 42.4 −0.6† −1.2† −1.3† −7.1pandas 37.7 −8.8 +1.1 n/a n/a 
+
+wine 18.4 −3.2 −0.7† n/a n/a 
+
+markdown 17.9 +4.5 +5.5 +1681 .2 +5.0jsym 11.0 −1.9 +2.0 n/a n/a 
+
+lightgbm 7.0 +9.1† +7.7† n/a n/a 
+
+igraph 6.5 +2.3† +2.5† +16 .0† +6.3†
+
+compression 5.9 +0.6† −2.7 +66 .4 +3.9spacy 5.7 −3.5 +3.1 n/a n/a 
+
+dna-visualization 2.8 +7.9 −0.9† −3.9 n/a 
+
+textblob 2.6 −1.2† +1.0† n/a n/a 
+
+110.dynamic-html 1.4 +1.0† −1.7 +158 .6 n/a 
+
+tensorflow 0.4 −5.1 +2.9† n/a n/a 
+
+sentiment-gzip 0.3 +1.1 +0.0† n/a n/a 
+
+shapely-numpy 0.1 +1.1† +5.0 +1809 .6 n/a 
+
+scikit 0.1 −3.9 +1.9† n/a n/a 
+
+encrypt 0.0 −9.6 +0.0† +1159 .6 +15 .5
+
+Median −1.2 +0.6 +41 .2 +5.0
+
+applications 31 28 10 7
+
+## F Results for FaaSLight and SlimStart 
+
+Table 10 reports FaaSLight and SlimStart on AWS Lambda, on the 11 applications where either of them produced an arti-fact, 10 for FaaSLight and 7 for SlimStart (Section 5.2). This subset is the only ground on which the two can be measured at all, since neither handles the remaining 20 applications. We omit their per-application comparison against PyXtrim and 
+
+𝜆 -trim, which Table 2 already gives, and report here only the medians the four tools reach on this subset. PyXtrim takes 5.4% off the cold start and 𝜆 -trim 4.1%, against an increase of 16.5% under FaaSLight and 1.3% under SlimStart. For initialization the four medians are −11 .1%, −10 .4%, +14 .4% and +1.9%, and for peak memory −4.2%, −2.3%, +2.2% and 
+
++0.0%. Nine of the 11 are among the twelve cheapest ap-plications of the dataset by unmodified cold start, which is why PyXtrim’s median on the subset is well below the 21.7% it reaches over all 31 applications (Section 5.3). Section 2 explains why FaaSLight is not beneficial. Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing 
+
+Table 10. FaaSLight and SlimStart on AWS Lambda, on the 11 applications where either of them produced an artifact. The first column of each group is the median value of the unmodified application, and the tool columns give the change against it, where a negative change is faster or smaller. A change marked with † is not statistically significant, and for peak memory not above the 2 MB reporting step. n/a marks an application for which the tool produced no artifact. 
+
+Cold start (ms) Initialization (ms) Peak memory (MB) Application original FaaSLight SlimStart original FaaSLight SlimStart original FaaSLight SlimStart ffmpeg 2,546 +3.2% +0.8% † 205 +9.2% +7.6% 291 +0.7% +0.0% †
+
+chdb-olap 1,170 +1.5% −2.2% † 1,141 +1.6% −2.3% † 304 +0.3% † +0.0% †
+
+lxml 589 n/a +2.8% † 356 n/a +1.9% † 71 n/a +0.0% †
+
+face-detection 536 +105 .8% n/a 387 +147 .6% n/a 97 +3.1% n/a 
+
+dna-visualization 370 +23 .8% n/a 352 +25 .0% n/a 68 +4.4% n/a 
+
+shapely-numpy 305 +30 .8% n/a 301 +30 .4% n/a 61 +4.9% n/a 
+
+110.dynamic-html 221 +17 .5% n/a 217 +16 .5% n/a 50 +2.0% † n/a 
+
+igraph 209 +15 .5% +0.3% † 205 +15 .9% +0.4% † 47 +2.1% † +0.0% †
+
+markdown 176 +144 .5% +2.2% † 155 +12 .9% +3.0% † 40 +5.0% +0.0% †
+
+encrypt 174 +8.2% +1.3% † 160 +0.4% † −15 .5% 46 +2.2% † +0.0% †
+
+compression 164 +3.3% +4.8% 153 −3.1% +4.7% 43 +0.0% † +0.0% †
+
+Median +16 .5% +1.3% +14 .4% +1.9% +2.2% +0.0%

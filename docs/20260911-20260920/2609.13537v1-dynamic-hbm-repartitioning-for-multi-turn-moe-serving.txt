@@ -1,0 +1,563 @@
+Title: Dynamic HBM Repartitioning for Multi-Turn MoE Serving
+
+URL Source: https://arxiv.org/pdf/2609.13537v1
+
+Published Time: Tue, 15 Sep 2026 00:19:01 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Dynamic HBM Repartitioning for Multi-Turn MoE Serving 
+
+Jinpyo Kim 
+
+UC San Diego jik066@ucsd.edu 
+
+Mingi Kwon 
+
+UC San Diego mik090@ucsd.edu 
+
+Younghoon Min 
+
+SK hynix younghoon.min@sk.com 
+
+Jongryool Kim 
+
+SK hynix jongryool.kim@sk.com 
+
+Jishen Zhao 
+
+UC San Diego jzhao@ucsd.edu 
+
+Abstract —Long-running multi-turn requests accumulate reusable key-value (KV) state. Once this state exceeds a fixed GPU KV-cache allocation, serving systems evict reusable prefixes, repeat prefill work, and may preempt requests. This pressure is particularly acute for Mixture-of-Experts (MoE) models: their expert weights occupy most GPU high-bandwidth memory (HBM), even though each token activates only a sparse subset of experts. A static boundary between weights and the KV cache prevents serving systems from using expert memory to preserve reusable state as conversations grow. We present VAMP, an MoE serving framework that changes this HBM boundary at runtime. When a KV allocation cannot be satisfied, VAMP compares the estimated future work of three alternatives: staging expert weights from host memory, evicting cached prefixes that may require re-prefill, or preempting and rescheduling requests. It then converts a bounded expert-weight region into KV-cache capacity when that action has the lowest estimated penalty. CUDA Virtual Memory Management page remapping performs this conversion without copying resident KV data. We implement VAMP in the vLLM serving engine and evaluate Qwen3-Next-80B on recorded and controlled multi-turn workloads. Across five replays of a recorded 2,103-turn SWE-bench agent workload, VAMP with a 15% maximum expert-offloading ratio reduces time-to-first-token (TTFT) p90 from 26.1 s to 1.10 s (23.6 ×)and increases request throughput by 20.7% relative to unmodified vLLM, while increasing time per output token (TPOT) by 31.1%. 
+
+I. I NTRODUCTION 
+
+Large language models (LLMs) are now deployed at scale across a growing range of applications, from code generation to multi-turn agentic tasks, making efficient GPU memory management a central challenge in production serving. Modern LLM serving systems process requests by batching multiple inputs together to sustain high throughput, while retaining key-value (KV) caches to avoid recomputing previously processed tokens. Both strategies impose heavy pressure on GPU high-bandwidth memory (HBM): model weights must remain resident while the KV-cache footprint grows linearly with batch size and context length, making GPU memory capacity the primary bottleneck in practical serving deployments. Existing systems typically treat model placement and KV-cache management as separate decisions. For instance, NVIDIA H100 94 GiB   
+
+> Expert weights 72.0 GiB
+> Dense + runtime 13.98 GiB KV-cache pool 8.02 GiB
+> Accumulated conversation context
+> KV-cache capacity boundary
+> Prefix-cache hit rate TTFT
+> (a) Per-GPU HBM (H100, TP2) (b) Prefix-cache cliff
+
+Fig. 1. HBM pressure in MoE serving. (a) The per-GPU HBM quantities reported in Table I for the H100-PCIe TP2 configuration: expert weights occupy 72.0 GiB and the baseline KV-cache pool 8.02 GiB of the 94 GiB device capacity; the Dense + runtime region (non-expert model state, runtime overhead, and reserved headroom) is the derived, unitemized remainder. (b) Schematic illustration of the expected prefix-cache cliff: as conversation context accumulates across turns and its reusable prefix-cache footprint exceeds the fixed KV-cache capacity, cache eviction reduces the prefix-cache hit rate and sharply increases TTFT. 
+
+vLLM [14] configures model-weight placement at engine initialization, while allocating KV-cache blocks at runtime from a preallocated KV-cache pool. Implicit in this separation are two assumptions: (1) the model-weight footprint occupies only a modest fraction of HBM, leaving ample room for KV cache, and (2) the KV-cache requirements remain strictly within the limits of the preallocated pool. These assumptions generally hold in dense-model serving scenarios with short context lengths, and static memory partitioning is a sufficient strategy. However, recent developments undermine both assumptions. Mixture-of-Experts (MoE) architectures invalidate the first assumption by structurally decoupling model capacity from per-token compute cost: because only a sparse subset of experts activates per token, adding more experts increases total parameter count without increasing inference FLOPs [7]. This creates a strong incentive to scale total model size aggressively – quality improves with more experts while inference compute stays nearly constant [1]. The result is an explosive growth in total parameter counts across successive MoE generations: 1arXiv:2609.13537v1 [cs.DC] 11 Sep 2026 Mixtral-8x7B reaches 47B total parameters with only ∼13B active per token [13]; DeepSeek-V3 scales to 671B total with 37B active, an 18 × ratio [6]; our target model Qwen3-Next-80B carries 80B total parameters while activating only 3B per token [25]. Unlike dense models, where weight memory scales modestly with quality, MoE weight memory now dominates HBM and will continue to grow as models scale. The second assumption is invalidated in multi-turn agentic settings, where the KV-cache footprint expands continuously as agents accumulate context over successive turns, often keeping KV-cache utilization near saturation (80% to 100%) and causing repeated evictions and re-prefills that collapse cache efficiency well before memory is exhausted [4]. Production traces confirm the scale of this growth: agentic trajectories average 157 turns and 32.7k tokens of context, with some runs exceeding 1M tokens [27]. Ultimately, when MoE models are used for multi-turn agentic tasks, both assumptions no longer hold. Under sustained memory pressure, KV-cache pool overflow triggers a cascade of evictions and request preemptions, forcing repeated recomputation and rescheduling that further compound memory pressure. Such a collapse is not gradual, but abrupt and threshold-driven. As illustrated in Figure 1(b), once the reusable prefix-cache footprint outgrows the KV-cache capacity, the prefix-cache hit rate collapses and the 99th-percentile (p99) time-to-first-token (TTFT) rises sharply. We call this phenomenon the prefix-cache cliff . Static HBM partitioning causes the cliff to occur earlier because memory assigned to expert weights cannot be reallocated to the KV cache. Moving the prefix-cache cliff to higher KV-cache demand extends the operating range over which MoE serving can sustain low latency. This shift requires dynamically reallocating HBM from the expert-weight region to the KV cache. In MoE serving, expert weights consume a substantial portion of HBM, even though any single token activates only a small fraction of them. Offloaded expert weights can instead be kept in host memory and staged before execution regardless of which experts are activated, freeing the corresponding HBM pages for KV-cache allocation. Yet, enabling such cross-pool reallocation at runtime presents two fundamental challenges. First , the future cost of each allocation choice is unknown at decision time. Expert offloading incurs repeated weight transfers during subsequent execution, so its total cost depends on how much work remains while the weights stay offloaded. Evicting a KV-cache block incurs a re-prefill penalty, whose magnitude is contingent upon whether future requests would have benefited from its reuse – a factor determined by workload-level prefix sharing [31]. Without forward-looking estimates, the system cannot distinguish a low-cost eviction from a prohibitively expensive one. Second ,existing serving frameworks enforce a static memory partition between model weights and the KV-cache pool, lacking the mechanisms for dynamic boundary adjustment at runtime. Under memory pressure, the current schedulers are restricted to either evicting cached KV blocks or preempting running requests [14], even when expert offloading would be less costly than either alternative. While prior offloading strategies [2], [13] migrate experts to host CPU memory to accommodate large models, they do not repurpose the reclaimed HBM for KV cache or dynamically coordinate between these two memory pools. To address these challenges, we propose Value-Aware Memory Partitioning (VAMP), an LLM serving framework that mitigates the prefix-cache cliff by unifying GPU memory (which is HBM in our setting) across expert weights and the KV cache with dynamic management. Instead of static memory partitioning, VAMP employs a dynamic allocation policy guided by a three-way cost model . This cost model compares the estimated cost of each action at allocation time: weight transfer for expert offloading, re-prefill for KV-cache eviction, and rescheduling for request preemption. In order to support the VAMP design without incurring data copying overhead during repartitioning, we employ CUDA Virtual Memory Management (VMM) [21] to remap physical HBM pages at runtime between the expert-weight region and the KV-cache region at page granularity, enabling fine-grained cross-pool reallocation. Furthermore, VAMP overlaps the transfers of offloaded expert weights with computation through double buffering, reducing the exposed transfer latency. In particular, this paper makes the following contributions: 
+
+• A Three-Way Cost Model: We develop an analytical model that estimates the penalties for (i) expert offloading, (ii) KV-cache eviction, and (iii) request preemption. By integrating prefix-cache hit rates and block recency, the model selects the plan with the lowest estimated cost for each allocation. 
+
+• The VAMP Framework: We propose VAMP, a serving framework that dissolves the static boundaries between model weights and the KV cache. VAMP manages GPU HBM as a shared resource, reallocating pages from the expert-weight region to the KV-cache pool as demand grows. On our H100 testbed, VAMP expands the per-GPU KV-cache pool by up to 2.7 ×.
+
+• Comprehensive Experimental Analysis: We integrate VAMP into the vLLM serving engine and comprehensively analyze the performance of VAMP compared with vLLM on Qwen3-Next-80B under various multi-turn workloads. On a 2,103-turn recorded-trace replay, VAMP reduces TTFT p90 from 26.1 s to 1.10 s (23.6 ×) and increases request throughput by 20.7% relative to unmodified vLLM, while increasing time per output token (TPOT) by 31.1%. II. B ACKGROUND 
+
+A. KV Cache 
+
+LLMs generate tokens autoregressively, computing attention over all prior tokens at each step. To avoid recomputing key and value projections, they are cached in GPU memory as the KV cache , which grows linearly with context length and batch size: a single 10K-token request on Qwen3-8B occupies roughly 1.4 GiB; at typical serving concurrency with multi-turn workloads (e.g., SWE-bench [12]), total KV-cache footprint can easily reach tens of GiB. 2Prefix caching retains KV cache after a request completes so future requests sharing a common prefix (e.g., a system prompt) can skip recomputation. Under memory pressure, cached blocks are evicted; any evicted block later needed triggers a re-prefill , reprocessing the corresponding tokens from scratch at a significant latency cost. Figure 3 illustrates this dynamic across a multi-turn agentic session. Because each turn extends the previous context, the blocks cached during turns 1–3 are reused verbatim by every subsequent turn, so the prefill cost of a turn is limited to its newly appended tokens. The same growth, however, eventually exhausts the KV-cache pool: in turn 4, the allocator evicts the oldest blocks to admit the new request, and the evicted blocks are needed again by the next turn. The result is a cache miss over the shared prefix, a re-prefill of tokens that were already processed, and a TTFT spike—the eviction decision is made without regard to how likely, or how expensive, the evicted blocks are to be reused. 
+
+B. Mixture-of-Experts Architecture 
+
+Mixture-of-Experts (MoE) models replace the dense feed-forward sublayer in each Transformer block with N expert feed-forward networks (FFNs) and a learned router. For each token, the router selects the top-k experts (with k = 10 in our setting) to process that token; the remaining N − k experts are not activated. This conditional computation enables total parameter counts to scale to hundreds of billions while keeping the per-token FLOPs comparable to a much smaller dense model. Although each token activates only k experts, the model contains weights for all N experts, and different tokens may select different subsets. Consequently, the total expert-weight footprint can greatly exceed the per-token active footprint, placing substantial pressure on GPU HBM. 
+
+C. Memory Offloading 
+
+When GPU memory is insufficient to hold all required data, systems offload objects to slower memory tiers, typically CPU DRAM. 
+
+Weight offloading moves model parameters (e.g., expert FFN weights) from GPU to CPU. When an offloaded weight is needed, it must be transferred back before the corresponding computation can proceed. The transfer latency is bounded and one-time per fetch, and can be hidden by overlapping transfers with computation on resident weights. 
+
+KV-cache offloading moves KV-cache blocks from GPU HBM to CPU DRAM or storage, preserving them for reuse across requests [10], [19], [24]. When the offloaded blocks are needed again, the system restores them to GPU memory instead of recomputing the corresponding tokens; both offloading and restoring the blocks incur transfer overhead. III. M EMORY MANAGEMENT CHALLENGES 
+
+Existing LLM serving systems draw a hard boundary between memory allocated to model weights and the KV-cache pool, managing each independently under a fixed budget. This design relies on two assumptions that generally held for early dense models: loading the model leaves enough HBM for the KV cache, and KV-cache demand stays bounded within the preallocated pool. Neither assumption holds for modern MoE models serving multi-turn agentic workloads. MoE architectures cause expert weights to dominate HBM, while multi-turn agentic workloads drive KV-cache demand far beyond what a statically sized pool can absorb. Together, these trends motivate cross-pool reallocation as KV-cache demand grows. For example, a system can offload a subset of expert weights and remap the corresponding HBM pages into the KV-cache pool. Supporting such reallocation raises two challenges. First, existing serving engines provide no runtime mechanism for reallocating capacity across fixed pool boundaries (§III-B). Second, even with such a mechanism, the future cost of each allocation choice is unknown at decision time, so the system cannot determine which data is most valuable to retain in HBM (§III-C). 
+
+A. Assumptions Invalidated by MoE Workloads 
+
+Assumption 1: A substantial fraction of HBM is available for the KV cache. Dense models validated this assumption in practice. A single H100 provides 94 GiB of HBM. Llama-3.1-8B occupies about 15 GiB in BF16, roughly 16% of the device. Even Llama-3.1-70B, spread across 2 ×H100 under tensor parallelism (TP2), occupies about 130 GiB of the 188 GiB aggregate, roughly 69%. In both cases, a substantial fraction of HBM remains available beyond the model weights. Mixture-of-Experts architectures break this property struc-turally. MoE models scale capacity by maintaining many expert feed-forward networks and routing each token to a small subset at inference time, as illustrated in Figure 2(a). The result is a large and growing gap between total parameter count and active parameter count. Mixtral-8x7B has 47B total parameters while activating only ∼13B per token, a 3.6 × disparity [11]. DeepSeek-V3 widens this to 671B total versus 37B active, an 18 × ratio [6]. On our target model, Qwen3-Next-80B holds 80B parameters while activating only 3B per token [25]. The consequence is that weight memory now dominates HBM. Serving Qwen3-Next-80B on 2 ×H100 under TP2, expert weights alone consume 72.0 GiB of the 94 GiB available per GPU; after accounting for the remaining model state, runtime overhead, and reserved headroom, the baseline KV-cache pool is only 8.02 GiB per GPU (Table I; Figure 1(a)). MoE scaling increases the total expert count while keeping the per-token active count roughly constant [6], [25], so expert weights occupy a growing share of HBM as models scale. 
+
+Assumption 2: KV-cache requirements remain within a preallocated pool. This assumption was usually sufficient for the single-turn request patterns targeted by existing serving systems. Each request carried an independent context of a few hundred to a few thousand tokens; the KV-cache pool was sized once at initialization, and demand rarely exceeded it. When eviction was necessary, displacing one or two least-recently-used (LRU) blocks restored headroom without materially affecting throughput. 3GPU HBM            
+
+> Dense/
+> Shared
+> Expert Weights KV Cache
+> Active Inactive
+> Active
+> Cached
+> Free
+> New Context Reusable Prefix
+> (a) Static HBM Partition (b) Multi-Turn KV Cache Growth
+> T1 T2 T3 T4 T5
+> Free Block
+> Queue
+> (c) Cached Block Eviction ? TTFT Spike
+> Cached (prefix) Uncached
+> X
+> X
+> X
+> prefix cache miss
+> Evicted Fig. 2. Limitations of existing memory management for multi-turn MoE serving. (a) Static partitioning keeps inactive expert memory from the KV-cache pool. (b) KV-cache footprint and reusable prefix both grow across turns. (c) Eviction is cost-blind.
+
+Agentic workloads violate this assumption structurally. In multi-turn settings such as code assistants, tool-use agents, and long-horizon planners, the session context is cumulative: each turn appends the prior turn’s output, tool results, and observations before the next prefill, so both KV-cache footprint and reusable prefix length grow across turns, as shown in Figure 2(b). Under sustained pressure, this behavior becomes self-reinforcing: as the prefix-cache hit rate falls, large re-prefills inflate TTFT and consume serving capacity, sustaining memory pressure and further preemptions (§VI-B). Overflow under these conditions is qualitatively different from the occasional eviction that a static design handles gracefully. Once the pool saturates, every new block allocated displaces an existing one. Prefix-cache hit rate collapses as blocks evicted from one turn are immediately needed by the next. This is not a smooth performance degradation; it is a threshold effect. As Figure 1(b) illustrates, TTFT remains stable until the pool saturates and then rises sharply. We call this the 
+
+prefix-cache cliff .
+
+a) Both assumptions fail for MoE models serving multi-turn agentic workloads: MoE models serving multi-turn agentic workloads violate both assumptions at once. Expert weights claim most of HBM, leaving little room for KV cache, while growing session context continuously increases demand until the pool overflows. The static partition provides no escape: the scheduler cannot borrow weight memory to expand KV capacity, and its only available tools, LRU KV-cache eviction and request preemption, reduce prefix-cache coverage precisely when prefix reuse is highest, triggering an eviction–recompute cascade. 
+
+B. Issues with Static Memory Partitioning 
+
+Existing serving engines partition HBM into two disjoint regions at startup: a weight pool sized to hold the full model, and a KV-cache pool sized from whatever HBM remains. Neither pool can grow at the expense of the other at runtime. In vLLM [14], the KV-cache pool is preallocated as a fixed block at engine initialization. Its size is determined once, based on the HBM remaining after model weights are loaded, and never changes during serving. Under memory pressure, the scheduler operates entirely within this pool: it reclaims space by evicting cached blocks in LRU order, or as a last resort preempts running requests. There is no code path by which the scheduler can reclaim a byte from the weight region and redirect it to KV cache. This static partitioning is wasteful for MoE models. Although expert activation is sparse at inference time, the serving system still reserves HBM for the full expert weight set. A natural pressure-relief valve is to offload a subset of expert weights to CPU DRAM and immediately repurpose the freed HBM as KV-cache blocks. Prior works such as Fiddler [13] and MoE-Lightning [2] do offload expert weights to CPU DRAM, but neither redirects the freed HBM to the KV-cache pool. When an expert is offloaded, the released memory either remains idle or is reclaimed by the weight region for the next expert to be paged in. The two pools remain disjoint: freeing weight memory does not expand KV-cache capacity. Oneiros [16] is the closest prior work in its use of virtual-memory remapping for cross-pool reallocation: it remaps physical GPU memory pages from model parameters to the KV-cache pool using virtual memory primitives. However, Oneiros is designed for multi-tenant dense-model serving: it reclaims memory from other tenants’ idle model replicas, not from the active model’s own expert weights. It does not address MoE architectures, and its remapping mechanism requires a dormant model instance on the same GPU as the source of reclaimable pages. In our setting, there is only one model and there are no idle replicas; the reclaimable memory must come from the serving model’s own expert weight pool, a case Oneiros does not handle. The problem intensifies under multi-turn agentic workloads, where KV-cache footprint accumulates steadily across turns [4]. Once the KV-cache pool can no longer satisfy new allocations, the only available actions are cached-block eviction and request preemption. Under static partitioning, neither action can expand KV capacity. Instead, both reduce prefix-cache coverage precisely when prefix reuse is highest. Concretely, the early turns of a session accumulate cached blocks that 4You are a                                                  
+
+> helpful asst.
+> User: Hello!
+> How are you?
+> Asst: Hi!
+> I'm doing well.
+> Turn 1
+> KV cache
+> system KV user T1 KV asst T1 KV
+> You are a
+> helpful asst.
+> User: Hello!
+> How are you?
+> Asst: Hi!
+> I'm doing well.
+> User: What
+> can you do?
+> Asst: I can answer
+> questions...
+> system KV user T1 KV asst T1 KV user T2 KV asst T2 KV
+> You are a
+> helpful asst.
+> User: Hello!
+> How are you?
+> Asst: Hi!
+> I'm doing well.
+> User: What
+> can you do?
+> Asst: I can answer
+> questions...
+> User: write a short
+> story about space.
+> Turn 3
+> system KV user T1 KV asst T1 KV
+> Asst: [long
+> story KV]
+> user T2 KV asst T2 KV user T3 KV asst T3 KV
+> You are a
+> helpful asst.
+> User: Hello!
+> How are you?
+> Asst: Hi!
+> I'm doing well.
+> User: What
+> can you do?
+> Asst: I can answer
+> questions...
+> User: write a short
+> story about space.
+> Turn 4
+> Asst: [long
+> story KV]
+> User: T4
+> msg
+> Turn 2
+> ?hit ?hit ?hit new new
+> ?????new new
+> miss miss ?????new
+> evicted evicted
+> re-prefill needed for evicted blocks ? TTFT spike
+> System prompt User message Assistant reply Evict block
+> KV cache resued (no recompute)
+> Cached prefix from prior turns.
+> System User T1 Asst T1 User T2 Asst T2 User T3 Asst T3 User T4
+> system KV user T1 KV asst T1 KV user T2 KV asst T2 KV user T3 KV asst T3 KV
+
+X X user T4 KV Fig. 3. KV cache reuse and eviction across a multi-turn agentic session. Turns 1–3 accumulate cached blocks that are reused (green arrows, no recompute) on subsequent turns. In Turn 4, two early blocks are evicted to free space for the new request; those blocks become cache misses, forcing re-prefill and causing a TTFT spike. 
+
+later turns reuse without recomputation; once the pool is full, admitting a new turn evicts exactly those blocks, so the next turn that extends the same prefix must recompute them and the recomputed blocks consume the space that was just freed. Breaking this cycle requires a shared pool that expands KV-cache capacity with HBM reclaimed from expert weights when expert offloading has the lowest estimated future cost. 
+
+C. Issues with Cost-blind Evictions 
+
+Even with cross-pool reallocation, a second challenge remains: the system must decide which data to evict, and each candidate action carries a future penalty whose magnitude is unknown at decision time. Consider evicting a cached KV block. The penalty is a re-prefill: if a future request shares the evicted prefix, those tokens must be recomputed from scratch at additional TTFT cost proportional to the number of evicted tokens. As shown in Figure 2(c), when a running request requires a new KV-cache block, the allocator may treat cached blocks as eviction candidates rather than prioritizing free blocks. Whether this re-prefill is triggered depends entirely on whether a future request will match the evicted prefix, a quantity that depends on the workload’s prefix-sharing pattern [31]. In a multi-turn session where later turns repeatedly access accumulated context, evicting a cached block from the session history means paying re-prefill cost on every subsequent turn that builds on that prefix. In a workload with low prefix reuse, the same eviction costs nothing. Expert offloading has a different future cost. While expert weights remain offloaded, executing their layers requires repeated host-to-device transfers. The cost of each transfer is bounded, but the total cost depends on how much execution remains. The scheduler must therefore estimate, at allocation time, the span over which this transfer cost will recur. The consequence is that without forward-looking cost esti-mates, the system cannot make value-aware eviction decisions. The system has no way to distinguish a cached block that will prevent ten re-prefills from one that will never be reused again, nor an offloading action whose transfer cost recurs over only a few remaining steps from one whose cost persists across many. The inability to estimate future penalty means the system cannot compare the cost of evicting expert weights against the cost of evicting KV-cache blocks, which is a prerequisite for any cross-pool reallocation policy. IV. VAMP D ESIGN 
+
+A. Overview 
+
+VAMP combines three components, shown in Figure 4: value-aware action selection (§IV-B), a dynamic resource orchestrator that repartitions HBM between expert weights and the KV cache (§IV-C), and batching-aware expert offloading (§IV-D). Rather than preserving a fixed partition, VAMP treats HBM as a shared pool. When enough KV-cache blocks are free, VAMP allocates them directly. Otherwise it estimates the future penalties of expert offloading, prefix-cache eviction, 5Active     
+
+> KV
+> Prefix
+> Cache
+> Free
+> KV Cache Pool
+> Bank 0
+> Staging
+> Buffer
+> Bank 1
+> Expert Weight Pool
+> GPU HBM
+> resident offloaded
+> Host Memory (CPU DRAM)
+> Evictable Expert Weights
+> Scheduler
+> Value-Aware Decision
+> Expert offload Cache eviction Request preemption
+> Unified Resource Pool Fig. 4. Overview of the VAMP architecture.
+
+and request preemption, and selects the action with the lowest estimate. 
+
+B. Value-Aware Decision 
+
+VAMP compares three actions by their estimated future penalties: (1) evicting prefix-cache blocks, (2) offloading a por-tion of the MoE expert weights to host DRAM and reallocating the freed HBM to the KV cache, and (3) preempting an active request to reclaim KV-cache space. The relative costs of these actions depend on the serving condition. When observed prefix reuse is high, expert offloading can preserve cached prefixes that are likely to be reused, avoiding the re-prefill work that their eviction would cause. When reuse is low, prefix-cache eviction is less costly because the evicted prefix blocks are unlikely to be reused. VAMP estimates each action’s future cost from the current cache and request state, without predicting future expert activations or request arrivals. We define these costs below. 
+
+a) Cached-block eviction cost ( Cc): The cost of evicting prefix-cached blocks depends on whether future requests would have reused them. VAMP considers cached blocks in LRU order and estimates an effective reuse probability using the sliding-window prefix-cache hit rate rhit over the most recent requests and the age of the LRU-front candidate: 
+
+peff = α · rhit 
+
+1 + age /τ , (1) where α scales the observed hit rate and τ controls how quickly the reuse estimate decreases with age. VAMP uses the age of the LRU-front candidate as a proxy for the reclaimed set. Under this model, the remaining candidates have reuse estimates no smaller than the front candidate’s, so the approximation tends to underestimate Cc rather than favor cache protection. Evicting the selected cached blocks discards the KV entries for their tokens. If later requests reuse the corresponding prefixes, those entries must be recomputed during prefill. VAMP therefore estimates the eviction cost as 
+
+Cc = peff · (ntok · tprefill + toverhead ) , (2) where ntok is the number of tokens held by the blocks reclaimed to cover the allocation gap, tprefill is the configured per-token re-prefill coefficient, and toverhead = tsched +tqueue covers scheduling and re-queueing overhead (configured values in §V). 
+
+b) Expert-offload cost ( Ce): Expert offloading creates repeated transfer overhead: while expert weights remain offloaded, each model step stages each layer’s offloaded region before that layer’s MoE execution, independently of the router’s selections (§IV-D). Under continuous batching, a model step may mix prefill and decode tokens. The cost model uses a decode-based accounting horizon w, reflecting that decode-dominated steps typically offer a shorter computation window for overlapping these transfers than prefill-heavy steps. Let ncand = g · ngroups denote the shard-equivalent size of the candidate expansion across layers, where ngroups is estimated from the current allocation gap and each group contains g shards (§IV-C). VAMP estimates the per-step cost as min( ncand , E ) · ceff , where E is the number of local expert shards per layer on each TP rank and ceff is a configured coefficient used to compare actions, not a measured transfer time (§V). The cap at E limits only the value used for action comparison; it does not bound the amount of weight data physically staged. VAMP accounts for this per-step cost over a span of w
+
+decode steps: 
+
+Ce(ncand ) = min( ncand , E ) · ceff · w. (3) Here, w is the smallest remaining decode budget among running requests, clamped to a configured maximum (§V). 
+
+c) Request preemption cost ( Cp): Preemption immedi-ately adds uncached capacity only through the victim’s last partially filled block. Its full blocks enter the cached queue at its most-recently-used end rather than the uncached pool, and are considered by Cc only if they later become eviction candidates. The estimated cost of one preemption is 
+
+C(1)  
+
+> p
+
+= tsched + tqueue + npartial · tprefill , (4) where npartial is the number of tokens in the victim’s last partially filled KV-cache block. If the victim’s computed tokens end exactly on a block boundary, preemption provides no uncached block and the request is not a candidate. Since one eligible preemption provides one uncached block, VAMP estimates the cost of covering a G-block shortfall as 
+
+Cp = C(1)  
+
+> p
+
+· G, (5) where G is the number of additional uncached KV-cache blocks required by the current allocation. Here, C(1)  
+
+> p
+
+is evaluated for the request that the scheduler would preempt next under its active scheduling policy. Scaling it by G uses this next-victim cost as the per-block estimate, putting preemption on the same 
+
+G-block basis as the other actions. 6d) Combined-action cost ( Cb): Expert expansion proceeds in fixed-size increments. When the required expansion is not an exact multiple of this increment, rounding it down leaves part of the allocation gap uncovered. VAMP therefore also considers combining the rounded-down expansion with cached-block eviction: 
+
+Cb = Cfloor  
+
+> e
+
++ Cremainder  
+
+> c
+
+, (6) where Cfloor  
+
+> e
+
+is the cost of the rounded-down expansion and 
+
+Cremainder  
+
+> c
+
+the eviction cost for the remaining gap. VAMP selects the lowest-cost feasible plan for covering the allocation gap: expert offloading ( Ce), cached-block eviction (Cc), request preemption ( Cp), or expansion combined with eviction ( Cb). If expert offloading has reached its limit, only 
+
+Cc and Cp remain. The controller evaluates these plans from the current cache and scheduler state using the configured coefficients in §V; 
+
+peff adjusts the eviction-cost estimate according to observed prefix reuse. In §VI-D, we trace the resulting cost estimates and decisions below and at the KV-cache capacity boundary. 
+
+C. Dynamic HBM Repartitioning 
+
+VAMP dynamically repartitions physical HBM pages be-tween the expert-weight region and the KV-cache pool. For each KV-cache allocation, the scheduler computes the number of additional uncached KV-cache blocks it requires and translates this gap into a target number of expert groups according to the system’s page geometry. An expert group is the minimum page-aligned remap unit. Its granularity is derived at initialization from the per-rank shard size and the CUDA VMM allocation granularity (§V). Grouping determines only which expert shards are remapped together; it does not change the experts selected by the router. When the cost model selects expert offloading to cover the allocation gap, VAMP uses CUDA VMM to unmap the physical pages backing the selected expert groups and remap them into the KV-cache pool. The expert tensors’ virtual address ranges remain reserved, so resident weights retain their original addresses while only the physical backing of the offloaded region is reassigned. 
+
+a) Offloading bound: On each TP rank and offload-eligible layer, VAMP offloads at most Ebuffer expert shards and keeps at least E − Ebuffer resident, where Ebuffer is the number of rank-local expert shards the staging buffer (§IV-D) can hold. The configured maximum offloading ratio VAMP-r (§VI-A) can tighten this limit further. Within each offload-eligible layer, VAMP keeps a low-index region of expert groups resident and offloads a contiguous high-index region. In the evaluated configuration, it moves the residency boundary uniformly across all eligible layers according to the current allocation gap and page geometry. 
+
+D. Batching-Aware Expert Offloading 
+
+Although each token selects only top-k experts, a single batched MoE-layer execution processes the routing decisions of all tokens scheduled in that model step. It may therefore require many more than k distinct experts. Fetching these experts individually after routing would make the MoE kernel wait for the transfers to complete. For each layer, VAMP instead loads the entire contiguous offloaded region into the staging buffer ahead of its MoE execution, regardless of which experts the batch activates. V. I MPLEMENTATION 
+
+vLLM Integration. We implement VAMP in the vLLM inference engine with approximately 7,100 lines of code. The implementation integrates value-aware action selection into the vLLM scheduler, implements the dynamic resource orchestrator using CUDA virtual memory management (VMM), and adds batching-aware expert offloading to the MoE execution path. We use PyTorch v2.9.1 and CUDA v12.8. 
+
+Cost-Model Parameters. The decision policy of §IV-B uses the following configured coefficients: α=0 .5 and τ =2 ,000 
+
+scheduler steps for the reuse estimate (Eq. 1); and tprefill =15 μsand tsched =500 μs for the re-prefill and scheduling overheads (Eqs. 2, 4). The preemption cost initially uses tqueue =1 ,000 μsand updates this estimate when a preemption-to-rescheduling delay is observed. The accounting span w in Eq. 3 is the minimum remaining decode budget among running requests, clamped to 1–64 decode steps. We fix the implementation coefficient creload =0 .63 ms in all experiments. With k=10 and E=512 rank-local expert shards per layer, this corresponds to ceff =12 .3 μs in Eq. 3. These values are configured action-comparison weights rather than measured transfer times, and runtime staging transfers the entire offloaded region regardless of the router’s realized selections. We set these coefficients once during development and fixed them across all reported workloads and both TP2 and TP4, without per-workload or per-platform retuning. 
+
+A. Implementation of Expert–KV Repartitioning 
+
+VAMP remaps physical HBM pages at expert-group gran-ularity. At initialization, the runtime forms each group from the smallest number of consecutive rank-local expert shards whose combined size is aligned to the CUDA VMM allocation granularity, allowing reclaimed pages to be reassigned directly to the KV-cache pool. For Qwen3-Next, each group occupies three 2-MiB pages (6 MiB): two 3-MiB shards under TP2 and four 1.5-MiB shards under TP4. In all experiments, the controller expands the KV-cache pool in increments of four such groups (§IV-B). Each TP rank computes how many KV-cache blocks it can add by offloading expert groups. The engine takes the minimum across ranks and instructs every rank to remap that common amount, keeping their KV-cache capacities consistent. The KV allocator inserts the reclaimed pages into its free-block pool, making them immediately available for subsequent allocation. The remapping primitive also supports the reverse operation, but the current controller does not invoke it to restore residency when KV-cache pressure subsides (§VII-C). 7Layer N          
+
+> Layer N+1
+> Layer N+2
+> Overlap window = MoE Kernel(i) + Dense(i+1) + Router(i+1)
+> MoE kernel Dense CUDA memcopy Router
+> RMD
+> MRDBuf 0
+> MRDBuf 1
+> Copy expert to buffer Fig. 5. Copy–compute overlap across three consecutive layers. The transfer for layer N+1 begins during layer N’s MoE kernel and overlaps the computation preceding layer N+1 ’s MoE kernel; any remaining transfer delays that kernel. TABLE I PLATFORM CONFIGURATIONS .
+
+H100-PCIe (TP=2) H200-NVL (TP=4) GPUs 2×H100 PCIe 4×H200 NVLink HBM per GPU 94 GiB 140 GiB Expert weights per GPU 72.0 GiB 36.0 GiB Max. batched requests 128 64 KV-cache pool per GPU 8.02 GiB 86.92 GiB Expert shards per group 2 4
+
+B. Implementation of Expert Offloading 
+
+Double-Buffered Staging As illustrated in Figure 5, VAMP maintains two staging buffers and alternates them across consecutive layers. While layer N is executing, the runtime asynchronously copies the offloaded weights of layer N + 1 
+
+into the next buffer on a dedicated copy stream. These copies overlap with the current layer’s MoE computation and the dense and router operations preceding the next layer’s MoE kernel. The next MoE kernel synchronizes only if its required transfer has not completed. Under TP2, VAMP starts the fused gate-and-up GEMM as soon as the corresponding weights have been copied while continuing to transfer the down-projection weights; under TP4, it waits for both weight components before starting the MoE computation. 
+
+Boundary-Based Weight Access and Pinned Host Copies 
+
+The evaluated configuration keeps the first expert layer fully resident because the cross-layer prefetch schedule has no preceding expert-layer computation with which to overlap its transfer. For each remaining layer, the residency boundary determines where the MoE kernel reads each expert: it reads lower-index experts from the resident weight tensor and higher-index experts from the staging buffer. At initialization, VAMP keeps the high-index expert weights that may be offloaded from each eligible layer in pinned host memory. Boundary changes determine which of these weights are staged without requiring host-side repacking. VI. E VALUATION 
+
+A. Experimental Setup 
+
+We evaluate how VAMP’s dynamic HBM repartitioning affects serving performance as KV-cache demand approaches         
+
+> TABLE II REPRESENTATIVE MEASURED KV-CACHE EXPANSIONS ON H100-PCI E
+> (PER GPU). R ECLAIMED IS EXPERT HBM CONVERTED TO KV-CACHE BACKING ;RATIOS ARE PHYSICAL POOL SIZES ,NOT TOKEN CAPACITIES .
+
+Config. Reclaimed Total KV pool KV pool / (GiB/GPU) (GiB/GPU) baseline vLLM — 8.0 1.00 ×
+
+VAMP-15 10.5 18.5 2.30 ×
+
+VAMP-20 13.8 21.8 2.71 ×
+
+and exceeds the baseline capacity. Across closed-loop SWE-agent executions, recorded-trace replays, and controlled multi-turn workloads, our experiments collectively examine tail TTFT, TPOT, KV-cache capacity boundaries, and the controller’s allocation-time decisions under different expert-offloading ratios. 
+
+a) Model and platforms: All experiments serve Qwen3-Next-80B-A3B-Instruct, a sparse-MoE model with 512 routed experts per layer (top-k=10 ) plus one shared expert across 48 layers, 16 query and 2 key/value heads, and a 256K-token native context. We evaluate on two platforms (Table I): a 2 ×H100 PCIe testbed, which provides a memory-constrained setting, and a 4 ×H200 NVLink testbed, which provides larger per-GPU HBM and a four-GPU tensor-parallel configuration. Both platforms use the same serving stack, vLLM 0.15.1 with prefix caching and chunked prefill enabled, to which VAMP is applied as a patch set. We refer to the unmodified configuration as the baseline. Unless otherwise noted, KV-cache pools are measured at engine start with gpu_memory_utilization =0 .90 .We use the two-GPU H100 platform as the primary en-vironment for repeated experiments under constrained KV-cache capacity. We use the four-GPU H200 platform for the controlled multi-turn sweep to evaluate whether VAMP remains effective with larger HBM, higher tensor parallelism, and a faster interconnect. 
+
+b) Mechanism configuration: VAMP supports both evalu-ated tensor-parallel configurations (TP=2 and TP=4). We denote by VAMP-r a configuration whose expert-offloading ratio is capped at r% per MoE layer on each GPU. Because offloading is demand-driven, the realized ratio may remain below this maximum. 
+
+c) Measured KV-cache expansion: Table II reports the HBM that VAMP reclaims from the expert-weight region on 
+
+H100-PCIe : VAMP-15 and VAMP-20 expand the 8.0 GiB baseline KV-cache pool to 18.5 and 21.8 GiB per GPU in our measurements. 
+
+d) Workloads: Table III summarizes each workload’s role and run count. The SWE-agent workloads and the LMCache trace run on H100-PCIe ; the in-house multi-turn workload runs on both platforms, extending the sweep to the four-GPU H200-NVL setting. We divide the workloads into two classes: closed-loop workloads, in which live agents issue requests based on previous model responses and therefore produce different request sequences across systems; and replay workloads, in which every configuration processes the same fixed request sequence. 8TABLE III WORKLOADS , THEIR EVALUATION ROLES , AND THE NUMBER OF INDEPENDENT RUNS PER CONFIGURATION (n). Workload Role n        
+
+> SWE-agent Heavy-48 Closed-loop evaluation 3SWE-agent replay System comparison, identical requests 5LMCache trace Latency–throughput tradeoff 3In-house multi-turn Capacity-boundary sweep 5
+
+Closed-loop agent execution. In this class, live SWE-agent [28] executions attempt a fixed set of 48 SWE-bench Lite tasks [12] in Docker, selected for their large recorded input-context footprints (Heavy-48). Because requests depend on prior model responses, trajectories diverge across systems; we therefore report three runs each for the baseline and VAMP-15 to characterize recurring serving regimes, not matched-input effects. 
+
+Fixed request sequences. The remaining workloads fix their request sequences in advance, so every configuration processes identical requests under the same protocol. The main replay re-issues 2,103 turns recorded from SWE-agent executions on the baseline; replaying this trace under the baseline and VAMP-10/15/20 provides both a system comparison on identical requests and a comparison across expert-offloading ratios. The LMCache trace [20] provides a second recorded workload for examining the latency–throughput tradeoff across the baseline, VAMP-15, and VAMP-20. Each run replays the trace over a fixed 60-minute window, preserving the recorded inter-request think times, at either 64 or 128 sessions. The in-house multi-turn workload generates c concurrent synthetic sessions with deterministic per-turn context growth, allowing us to vary the reusable prefix-cache footprint and locate the capacity boundary —the load at which this footprint exceeds KV-cache capacity and TTFT rises sharply (§VI-C). 
+
+e) Metrics and measurement: We report tail TTFT, TPOT, request throughput for the SWE-agent replay, and token throughput in tokens per second (TPS). Request throughput is the number of completed requests within the measurement window divided by its duration, with each request correspond-ing to one recorded agent turn, whereas TPS counts output tokens per second. We also report prefix-cache hit rate and preemptions as supporting measurements of cache reuse and memory pressure. Results are computed per run and reported as mean ±standard deviation (SD) unless noted otherwise. TTFT uses client first-token timestamps; TPS, cache, and preemption metrics use server counters; and TPOT is the mean of the server-side TPOT histogram. For the recorded replay, TPOT is computed over the full run rather than the measurement interval defined below. The service-level-objective (SLO) analysis of §VI-E instead uses client-measured TPOT for each request. 
+
+f) Measurement intervals: For the recorded replay, each run’s measurement interval begins after 128 turns have com-pleted and ends when the first session completes after all 48 sessions have started, before the workload enters its drain phase; TTFT, request throughput, and preemption rate are computed over the requests that arrive within this interval. For the in-0.0 0.5 1.0 KV-cache utilization          
+
+> 0500 1000 Preemptions per 30-min bin
+> 010 Waiting requests
+> 012345
+> Elapsed time (h)
+> 0100 Mean TTFT per 30-min bin (s)
+> 138 s 2.6 s
+> vLLM VAMP-15
+> Fig. 6. Serving-regime contrast over the 6-hour closed-loop SWE-agent execution (mean ±SD over n=3 runs per system). The top three panels show system state—KV-cache utilization, preemptions per 30-minute bin, and waiting requests—and the bottom panel is the user-visible outcome, mean TTFT per 30-minute bin. Because closed-loop trajectories differ across systems and runs, the comparison characterizes observed serving regimes under the same workload setup, not a matched-request effect.
+
+house sweep, TTFT percentiles exclude each session’s first turn, which is issued at t=0 and cannot be served from any prefix cache. 
+
+B. Multi-Turn Serving Performance 
+
+We combine closed-loop SWE-agent runs with recorded replays: the former show behavior under agent feedback, while the latter isolate serving-system differences under fixed request sequences. 
+
+a) Closed-loop execution: Both systems leave tasks unfin-ished at the six-hour cap, so completion counts do not provide a controlled comparison. Over the full six hours, the baseline runs accumulate 7,227 ± 495 preemptions per run and end with a cumulative prefix-cache hit rate below 0.2% ( 0.105% ±0.009% ). Over each run’s final 30 minutes (5.5–6.0 hours after driver start), the two systems’ observed serving regimes differ sharply. The baseline averages 0.967 ± 0.007 KV-cache utilization, 
+
+5.05 ± 0.52 waiting requests, 635 ± 44 preemptions, and 
+
+142 .5 ± 16 .5 s mean TTFT. VAMP-15 averages 0.68 ± 0.07 
+
+KV-cache utilization, no waiting requests, no preemptions, and 
+
+2.63 ± 0.06 s mean TTFT. Because closed-loop trajectories differ across systems, this comparison characterizes observed serving regimes rather than a matched-input effect. Figure 6 places three system-state measurements and mean TTFT on the same six-hour axis ( n=3 per system). In the baseline, 90 10 20 30 40 50 60 70    
+
+> Conversation turn
+> 1310 30
+> TTFT p90 (s)
+> vLLM VAMP-15 Fig. 7. Progress-aligned TTFT p90 over ten equal-observation bins, each aggregating approximately 210 matched (task, turn) pairs ( n=5 ; band ±1 SD). Bins are plotted as steps over their actual recorded-turn ranges, so unequal bin widths are visible; the shaded first bin ( [0 ,4) ) includes the synchronized turn-0 requests from all 48 sessions.
+
+KV-cache utilization pins near capacity, preemptions recur at roughly 500–800 per 30-minute interval, and waiting requests build up; over the same period, mean TTFT rises from about 14 s in the first bin to more than 150 s by mid-run. VAMP-15 mitigates this cascade: expert offloading keeps KV-cache utilization below saturation, preemptions are limited to 1–2 warm-up events per run, the waiting queue remains near zero, and mean TTFT holds near 2.6 s with cached prefixes retained. The latency separation in the bottom panel thus coincides with a persistent separation in all three system-state panels, rather than appearing only in the final measurement window. Figure bins are elapsed-time aligned, whereas the statistics above use each run’s final 30 minutes. Preemption is not itself an optimization objective: the baseline resorts to it when a KV allocation cannot be satisfied, and each preempted request re-enters the queue as a waiting request, independently of the TTFT it later incurs. 
+
+b) Recorded SWE-agent replay: Table IV reports the primary system comparison. Across runs that replay the same 2,103 recorded turns under the same protocol, VAMP-15 reduces TTFT p90 from 26.1 s to 1.10 s, increases request throughput by 20.7%, and reduces preemptions from 562.7 to 0.18 per 1,000 turns. The cache and queue measurements show two sources of the latency reduction: the prefix-cache hit rate rises from 0.19% to 89.8%, so reused prefixes are not recomputed, and mean queue time falls from 15.1 s to 21 ms, while the preemption rate drops to nearly zero. The gain holds deeper in the tail, with TTFT p99 falling from 32.7 s to 3.48 s. Figure 7 aligns the systems by recorded turn number over the whole trace. After the first bin, which includes turn-0 requests from all 48 sessions, VAMP-15 holds TTFT p90 between 0.9 and 2.6 s in every bin while vLLM remains at 21–26 s, showing that the aggregate gap does not arise from averaging over different phases of the trace. This comes at a decode-time cost: TPOT rises from 170.9 ms to 224.0 ms ( +31 .1% ). Figure 8 reports per-turn median TTFT for VAMP-20 on the same recorded trace (§VI-E compares the ratios directly). At turn 0 the two systems behave almost identically (medians of 0510 15 20 25          
+
+> TTFT (s)
+> vLLM VAMP-20
+> 010 20 30 40 50 60
+> Conversation turn
+> 024 48
+> Active sessions
+> Fig. 8. Per-turn median TTFT over the 48-session recorded replay (pooled over n=5 runs per system), shown for VAMP-20 from the same recorded trace as Figure 10; the bottom panel shows the number of still-active sessions. Turns beyond 61, where fewer than 12 sessions remain, are omitted: that finite-replay tail is not a steady-state serving regime.
+
+11.6 vs. 11.8 s). Over the following turns, VAMP-20 keeps TTFT near 1 s, whereas the baseline climbs to roughly 19 s and stays high. Beyond roughly turn 25, baseline TTFT decreases as tasks complete and the number of active sessions falls (bottom panel). The per-turn view shows sustained high baseline TTFT while many sessions remain active, consistent with memory pressure from accumulated reusable prefixes. We omit turns beyond 61, where fewer than 12 sessions remain. 
+
+c) LMCache trace: The LMCache trace shows the same latency–throughput tradeoff on a second recorded workload (n=3 ). At 128 sessions, VAMP-15 reduces TTFT p99 from 
+
+29 .3 ± 0.6 s to 4.01 ± 0.24 s and preemptions from 1,354 ± 23 
+
+to zero, while TPS falls from 205 .2 ± 0.7 to 115 .2 ± 0.2 and TPOT rises from 118 .9±0.2 to 263 .2±0.4 ms. At 128 sessions, VAMP-20 provides TTFT p99 comparable to VAMP-15, but has higher TPOT and lower token throughput. At 64 sessions, it lowers TTFT p99 to 1.30 s, compared with 1.57 s for VAMP-15. Thus, the ratio that serves best depends on load. Within the fixed window, the baseline, VAMP-15, and VAMP-20 complete approximately 95%, 72%, and 67% of the recorded turns at 128 sessions. The VAMP configurations complete fewer turns because their higher TPOT accumulates across successive turns within the fixed window. TPS is computed only over each run’s active serving period, so a system that finishes its recorded turns before the window ends is not penalized for the remaining idle time. 
+
+C. KV-Cache Capacity Boundaries 
+
+§VI-B evaluates selected workload conditions but does not locate the capacity boundary . We vary session concurrency in the in-house multi-turn workload to identify this bound-ary. At concurrency c, the workload runs c sessions, each following a fixed 12-turn structure with deterministic per-turn context growth (scaled per platform). Increasing c therefore increases the reusable prefix-cache footprint that must remain 10 TABLE IV RECORDED -TRACE COMPARISON OF V LLM AND VAMP-15 OVER 2,103                                                                            
+
+> TURNS (n=5 ;MEAN ±SD). TPOT USES THE FULL RUN ;THE OTHER ROWS USE THE MEASUREMENT INTERVAL (§VI-A). Metric vLLM VAMP-15 Difference Request throughput (req/s) 0.596 ±0.007 0.720 ±0.008 +20 .7%
+> TTFT p90 (s) 26 .1±0.71.10 ±0.17 23 .6×lower TTFT p99 (s) 32 .7±2.73.48 ±0.51 9.4×lower Mean queue time (s) 15 .1±0.50.021 ±0.012 −99 .9%
+> Preemptions / 1k turns 562 .7±13 .30.18 ±0.41 −99 .9%
+> Prefix-cache hit rate (%) 0.19 ±0.03 89 .8±3.4+89 .6pp TPOT (ms) 170 .9±1.8224 .0±2.0+31 .1% 16 20 24 28 310 30 100 300
+> TTFT p99 (s)
+> 2×H100 (TP=2, PCIe)
+> 16 24 28 32 36
+> all saturated
+> 4×H200 (TP=4, NVLink)
+> 10.2×
+> Concurrency (sessions)
+> vLLM VAMP-15 VAMP-20 VAMP-25
+> Fig. 9. KV-cache capacity boundaries on H100-PCIe and H200-NVL (n=5 ,mean ±SD). A larger expert-offloading ratio shifts the TTFT cliff to higher concurrency; an insufficient ratio crosses its own boundary and can trail vLLM.
+
+in HBM. We evaluate c ∈ { 16 , 20 , 24 , 28 } on H100-PCIe 
+
+and c ∈ {16 , 20 , 24 , 28 , 32 , 36 } on H200-NVL , with five independent runs for each concurrency and expert-offloading ratio. TTFT follows the steady-state rule of §VI-A, excluding the synchronized first turn. Figure 9 reports steady-state TTFT p99 on both platforms. 
+
+a) H100-PCIe : the boundary moves with the expert-offloading ratio: The baseline is already beyond its KV-cache capacity boundary at c=16 , with TTFT p99 of 22 .1±0.6 s, whereas VAMP-25 remains between 3.0 and 3.9 s through 
+
+c=28 . The boundary moves with the offloading ratio: VAMP-15 crosses it at c=24 (54 .7±2.1 s), VAMP-20 at c=28 
+
+(63 .5±2.1 s), and VAMP-25 does not cross it within the evaluated range. At c=24 , where VAMP-15 exceeds its KV-cache capacity boundary, its TTFT p99 is approximately 26% higher than the baseline’s. At c=28 , similar aggregate TPS (99– 109) masks different cache regimes: the baseline has a prefix-cache hit rate of approximately 4% and 35 preemptions per run, compared with 20–72% and approximately one preemption per run across VAMP-15/20/25. 
+
+b) H200-NVL : VAMP remains effective at four-GPU scale: On four H200 GPUs with larger per-GPU HBM and NVLink, all configurations remain within a 9–11 s steady-state TTFT p99 band through c=28 . At c=32 , the baseline crosses its capacity boundary and its TTFT p99 rises to 92 .8±0.3 s, while VAMP-20 remains at 9.1±0.3 s, a 10 .2× reduction. This TTFT reduction comes with higher server-mean TPOT: 93.0 ms for VAMP-20 versus 80.1 ms for the baseline. VAMP-15 reaches 
+
+28 .3±0.2 s, showing that an undersized ratio only partially avoids the cliff. VAMP-20 and VAMP-25 remain below their boundaries at c=32 and cross them at c=36 . Below capacity, overprovisioning still adds transfer cost: at c=28 , VAMP-25 has higher TTFT p99 (11.1 vs. 8.9 s) and TPOT (81.2 vs. 66.6 ms) than the baseline. Across both platforms, VAMP moves the capacity boundary, the onset of the prefix-cache cliff, to higher concurrency. 
+
+D. Runtime Controller Decisions 
+
+We inspect VAMP-20 decision logs from the H200-NVL 
+
+sweep at c=16 and c=32 . At c=16 , sufficient free KV-cache capacity prevents the controller from being invoked. At c=32 , run 1 records 207 expert-offloading decisions and 116 cache evictions. Among decisions selecting eviction, the median eviction score is lower than the corresponding expert-offloading score ( Cc=44 .9 vs. Ce=52 .7 ms), consistent with the selected action; these values are controller scores, not measured latencies. No preemption is selected, so these traces characterize only the offloading–eviction choice. 
+
+E. Balancing TTFT and TPOT 
+
+We compare vLLM and VAMP-10/15/20 on the same recorded trace ( n=5 ). Figure 10(a) shows that VAMP-15 achieves the lowest mean TTFT p90 while providing request throughput comparable to VAMP-10. Compared with VAMP-15, VAMP-20 provides comparable TTFT p90 but has higher TPOT and lower request throughput. Thus, the expert-offloading ratio should be matched to the workload rather than maximized. To evaluate joint latency requirements, we define fixed-window SLO-qualified request throughput , Q(T, P ) =
+
+Nqualified (T, P )/W , where a qualified request completes within the measurement window W and satisfies TTFT ≤ T
+
+and TPOT ≤ P ; failed and unfinished requests count as misses, and attainment uses client-measured TPOT for each request (§VI-A). Figure 10(b) evaluates a 5 × 5 grid of (T, P )
+
+requirements. No configuration is best throughout: all provide little qualified throughput at P =150 ms, vLLM or VAMP-10 leads under the tight P =200 ms budget, and VAMP-15 leads throughout P ≥ 250 ms. Because replay uses fixed concurrency, 
+
+Q does not estimate a maximum sustainable request rate. VII. D ISCUSSION 
+
+A. Interconnect Bandwidth and Copy Hiding 
+
+Expert offload interacts with the interconnect topology, not only with how much memory is removed. Under TP2 the per-shard MoE kernels are long, which in principle widens the copy–compute overlap window, but on our PCIe system the two GPUs communicate over the SYS path across NUMA domains, so weight transfers contend with tensor-parallel traffic on the same bus; consistent with this, decode-time cost rises with the amount of expert weight offloaded (§VI-C, §VI-E). Under TP4, GPU-to-GPU tensor-parallel traffic uses NVLink, reducing its contention with host-to-device weight transfers, although shorter per-shard kernels provide a smaller overlap window. Because these platforms also differ in GPU model, HBM 11 1310 30                                                               
+
+> TTFT p90 (s)
+> (a) Serving metrics per configuration
+> 0.55 0.65 0.75
+> Request throughput (req/s)
+> vLLM VAMP-10 VAMP-15 VAMP-20
+> 150 200 250 300
+> TPOT (ms)
+> 150 200 250 300 350
+> TPOT budget P (ms)
+> 12515 30
+> TTFT budget T (s)
+> 0.239 0.590 0.636 0.637 0.259 0.631 0.687 0.688 0.276 0.651 0.716 0.718 0.277 0.651 0.716 0.719
+> vLLM
+> 0.431 0.651 0.716 0.719
+> All <0.13 req/s VAMP-10 VAMP-15
+> (b) Request throughput within both latency budgets (req/s)
+> vLLM VAMP-10 VAMP-15 VAMP-20 Fig. 10. Expert-offloading-ratio tradeoffs on the recorded trace ( n=5 ). Panel (a) reports TTFT p90 (log scale), request throughput, and TPOT. Panel (b) compares the configurations over pairs of latency budgets ( TTFT ≤T,TPOT ≤P). Outside the gray P=150 ms column, the band label names the configuration with the highest mean request rate satisfying both budgets, and each cell reports that rate in req/s. The outlined cell marks vLLM’s only win outside this low-throughput region; every configuration in the gray column remains below 0.13 req/s. At T≥15 s and P=350 ms the winner and runner-up overlap within one SD.
+> Fig. 11. Layer-level routed-expert demand under batched execution (Qwen3-Next-80B-A3B-Instruct, TP=4, chunked prefill,
+> max_num_seqs =64 ). Across 1,012 model steps, the per-layer union averages 262–473 of 512 routed experts and reaches 494, despite top-k=10
+> routing per token.
+
+capacity, and tensor-parallel degree, the comparison does not isolate interconnect effects. Exposed expert-offloading overhead depends on host-to-device transfer time and the amount of computation that overlaps each transfer. 
+
+B. Why We Avoid LRU Expert Cache Execution 
+
+An alternative design maintains a GPU-resident expert cache under an LRU policy. However, the experts required by each token become known only after routing. If a required expert is absent from GPU memory, it must be fetched before the corresponding MoE layer can execute, and any transfer not hidden by preceding computation directly delays that layer. Although each token selects only 10 of 512 routed experts, a batched MoE kernel requires all distinct experts selected by the tokens in that model step. Across 1,012 profiled model steps, the per-layer mean number of distinct routed experts ranges from 262 to 473 and reaches 494 in one step (Figure 11). Thus, per-token sparsity does not necessarily produce a small expert working set at layer execution time. Skipping the selected experts that are absent from GPU memory would change the model output. Before each layer’s MoE kernel, VAMP instead stages that layer’s entire offloaded region and overlaps the transfer with preceding computation. This preserves the routing result while avoiding per-expert cache-miss handling. 
+
+C. Limitations and Future Directions 
+
+VAMP converts expert HBM into KV-cache capacity, but its coverage ends when the reusable prefix-cache footprint exceeds the resulting capacity. Host-side KV-cache offloading is orthogonal and could extend coverage beyond that point, at a different cost: offloading experts requires no device-to-host copy at decision time, since the weights already have a host-resident copy, whereas moving cached blocks out and back adds eviction decisions and restore latency to the request path. Two prototype limits remain: the maximum offloading ratio trades KV-cache headroom against staging cost, and the controller does not restore expert residency when pressure subsides. VIII. R ELATED WORK 
+
+MoE inference and expert offloading. MoE-Lightning [2] reduces MoE inference latency by streaming cold experts from CPU DRAM and pipelining weight transfers over PCIe; Fiddler [13], KTransformers [3], and PowerInfer [26] instead execute CPU-resident model components on the CPU, reducing frequent weight transfers. These systems primarily optimize expert placement, execution, or transfer, rather than arbitrating expert offloading against prefix-cache eviction and request preemption at KV-allocation time. FluxMoE [18] similarly 12 uses idle expert HBM for runtime state through expert paging and budget-aware residency planning. VAMP differs at the decision point: when a KV-cache allocation cannot be satisfied, it arbitrates expert offloading against prefix-cache eviction and request preemption rather than adjusting expert residency alone. CrossPool [29] separates FFN weights and KV caches into distinct GPU memory pools to colocate multiple cold MoE models; VAMP instead repartitions HBM between the two uses within a single serving model. 
+
+Memory management in LLM serving. vLLM [14] provides paged KV-cache management, and SGLang [31] adds prefix-tree reuse. vAttention [23] and GMLake [9] use CUDA virtual-memory mapping to reduce fragmentation, and Oneiros [16] remaps physical pages from idle model replicas to the KV-cache pool in multi-tenant serving; VAMP applies the same primitive to a single-tenant MoE model, reclaiming pages from the serving model’s own expert weights. KunServe [5] frees memory under overload by dropping parameters replicated across GPUs; VAMP instead reclaims sparsely activated expert groups within a single model, without requiring replicas. CachedAttention [8], LMCache [20], MemServe [10], and Mooncake [24] persist, reuse, or disaggregate KV caches across host-memory, storage, and serving instances, while SnapKV [17] compresses KV entries. VAMP instead expands the GPU-resident KV-cache pool itself, and its controller compares this expansion against KV eviction and request preemption. Prism [30] uses GPU-memory ballooning to coordinate memory across co-served models; VAMP instead reallocates HBM within a single MoE model and arbitrates that expansion against KV eviction and request preemption. 
+
+Serving multi-turn agentic workloads. Recent systems schedule around the KV-cache footprint of multi-turn and agentic workloads: KVFlow [22] keeps prefixes of multi-agent workflows warm, Continuum [15] attaches a time-to-live to KV caches across turns, and CONCUR [4] and DualPath [27] manage agentic concurrency and storage bandwidth. These sys-tems take the HBM KV-cache budget as fixed and decide what to keep within it; VAMP changes the budget by reallocating expert HBM, and complements such scheduling. IX. C ONCLUSION 
+
+This paper presents VAMP, a serving framework for MoE models in multi-turn agentic environments. VAMP breaks the static boundary between expert-weight memory and the KV-cache pool using CUDA VMM page remapping, guided by a three-way cost model that estimates the future penalties of expert offloading, KV-cache eviction, and request preemption. Across five runs of the 2,103-turn recorded-trace replay, VAMP-15 reduces TTFT p90 from 26.1 s to 1.10 s (23.6 ×) and increases request throughput by 20.7% relative to unmodified vLLM, while increasing TPOT by 31.1%. ACKNOWLEDGMENT 
+
+This paper is supported in part by SRC JUMP 2.0 Center for Processing with Intelligent Storage and Memory (PRISM). REFERENCES [1] S. Abnar, H. Shah, D. Busbridge, A. M. E. Ali, J. M. Susskind, and V. Thilak, “Parameters vs FLOPs: Scaling laws for optimal sparsity for mixture-of-experts language models,” arXiv preprint arXiv:2501.12370 ,2025. [Online]. Available: https://arxiv.org/abs/2501.12370 [2] S. Cao, S. Liu, T. Griggs, P. Schafhalter, X. Liu, Y. Sheng, J. E. Gonzalez, M. Zaharia, and I. Stoica, “MoE-Lightning: High-throughput MoE inference on memory-constrained GPUs,” in Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , 2025. [3] H. Chen, W. Xie, B. Zhang, J. Tang, J. Wang, J. Dong, S. Chen, Z. Yuan, C. Lin, C. Qiu, Y. Zhu, Q. Ou, J. Liao, X. Chen, Z. Ai, Y. Wu, and M. Zhang, “KTransformers: Unleashing the full potential of CPU/GPU hybrid inference for MoE models,” in Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles (SOSP) , 2025. [4] Q. Chen, Z. Ye, T. Tang, P. Sun, B. Tian, G. Wang, S. Li, Y. Wen, Z. Han, and T. Zhang, “CONCUR: High-throughput agentic batch inference of LLM via congestion-based concurrency control,” arXiv preprint arXiv:2601.22705 , 2026. [5] R. Cheng, Y. Lai, X. Wei, R. Chen, and H. Chen, “KunServe: Parameter-centric memory management for efficient memory overloading handling in LLM serving,” in Proceedings of the 21st European Conference on Computer Systems (EuroSys ’26) , 2026. [6] DeepSeek-AI, “DeepSeek-V3 technical report,” arXiv preprint arXiv:2412.19437 , 2024. [7] W. Fedus, B. Zoph, and N. Shazeer, “Switch transformers: Scaling to trillion parameter models with simple and efficient sparsity,” Journal of Machine Learning Research , vol. 23, no. 120, pp. 1–39, 2022. [Online]. Available: https://arxiv.org/abs/2101.03961 [8] B. Gao, Z. He, P. Sharma, Q. Kang, D. Jevdjic, J. Deng, X. Yang, Z. Yu, and P. Zuo, “Cost-efficient large language model serving for multi-turn conversations with CachedAttention,” in 2024 USENIX Annual Technical Conference (USENIX ATC) , 2024. [9] C. Guo, R. Zhang, J. Xu, J. Leng, Z. Liu, Z. Huang, M. Guo, H. Wu, S. Zhao, J. Zhao, and K. Zhang, “GMLake: Efficient and transparent GPU memory defragmentation for large-scale DNN training with virtual memory stitching,” in Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) , 2024. [10] C. Hu, H. Huang, J. Hu, J. Xu, X. Chen, T. Xie, C. Wang, S. Wang, Y. Bao, N. Sun, and Y. Shan, “MemServe: Context caching for disaggregated LLM serving with elastic memory pool,” arXiv preprint arXiv:2406.17565 , 2024. [11] A. Q. Jiang, A. Sablayrolles, A. Roux, A. Mensch, B. Savary, C. Bamford, D. S. Chaplot, D. de las Casas, E. B. Hanna, F. Bressand, G. Lengyel, G. Bour, G. Lample, L. R. Lavaud, L. Saulnier, M.-A. Lachaux, P. Stock, S. Subramanian, S. Yang, S. Antoniak, T. L. Scao, T. Gervet, T. Lavril, T. Wang, T. Lacroix, and W. E. Sayed, “Mixtral of experts,” arXiv preprint arXiv:2401.04088 , 2024. [12] C. E. Jimenez, J. Yang, A. Wettig, S. Yao, K. Pei, O. Press, and K. R. Narasimhan, “SWE-bench: Can language models resolve real-world github issues?” in The Twelfth International Conference on Learning Representations , 2024. [Online]. Available: https: //openreview.net/forum?id=VTF8yNQM66 [13] K. Kamahori, T. Tang, Y. Gu, K. Zhu, and B. Kasikci, “Fiddler: CPU-GPU orchestration for fast inference of mixture-of-experts models,” in 
+
+The Thirteenth International Conference on Learning Representations (ICLR) , 2025. [14] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, and I. Stoica, “Efficient memory management for large language model serving with PagedAttention,” in Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles (SOSP) , 2023. [15] H. Li, Q. Mang, R. He, Q. Zhang, H. Mao, X. Chen, A. Cheung, J. Gonzalez, and I. Stoica, “Continuum: Efficient and robust multi-turn LLM agent scheduling with KV cache time-to-live,” arXiv preprint arXiv:2511.02230 , 2025. [16] R. Li, S. Pal, V. N. Pullu, P. Sinha, J. Ryoo, L. K. John, and N. J. Yadwadkar, “Oneiros: KV cache optimization through parameter remapping for multi-tenant LLM serving,” in Proceedings of the ACM Symposium on Cloud Computing (SoCC) , 2025. [17] Y. Li, Y. Huang, B. Yang, B. Venkitesh, A. Locatelli, H. Ye, T. Cai, P. Lewis, and D. Chen, “SnapKV: LLM knows what you are looking 
+
+13 for before generation,” in Advances in Neural Information Processing Systems (NeurIPS) , 2024. [18] Q. Liu, C. Y. He, H. Jiang, Z. Wang, A. Zhao, and P. P. C. Lee, “FluxMoE: Decoupling expert residency for high-performance MoE serving,” arXiv preprint arXiv:2604.02715 , 2026. [19] Y. Liu, Y. Cheng, J. Yao, Y. An, X. Chen, S. Feng, Y. Huang, S. Shen, R. Zhang, K. Du, and J. Jiang, “LMCache: An efficient KV cache layer for enterprise-scale LLM inference,” arXiv preprint arXiv:2510.09665 ,2025. [20] LMCache Project, “LMCache: A KV-cache management layer for LLM inference,” https://github.com/LMCache/LMCache, 2026, accessed July 21, 2026. [21] NVIDIA, CUDA Virtual Memory Management . [Online]. Available: https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/virtual-memory-management.html [22] Z. Pan, A. D. Patel, Y. Shen, Z. Hu, Y. Guan, W.-L. Li, L. Qin, Y. Wang, and Y. Ding, “KVFlow: Efficient prefix caching for accelerating LLM-based multi-agent workflows,” in 
+
+Advances in Neural Information Processing Systems (NeurIPS) , 2025. [Online]. Available: https://papers.neurips.cc/paper files/paper/2025/hash/ b7971d31a7d5eb0f1eed2f8f6f368195-Abstract-Conference.html [23] R. Prabhu, A. Nayak, J. Mohan, R. Ramjee, and A. Panwar, “vAttention: Dynamic memory management for serving LLMs without PagedAtten-tion,” arXiv preprint arXiv:2405.04437 , 2024. [24] R. Qin, Z. Li, W. He, M. Zhang, Y. Wu, W. Zheng, and X. Xu, “Mooncake: A KVCache-centric disaggregated architecture for LLM serving,” arXiv preprint arXiv:2407.00079 , 2024. [25] Qwen Team, “Qwen3-Next: Towards ultimate train-ing & inference efficiency,” https://qwen.ai/blog?id= 4074cca80393150c248e508aa62983f9cb7d27cd, Sep. 2025, blog post. [26] Y. Song, Z. Mi, H. Xie, and H. Chen, “PowerInfer: Fast large language model serving with a consumer-grade GPU,” arXiv preprint arXiv:2312.12456 , 2023. [27] Y. Wu, S. Chen, Y. Zhong, R. Huang, Y. Tan, W. Zhang, L. Zhang, S. Zhou, Y. Liu, S. Zhou, M. Zhang, X. Jin, and P. Huang, “DualPath: Breaking the storage bandwidth bottleneck in agentic LLM inference,” 
+
+arXiv preprint arXiv:2602.21548 , 2026. [28] J. Yang, C. E. Jimenez, A. Wettig, K. Lieret, S. Yao, K. Narasimhan, and O. Press, “SWE-agent: Agent-computer interfaces enable automated software engineering,” arXiv preprint arXiv:2405.15793, 2024. [29] Z. Ye, T. Wo, D. Xue, M. Zhang, Y. Teng, C. Hu, and R. Yang, “CrossPool: Efficient multi-LLM serving for cold MoE models through KV-cache and weight disaggregation,” arXiv preprint arXiv:2606.24506 , 2026. [30] S. Yu, Y. Qiao, M. Ma, Y. Li, S. Yang, X. Tong, Y. Wang, Z. Xie, Y. An, S. Cao, K. Bao, D. Vij, X. Ding, Y. Wang, Q. Lu, Z. Wang, G. Gao, H. Xu, J. Shu, J. Xing, and Y. Sheng, “Prism: Cost-Efficient multi-LLM serving via GPU memory ballooning,” in 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . Seattle, WA: USENIX Association, Jul. 2026, pp. 75–93. [Online]. Available: https://www.usenix.org/conference/osdi26/presentation/yu-shan [31] L. Zheng, L. Yin, Z. Xie, C. Sun, J. Huang, C. H. Yu, S. Cao, C. Kozyrakis, I. Stoica, J. E. Gonzalez, C. Barrett, and Y. Sheng, “Sglang: efficient execution of structured language model programs,” in 
+
+Proceedings of the 38th International Conference on Neural Information Processing Systems , ser. NIPS ’24. Red Hook, NY, USA: Curran Associates Inc., 2024. 
+
+14 APPENDIX 
+
+Figure 12 reports the per-budget slices of the evaluated 
+
+5 × 5 Q(T, P ) grid summarized by the winner map in Figure 10(b). Two structural features stand out. First, for every TTFT budget up to 15 s, the baseline contributes almost no qualified throughput (at most 0.17 req/s): its TTFT tail alone disqualifies most requests, independent of the TPOT budget. Second, each VAMP configuration turns on at a characteristic TPOT threshold that reflects its decode-time cost: VAMP-10 rises earliest but plateaus lowest, VAMP-15 rises steeply at 
+
+P =250 ms to 0.6–0.72 req/s, and VAMP-20 contributes only from P =300 ms. The single region where the baseline leads appears only in the T =30 s facet at P =200 ms (0.43 req/s), where the TTFT budget is loose enough to absorb its tail and the tight TPOT budget penalizes expert offloading. The winner-map boundaries in Figure 10(b) are thus sharp rather than incidental: they trace which of the two latency constraints binds first for each configuration. Figure 13 repeats the panels of Figure 6 with VAMP-20 added as the mean of its two protocol-identical runs; a third VAMP-20 run used a different LM-query timeout and is excluded as a protocol variant. VAMP-20 tracks VAMP-15’s mean KV-cache utilization closely, so the larger offloading ratio buys little additional average KV headroom on this workload, while one of its two runs transiently reached saturation with a burst of 211 preemptions around 1–2 h (diluted to the small step in the second panel by the n=2 mean). With two runs these are observations, not a reproducibility claim; they are consistent with selecting VAMP-15 as the paper’s operating point. Figure 14 shows that the baseline’s collapse is also not specific to the runs of Figure 6. Across three independent baseline runs recorded independently on evolving stacks, KV-cache usage rises to a saturation band above 95% almost immediately and stays pinned for each run’s full duration (panel a); cumulative preemptions grow near-linearly and overlap closely across runs—at t=7 .4 h, one run’s count of 9,183 is within 0.7% of an earlier run’s final count of 9,243, and a 12-hour run continues along the same trajectory to 13,767 (panel b); and the cumulative prefix-cache hit rate decays from over 10% at startup to below 0.2% in every run (panel c). The collapse is a property of the workload–system pair—accumulating reusable context meeting a fixed KV-cache allocation—rather than an artifact of any particular run. 15 150 200 250 300 350 0.0 0.2 0.4 0.6                           
+
+> SLO-qualified throughput (req/s)
+> TTFT budget T= 1 s
+> 150 200 250 300 350
+> TTFT budget T= 2 s
+> 150 200 250 300 350
+> TTFT budget T= 5 s
+> 150 200 250 300 350
+> TTFT budget T= 15 s
+> 150 200 250 300 350
+> TTFT budget T= 30 s
+
+TPOT budget P (ms)    
+
+> vLLM VAMP-10 VAMP-15 VAMP-20
+
+Fig. 12. Underlying SLO-qualified-throughput slices for the evaluated 5 × 5 Q(T, P ) grid of Figure 10(b): each panel fixes the TTFT budget T and sweeps the TPOT budget P for all four configurations ( n=5 run means). 0.0 0.5 1.0 KV-cache utilization      
+
+> 0500 1000 Preemptions per 30-min bin
+> 010 Waiting requests
+> 012345
+
+Elapsed time (h)   
+
+> 0100 Mean TTFT per 30-min bin (s)
+> vLLM VAMP-15 VAMP-20 (n=2 mean)
+
+Fig. 13. Three-arm view of the closed-loop execution (same panels as Figure 6, mean lines only). vLLM and VAMP-15 average n=3 runs; VAMP-20 averages its two protocol-identical runs ( n=2 )—a third run with a different LM-query timeout is excluded as a protocol variant. VAMP-15 and VAMP-20 maintain similar mean KV utilization, so VAMP-20 provides little additional average KV headroom over the selected VAMP-15 operating point. One of the two VAMP-20 runs exhibited a transient saturation with a 211-preemption burst around 1–2 h; the n=2 mean dilutes it to the small step visible in the second panel. With two runs we report these as observations, not a reproducibility claim. 025 50 75 95 
+
+> KV usage (%)
+> >95% saturation band
+
+(a) KV-cache usage 
+
+0510 15 
+
+> Preemptions (×10 3)
+> t=7.4 h: 9,183 vs 9,243 (Run 1 final, 0.7% apart)
+
+(b) Cumulative preemptions 
+
+0 2 4 6 8 10 12 
+
+Wall-clock time (h) 
+
+0.1 110 
+
+> Prefix hit rate (%)
+> 0.2%
+
+(c) Prefix-cache hit rate   
+
+> Run 1 (7.4 h) Run 2 (6.3 h) Run 3 (12 h cap)
+
+Fig. 14. The same collapse signature across three independent baseline runs: KV-cache usage pinned above 95%, near-linear preemption accumulation (9,183 vs. 9,243 at t=7 .4 h, 0.7% apart), and prefix-cache hit rate decaying below 0.2%. 
+
+16
