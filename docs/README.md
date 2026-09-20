@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-11 ~ 2026-09-20</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-20</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-20 02:51:24 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-20 21:19:00 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>本期日报扫完 12 篇（精读 6、速读 6），主线明显落在 LLM 推理的 KV 缓存、内存与冷启动优化上。</p>
-<p>最值得看的是精读里 9.0 分的《AgentKV: Phase-Aware KV Eviction for Agentic LLMs》——按阶段做 KV 淘汰的思路，以及 8.0 分的 Serverless 动态切片降冷启动延迟。</p>
-<p>普通读者可先读 AgentKV 抓&quot;阶段感知&quot;这个核心，再扫速读里的 HBM 动态重划分与 Prefix Sharing 排序化，串起缓存—内存—调度这条线。</p>
+<p>今天拆了7篇Agentic LLM系统论文：4篇精读、3篇速读，主线是工具调用与KV缓存怎么少猜多省。</p>
+<p>最值得看9.0分的《Ask the Tool, Don&#x27;t Guess》——让服务系统读取工具调用进度，以及8.0分的《AgentKV》——按Agent阶段做KV驱逐。</p>
+<p>普通</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="AgentKV: Phase-Aware KV Eviction for Agentic LLMs">AgentKV: Phase-Aware KV Eviction for Agentic LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing">Reducing Cold-Start Latency in Serverless Applications via Dynamic Slicing</span></li><li><span class="dpr-home-dashboard-paper-title" title="Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries">Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Ask the Tool, Don&#x27;t Guess: Agent Tool Calls Hold Their Progress, and the Serving System Should Read It">Ask the Tool, Don&#x27;t Guess: Agent Tool Calls Hold Their Progress, and the Serving System Should Read It</span></li><li><span class="dpr-home-dashboard-paper-title" title="AgentKV: Phase-Aware KV Eviction for Agentic LLMs">AgentKV: Phase-Aware KV Eviction for Agentic LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries">Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Dynamic HBM Repartitioning for Multi-Turn MoE Serving">Dynamic HBM Repartitioning for Multi-Turn MoE Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Prefix Sharing Is a Sorting Problem">Prefix Sharing Is a Sorting Problem</span></li><li><span class="dpr-home-dashboard-paper-title" title="Collaborative Memory for Multi-Agent VLM Systems">Collaborative Memory for Multi-Agent VLM Systems</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Prefix Sharing Is a Sorting Problem">Prefix Sharing Is a Sorting Problem</span></li><li><span class="dpr-home-dashboard-paper-title" title="Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions">Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions</span></li><li><span class="dpr-home-dashboard-paper-title" title="Protocol-Preserving Context Trimming for Agentic Workflows: Benefits, Failure Regimes, and Budget Guardrails">Protocol-Preserving Context Trimming for Agentic Workflows: Benefits, Failure Regimes, and Budget Guardrails</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mas-cache <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 </div>
 
