@@ -1,0 +1,701 @@
+Title: MACE: Memory-Agent Co-Evolution with Adaptive Memory Graphs for Multi-Agent Systems
+
+URL Source: https://arxiv.org/pdf/2609.21533v1
+
+Published Time: Mon, 21 Sep 2026 00:44:13 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+Preprint 
+
+# MACE: M EMORY -A GENT CO-E VOLUTION WITH ADAPTIVE MEMORY GRAPHS FOR MULTI -A GENT SYSTEMS 
+
+Kairui Yang, Minghao An, Xunkai Li, Ziheng Yi Zekai Chen, Guangyuan He, Rong-Hua Li 
+
+ABSTRACT 
+
+LLM-based multi-agent systems generate collaboration traces that record how agents plan tasks, verify intermediate results, and repair failures. Reusing these procedures requires preserving an action’s prerequisites and the outputs needed by subsequent agents. Our empirical studies show that grouping these dependencies into functional memory units improves their retention, while connecting units increases retrieval of the units and links jointly required by a task. The preferred combination of units also changes between instructions and checklists, even when each combination’s content is fixed across formats. Updating choices from the outcomes of each combination and format pairing outperforms scoring combina-tions and formats separately. These findings motivate MACE, a memory-agent co-evolution framework that adapts memory organization and agent memory use through execution feedback. Its MemGoG structure represents functional units as subgraphs of related conditions, actions, and outputs, connecting them through support, conflict, and repair relations. MACE Loop selects task-relevant units and relations within a memory budget and provides each agent with instructions or checklists for its current operation. It records the selected units, presentation formats, agent outputs, and task outcomes to update unit scores and relations for retrieval and inform subsequent presentation choices. Across eight benchmarks, MACE outperforms ten baselines with an average score of 81.11%, compared with 78.97% for the strongest baseline, SAGE. 
+
+1 INTRODUCTION 
+
+LLM-based multi-agent systems (MAS) coordinate specialized agents through communication and tool use to solve complex tasks (Wu et al., 2024). During execution, agents generate collaboration traces that record task decomposition, intermediate results, verification steps, and error repairs. These traces provide experience for future tasks. Reusing a recorded procedure requires preserving the conditions under which an action is applicable, the action itself, and the output passed to later agents. Effective multi-agent memory therefore requires deciding which dependencies within and across previous executions to retain and how to deliver the retrieved experience to agents. Existing memory systems extract reusable information from interaction histories and organize it through relations and hierarchical graphs (Qian et al., 2024, Zhang et al., 2025). The units retrieved from these structures determine which parts of an earlier procedure remain available together. For example, reusing a verification step requires retaining the input claim, verification action, and resulting decision together. We call a subgraph preserving these dependencies for a local function a functional memory unit. In Sec. 4, we compare independent entries, subgraph retrieval from a unified graph, and linked functional units under shared content and memory budgets. The task success gains in Fig. 1(a) motivate examining which dependencies survive retrieval. Functional units retain approximately 83% of required internal dependencies, compared with 68% for nonfunctional groups matched in count, size, overlap, and connectivity. A task may also need units from several past executions, with one supplying an input or check required by another. Connecting the same units through outer relations increases the fraction of cross-experience requirements for which all necessary units and links are retrieved from 52% to 69% in Fig. 1(b). These findings motivate a graph of graphs that preserves dependencies within units and connects units needed together. Once these units are selected, their 1arXiv:2609.21533v1 [cs.LG] 18 Sep 2026 Preprint content must be presented to agents. We compare retrieving relevant units alone with also retrieving supporting units, presenting each combination as a guide or checklist. For each combination, content is fixed across formats. The relative performance of the two combinations reverses between formats in Fig. 1(c), showing that which units work better together depends on their presentation. Feedback must therefore record the selected combination and its format together to distinguish which pairing produced an outcome. With the memory library fixed, updating choices from these paired outcomes outperforms scoring combinations and formats separately or keeping choices fixed in Fig. 1(d). Thus, selecting linked memory units and deciding how agents use them require feedback that preserves the connection between both decisions. Motivated by these findings, we propose MACE, a memory-agent co-evolution framework that adapts memory organization and agent memory use through execution feedback. MACE consists of MemGoG and the MACE Loop. MemGoG constructs functional memory units from collaboration traces for current agent needs and connects them through typed relations such as support, conflict, and repair. Within MACE Loop, the Memory Composer selects task-relevant units and relations under a memory budget to form a working graph. The Agent-Memory Coupler extracts content for each agent’s current operation and presents it as instructions or a checklist. The Feedback Co-Evolver records selected units, presentation configurations, agent outputs, and task outcomes. These records update unit scores and relations for subsequent retrieval and inform later presentation choices. MemGoG supplies the units and relations used to compose memory and trace its use, while MACE Loop uses the resulting feedback to improve subsequent selection and delivery. Our contributions are threefold. (1) New Perspective. Four empirical studies show the importance of preserving dependencies within functional units, connecting units across experiences, and retaining the outcomes of memory composition and presentation pairings to improve subsequent choices. (2) 
+
+New Framework. We propose MACE, combining MemGoG with adaptive memory composition, agent-specific delivery, and feedback updates to memory scores, relations, and use records. (3) SOTA Performance. MACE leads ten baselines on all eight benchmarks, averaging 81.11% compared with 78.97% for SAGE. Ablations assess construction, composition, coupling, and feedback updates. 
+
+2 PRELIMINARIES 
+
+Multi-Agent Collaboration. We consider an LLM-based multi-agent system A = {Ai}Ni=1 with N
+
+agents collaborating to solve a task q. At collaboration step t, the execution state of agent Ai is 
+
+sti = ( q, r i, σ t, h ti, Zti , e ti), (1) where ri denotes its role, σt the collaboration stage, hti its observed interaction history, Zti its accessible intermediate artifacts, and eti its observed tool responses and environment information. 
+
+Memory-Augmented Execution. Let Mt denote the long-term memory store containing past tasks, collaboration trajectories, and feedback. The system uses sti and Mt to construct a memory input mti
+
+for agent Ai. Using mti as context, the agent produces action ati and artifact zti through 
+
+(ati, z ti ) = Ai(sti, m ti), ℓ(mti) ≤ bti, (2) where ℓ(·) counts memory tokens and bti is the memory token budget for agent Ai at step t. Generated artifacts are shared through the collaboration workflow. Execution traces and task feedback guide updates to the memory store and subsequent memory use. Our goal is to improve collaborative task performance by adapting memory to each agent’s role, stage, and state within the given budget. 
+
+3 RELATED WORK 
+
+LLM-based Multi-Agent Systems. LLM-based multi-agent systems coordinate specialized agents through communication and execution to solve complex tasks. AutoGen supports programmable conversations integrating language models, human input, and tools (Wu et al., 2024). MetaGPT organizes collaboration through standardized procedures and intermediate result verification (Hong et al., 2023). GPTSwarm represents agent operations and information flow as computational graphs and optimizes prompts and connections (Zhuge et al., 2024). These workflows generate instructions, responses, and intermediate artifacts that capture agent roles and task execution, providing experience for reuse across subsequent collaboration tasks. 2Preprint 
+
+Memory for Multi-Agent Systems. Memory for multi-agent systems preserves collaboration experience across tasks and participants. Experiential Co-Learning extracts shortcuts from historical trajectories and stores role-specific instruction and solution memories for subsequent software tasks (Qian et al., 2024). Collaborative Memory maintains private and shared memories with read and write policies governing information sharing across users and agents (Rezazadeh et al., 2025). These designs support experience extraction and controlled access, while application requires matching memory content and presentation to each agent’s role, current stage, and execution state. 
+
+Graph-Based Memory for Multi-Agent Systems. Graph-based memory organizes collaboration histories through explicit relations. G-Memory links insight, query, and interaction graphs for role-specific guidance and incorporates new trajectories (Zhang et al., 2025). GraphPlanner uses het-erogeneous graphs of historical and current interactions to guide agent role and model selection (Feng et al., 2026). ConMem connects strategy cards through typed relations for conflict resolution and token-budgeted memory composition (Tan et al., 2026). MACE constructs and combines memory graph cells for current execution needs, adapts their presentation to agents, and refines memory and its use through feedback. 
+
+4 EMPIRICAL STUDY 
+
+We investigate how memory preserves task support and how its value depends on agent use. Fig. 1 connects these questions through four diagnostics. 
+
+Study setup. We use TAT-QA for the main diagnostics and TabFact for replication. Historical memory, development, calibration, and evaluation tasks are separated by source table or document. Paired conditions share underlying content, backbone, agent workflow, and task states. Memory budgets count tokens supplied across all agents. Appendix A details the controls and metrics. 256 512 1024 2048                     
+
+> Budget (tokens)
+> 40 55 70 85
+> Success (%)
+> Items Graph MemGoG
+> Internal retention Cross-exp. support
+> 025 50 75 100
+> Coverage (%)
+> Graph Matched Units GoG
+> S1 S2 S3 S4
+> Task context
+> 025 50 75 100
+> Success (%)
+> C1G C2G C1C C2C
+> 12 48 96 144 192
+> Calibration tasks
+> 70 75 80 85
+> Probe success (%)
+> Fixed Separate Joint
+> (a) Organization (b) Structure (c) Composition (d) Feedback
+
+Figure 1. Diagnostics of memory reuse. (a) Task success across memory budgets. (b) Dependency retention and complete support across experiences. (c) Composition and use across four task contexts. (d) Probe success as calibration feedback accumulates. 
+
+Memory organization. With memory use fixed, we vary the budget from 256 to 2,048 tokens. Items retrieves independent entries, Graph extracts relevant subgraphs from a unified graph, and MemGoG selects linked functional subgraphs. At 1,024 tokens, Fig. 1(a) reports approximately 80% task success for MemGoG, compared with 68% for Graph and 65% for Items. The gap under a shared budget motivates examining which dependencies each organization preserves during retrieval. 
+
+Functional units and their relations. We separate functional boundaries from outer relations by comparing Graph, matched nonfunctional groups (Matched), functional units (Units), and MemGoG (GoG). Matched controls group count, size, overlap, and connectivity. Internal retention measures the fraction of dependency requirements preserved, while cross-experience coverage measures the fraction with complete support. In Fig. 1(b), Units retains approximately 83% of internal dependencies, compared with 68% for Matched. Adding outer relation access to the same units increases cross-experience coverage from 52% to 69%, while internal retention remains at 83%. These gains motivate functional units with explicit outer relations. 3Preprint 
+
+Dependence between composition and use. We test whether the preferred composition changes with its use format. C1 selects relevant units, whereas C2 also retrieves supporting units. Each composition is presented as a guide (G) or checklist (C), with content, recipient, timing, and budget matched across formats. Contexts S1 to S4 cross complete or partial task inputs with local or cross-experience support needs, as defined in Appendix A.1. In Fig. 1(c), C1 leads C2 under the guide format in S1, reaching approximately 82% versus 76%. Under the checklist format, the order reverses to 59% versus 78%. The reversal recurs across contexts, showing that composition value depends on how agents use the selected memory. 
+
+Feedback for joint selection. With the memory library fixed, three policies use the same growing calibration history. Fixed freezes the initial joint policy, Separate updates composition and format scores through their marginal returns, and Joint updates each pairing. Policies are evaluated on a fixed probe set whose outcomes stay outside their updates. At 192 calibration tasks, Fig. 1(d) reports approximately 85% probe success for Joint, 78% for Fixed, and 75% for Separate. The comparison with Separate supports retaining pairing information, while the comparison with Fixed supports learning from additional feedback. These findings motivate MemGoG as a structure for preserving and connecting reusable dependencies. Its identifiable units support joint decisions about composition and agent use. MACE Loop records the outcomes of these decisions and feeds them back to improve subsequent reuse. 
+
+5 METHODOLOGY 
+
+5.1 OVERVIEW 
+
+We present MACE, a memory-agent co-evolution framework built on MemGoG. As shown in Fig. 2, MemGoG constructs memory graph cells, the Need-aware Memory Composer forms a working graph, and the Adaptive Agent-Memory Coupler produces agent-specific patches. The Feedback Co-Evolver updates memory and subsequent use through execution feedback. MACE Coupler 
+
+MAS 
+
+Long -term Memory 
+
+> Segment memory
+> Analysis Need
+
+Construct fragmented Memory Graph Unit 
+
+> Node -level memory
+> Subgraph -level memory
+
+Unit Library 
+
+> Merge
+
+MemGOG 
+
+Candidate MemGOG 
+
+> Score
+
+Scored MemGOG  
+
+> Lower
+> Upper Utility
+> Support
+> Relevance
+> Conflict
+> Cost
+> Risk
+> Select
+
+Working MemGOG 
+
+MACE Composer 
+
+MACE Evolve 
+
+MAS 
+
+Working MemGOG                                 
+
+> Judge
+> 0.92 0.18 0.35 ⋯0.43 0.21 0.89 0.81 ⋯0.28
+> 0.85 0.82 0.90 ⋯0.88
+> 0.34 0.76 0.19 ⋯0.62 0.67 0.25 0.83 ⋯0.41 0.48 0.91 0.56 ⋯0.72 ⋮⋮⋮⋱⋮0.14 0.36 0.22 ⋯0.93
+
+Memory -Agent Relevance 
+
+> Gather
+> Select
+> Coupling
+> Memory -Agent Relevance Matrix
+
+Coupling for all agents 
+
+> Execute
+
+Memory -Use Trace 
+
+> Evaluate
+
+3-Level FeedBack 
+
+Local 
+
+Downstream 
+
+Team 
+
+> Current agent output
+> Next agent output
+> Overall task success
+> √
+> √
+> Update
+
+Updated Memory 
+
+> Utility
+> Relation
+> stronger
+> New
+
+Overall Pipeline 
+
+> Updated Memory
+
+Task 
+
+> Are Lygodium and
+> Maxillaria both
+> orchid genera?
+
+State & Long -term Memory  Candidate MemGOG  Score                                 
+
+> 0.92 0.18 0.35 ⋯0.43 0.21 0.89 0.81 ⋯0.28 0.85 0.82 0.90 ⋯0.88 0.34 0.76 0.19 ⋯0.62 0.67 0.25 0.83 ⋯0.41 0.48 0.91 0.56 ⋯0.72 ⋮⋮⋮⋱⋮0.14 0.36 0.22 ⋯0.93
+
+Working MemGOG  MAS Execution 
+
+Figure 2. Overview of MACE. MemGoG constructs candidate memory units from execution needs and long-term memory. The Composer selects a working graph, the Coupler generates agent-specific patches, and the Co-Evolver updates memory and its use through execution feedback. 5.2 MEM GOG C ONSTRUCTION 
+
+Motivation. Memory needs vary across agent roles, stages, and states. We construct memory units at suitable granularities and connect them by function. 4Preprint 
+
+Need identification. For each agent requiring memory at step t, we extract a need descriptor from its state and token budget, 
+
+dti = Need( sti, b ti), Dt = {dti}i∈I t , (3) where It indexes the agents receiving memory at step t. Each descriptor specifies the task, role, stage, current state, required memory function, and available budget. 
+
+Memory unit construction. We retrieve collaboration fragments from Mt and construct node-level or subgraph-level units for Dt. Each memory graph cell is represented as 
+
+gk = ( Vk, E k, τ k, f k, ι k, o k, U t(gk), p k), (4) where Vk and Ek specify its internal structure, τk its type, fk its memory function, ιk its activation conditions, ok its provided content, Ut(gk) its historical utility, and pk its source record. Constructors produce episodes from collaboration fragments, mechanisms from risk conditions and failure reasons, routines from reusable collaboration patterns, and role projections from relevant parts of routine and mechanism graphs. Source units connect current artifacts with their claims and sources, while conflict units record incompatibilities between memory units. 
+
+Graph assembly. The candidate library Ct forms the outer nodes of MemGoG, 
+
+Gcand  
+
+> t
+
+=  Ct, [
+
+> r∈R
+
+E(r)
+
+> t
+
+, E(r) 
+
+> t
+
+⊆ C t × { r} × C t, (5) where R contains support, abstraction, operationalization, role projection, conflict, repair, and feedback relations. The relation-specific edge sets E(r) 
+
+> t
+
+together form Et. These outer relations connect units while preserving their internal graphs. 5.3 NEED -AWARE MEMORY COMPOSER 
+
+Motivation. The candidate graph contains units with different relevance, costs, and compatibility. We combine their utilities and relations to compose a budgeted working graph. 
+
+Memory scoring. For each candidate g, the Composer collects relevance, historical utility, and support in ϕ+ 
+
+> t
+
+(g), and conflict, cost, and risk in ϕ− 
+
+> t
+
+(g). The resulting score is 
+
+St(g) = 1⊤
+
+> 3
+
+ ϕ+ 
+
+> t
+
+(g) − ϕ− 
+
+> t
+
+(g). (6) Here, 13 is the all-ones vector. Relevance assesses the unit’s suitability for Dt, and historical utility 
+
+Ut summarizes previous use. Support and conflict assess its relations with other candidates in Gcand  
+
+> t
+
+.Cost measures tokens, tool use, and latency, while risk measures unsuitable instruction transfer. 
+
+Budgeted graph composition. Filtering conflicting or high-risk suggestions yields the admissible pool Cadm  
+
+> t
+
+. We obtain Wt = Top Bt (Cadm  
+
+> t
+
+, S t), where Top Bt retains the min( Bt, |C adm  
+
+> t
+
+|) highest-scoring units, breaking ties by candidate order. Let ED 
+
+> t
+
+⊆ E t contain the task-relevant candidate relations. Restricting these relations to the selected units gives 
+
+Gwork  
+
+> t
+
+=  Wt, ED 
+
+> t
+
+∩ (Wt × R × W t), (7) where Bt is the memory-unit budget and the intersection retains relations whose endpoints both belong to Wt. Each agent’s rendered memory input is further controlled by its token budget bti.5.4 ADAPTIVE AGENT -M EMORY COUPLER 
+
+Motivation. Agents require different outputs from a shared working graph. We match memory units to each agent and adapt their content through configurable patches. 
+
+Memory-agent matching. We construct the relevance matrix shown in Fig. 2, 
+
+Rt = κt(gk, d ti, s ti)  
+
+> gk∈W t, i ∈I t
+
+, (8) where each row corresponds to a working memory unit and each column to a participating agent, with fixed orderings for both within step t. The matching function κt compares the unit’s activation conditions, function, and provided content with the agent’s role, stage, and pending operation. For agent Ai, the Coupler uses column i to prioritize units by their relevance and gathers the selected 5Preprint contents with their support and routine links into an agent-specific view Gview  
+
+> i,t
+
+. This view retains the source records needed to interpret the selected memory. 
+
+Adaptive patch generation. The Coupler converts the selected view into a patch configuration 
+
+P ti = ( cti, μ ti, φ ti, δ ti , α ti , λ ti, p ti), (9) whose fields specify content, mode, format, timing, strength, placement, and source records, respec-tively. The five modes provide a related case, a success or failure mechanism, a collaboration routine, an execution constraint, or a repair procedure. Format controls presentation, such as a checklist or output schema, while strength determines whether the content acts as a hint or an explicit requirement. We render the patch as 
+
+mti = Render bti (P ti ) ∈ L (bti), L(b) = {m | ℓ(m) ≤ b}. (10) The renderer adjusts content and presentation to return an input in L(bti), the set of memory inputs within the token budget. At the specified time, the system inserts mti into the configured input position, and the agent executes to produce its action and artifact. 5.5 FEEDBACK CO-E VOLVER 
+
+Motivation. Memory use affects agent outputs, subsequent collaboration, and task results. We use these outcomes to refine memory organization and patch configuration. 
+
+Memory-use tracing. Each execution records the used units, working graph, agent view, patch configuration, role, stage, action, and artifact, followed by downstream outcomes, task results, and resource usage. Let ξ denote a completed trace. Local feedback evaluates the current output, downstream feedback evaluates its contribution to subsequent agent operations, and team feedback records the final task outcome. With feedback levels H = {loc , down , team }, we combine these signals into the trace return 
+
+Rξ = X
+
+> h∈H
+
+rh(ξ) − ∥ pξ ∥1, (11) where rh evaluates feedback level h and pξ = ( cξ , v ξ )⊤ collects nonnegative penalties for resource use and unsuitable memory use. 
+
+Memory and strategy updates. When a trace completes at step t, let Uξ contain its used units. For units in the memory library or Uξ , assemble their current utilities as ut = [ Ut(gk)] k in a fixed order. Using the same order, define the diagonal mask Dξ = diag([ 1{gk ∈U ξ }]k). The update is 
+
+u+ 
+
+> t
+
+= ut + ηDξ
+
+ Rξ 1 − ut
+
+, (12) where η ∈ (0 , 1] controls the contribution of the completed trace and 1 matches the utility vector’s dimension. The updated entries are written back before new units are added. Useful compositions strengthen their recorded support relations, and incompatible suggestions create or reinforce conflict relations. Completed trajectories also supply new episodes and reusable routines for the memory library. The Composer uses updated utilities and relations to revise candidate scores and subsequent combinations. The Coupler consults stored role, stage, configuration, and outcome records to select subsequent patch modes, formats, timing, and strength. Updated units, relations, and use records return to Mt+1 for subsequent construction, composition, and coupling. 
+
+6 EXPERIMENTS 
+
+We evaluate MACE, a Memory-Agent Co-Evolution loop built on M EM GOG, across effective-ness, component necessity, efficiency, and robustness. We focus on four experimental questions: 
+
+EQ1 : Does MACE improve task-solving effectiveness over direct LLM answering, graph/memory-augmented baselines, and multi-agent workflow baselines? EQ2 : Are the core MACE components– MEM GOG, the Need-aware Memory Composer, the Adaptive Agent-Memory Coupler, and the Feedback Co-Evolver–necessary? EQ3 : What LLM token cost, normalized cost, and latency does the MACE loop introduce, and are these costs acceptable relative to its performance gains? EQ4 :Does MACE remain robust when the serving backbone, network condition, memory budget, and retrieved memory content are perturbed? 6Preprint 6.1 EXPERIMENTAL SETUP 
+
+Datasets. We evaluate MACE on eight benchmarks spanning six task domains: (1) knowledge-intensive question answering, including MMLU validation and MMLU-Pro; (2) mathematical reason-ing, including GSM8K and AQuA-RAT; (3) code generation, using HumanEval; (4) fact verification, using TabFact; (5) table-based reasoning, using TAT-QA; and (6) live programming, using Live-CodeBench v6 (LCB v6). 
+
+Baselines. The comparison includes five baseline families. (1) Direct , standard LLM-based reason-ing without explicit external memory, graph construction, or retrieval mechanisms. (2) MAGMA ,graph-memory-based methods that organize task-relevant information into structured graphs and exploit graph-based memory mechanisms. (3) SAGE , graph-enhanced retrieval that uses a structured knowledge index to guide answer generation. (4) General MAS , comprising Multiagent Debate (MAD), AgentVerse, AutoGen, and EvoAgent. (5) G-MAS , imported graph-based multi-agent workflow baselines including GPTSwarm, GraphSearch, and R-GFM. MAD uses multiple model instances to discuss and revise candidate answers (Du et al., 2024). AgentVerse combines expert recruitment, collaborative decisions, execution, and evaluation (Chen et al., 2024). AutoGen supports configurable conversations among agents and tools (Wu et al., 2024). EvoAgent generates diverse agent configurations through evolutionary operators (Yuan et al., 2025). 
+
+Sampling Protocol. For the local controlled rows, we construct the evaluation sets with the dataset-preparation code and evaluate Direct, MACE, MAGMA, and SAGE on the same prepared JSONL files. MMLU uses the converted validation split in original CSV order and keeps the first 153 examples from 1,531 validation records. MMLU-Pro and TabFact use fixed seed-42 samples of 500 test examples without replacement: MMLU-Pro is sampled with Python’s random.sample , while TabFact uses a seed-42 NumPy permutation and keeps the first 500 indices. GSM8K, HumanEval, AQuA-RAT, TAT-QA, and LiveCodeBench v6 use the complete available test splits in original order, containing 1,319, 164, 254, 1,663, and 175 examples, respectively. For the imported G-MAS baselines, we keep the reported values from the attachment for the overlapping datasets; their hidden configuration fields and raw predictions are not exposed, and their MMLU row follows the attachment’s seed42-500 setting rather than the local first153 validation setting. 6.2 PERFORMANCE COMPARISON (EQ1) Table 1. O VERALL PERFORMANCE (%). B OLD AND UNDERLINING INDICATE THE BEST AND SECOND -BEST SCORES . A VG . GIVES THE UNWEIGHTED MEAN AND RELATIVE CHANGE FROM 
+
+DIRECT . G-MAS ROWS ARE IMPORTED AUXILIARY BASELINES .                                                                                                                      
+
+> Description Methods Avg. ( ↑/↓vs. Direct) QA & Reasoning Code Fact & Table MMLU MMLU-Pro GSM8K HumanEval LCB v6 AQuA-RAT TabFact TAT-QA LLM Direct 71.53 (–) 88.24 70.60 64.22 84.15 48.57 79.92 73.20 63.32 Graph Memory MAGMA 69.71 ( ↓2.54%) 78.43 59.00 65.35 90.85 48.57 71.26 78.80 65.42 Graph Retrieval SAGE 78.97 ( ↑10.40%) 91.50 76.60 92.19 90.85 42.86 86.22 87.00 64.52 General MAS MAD 77.78 ( ↑8.74%) 89.15 71.15 91.65 85.03 47.66 87.21 85.66 64.75 AgentVerse 76.79 ( ↑7.36%) 87.60 75.33 84.24 92.24 47.13 82.55 81.00 64.22 AutoGen 76.54 ( ↑7.01%) 87.94 68.95 88.88 87.73 43.85 84.81 85.18 65.01 EvoAgent 77.45 ( ↑8.28%) 88.84 73.38 86.59 92.18 48.25 86.37 80.32 63.69 G-MAS GPTSwarm 74.12 ( ↑3.62%) 87.60 71.20 92.12 84.76 19.43 87.40 87.60 62.81 GraphSearch 73.96 ( ↑3.40%) 88.60 71.60 92.12 81.10 22.29 86.61 87.40 61.93 R-GFM 74.72 ( ↑4.47%) 88.60 68.60 92.04 89.02 19.43 87.01 87.20 65.87 MACE (Ours) 81.11 (↑13.40%) 92.81 78.80 92.27 93.29 49.14 87.80 87.80 66.99
+
+All values are percentages and higher is better. MMLU, MMLU-Pro, GSM8K, AQuA-RAT, and TabFact report parsed accuracy; TAT-QA reports exact match from the local official-style evaluator; HumanEval and LiveCodeBench v6 report pass@1 execution accuracy. The imported G-MAS MMLU values follow the attachment’s seed42-500 setting, while the local MMLU rows use validation first153 no-shuffle. 
+
+Table 1 compares MACE with ten baselines covering direct answering, graph memory, graph retrieval, general MAS, and imported G-MAS workflows. MACE achieves the highest score on all eight benchmarks and an average of 81.11%, compared with 78.97% for the strongest baseline, SAGE. The strongest general MAS baseline, MAD, averages 77.78%, followed by EvoAgent at 77.45%, AgentVerse at 76.79%, and AutoGen at 76.54%. Among the imported G-MAS methods, R-GFM has the highest average of 74.72%. MACE improves on Direct’s 71.53% average by 13.40% relative. 7Preprint Compared with SAGE, MACE increases MMLU-Pro from 76.60% to 78.80%, HumanEval from 90.85% to 93.29%, LCB v6 from 42.86% to 49.14%, and TAT-QA from 64.52% to 66.99%. The closest comparisons are GSM8K, with 92.27% for MACE and 92.19% for SAGE, and AQuA-RAT, with 87.80% for MACE and 87.40% for GPTSwarm. General MAS methods also provide competitive results, including 92.24% for AgentVerse on HumanEval and 91.65% for MAD on GSM8K. MACE leads all three domain groups, averaging 87.96% on QA & Reasoning, 71.22% on Code, and 80.86% on Fact & Table. Appendix C.1 reports these group averages for all methods. 6.3 ABLATION STUDY (EQ2) To answer EQ2, we ablate one component at a time while keeping the same LLM backbone, bench-mark split, memory budget, and evaluation script as the full MACE system. As shown in Table 2, every ablation reduces the average score from the full model’s 81.11%, indicating that the compo-nents are complementary. The largest drops come from removing the Agent-Memory Coupler (-5.88 percentage points) and replacing M EM GOG with a fixed memory form (-5.20 percentage points), showing that adaptive graph-structured memory and role-specific coupling drive most of the gain. The Memory Composer and Feedback Co-Evolver also contribute consistent improvements, while fixed patch mode causes the smallest loss (-0.63 percentage points), suggesting that mode adaptation is useful but less central than memory construction and coupling. Table 2. A BLATION RESULTS FOR EQ2 ( SINGLE -RUN PASS @1 ACCURACY , %). B EST RESULTS ARE IN BOLD AND SECOND -BEST ARE UNDERLINED . T HE ∆ AVG . COLUMN REPORTS THE ABSOLUTE PERCENTAGE -POINT CHANGE FROM THE FULL MACE MODEL .                                                                               
+
+> Ablated Component Variants Avg. ∆Avg. QA & Reasoning Code Fact & Table MMLU MMLU-Pro GSM8K HumanEval LCB v6 AQuA-RAT TabFact TAT-QA Fixed Memory Form w/o M EM GOG75.91 -5.20 87.40 72.80 86.80 88.41 50.00 81.10 81.00 59.77 No Composition w/o Memory Composer 77.58 -3.53 88.24 73.80 88.50 90.24 51.43 83.46 83.20 61.77 Plain Injection w/o Agent-Memory Coupler 75.23 -5.88 86.27 70.80 85.90 87.80 50.57 80.31 80.80 59.35 No Feedback Loop w/o Feedback Co-Evolver 79.70 -1.41 90.20 75.20 90.45 92.07 53.71 85.83 86.00 64.11 No Mode Adaptation Fixed Patch Mode 80.48 -0.63 91.50 76.40 90.91 92.68 54.29 86.61 86.60 64.88 MACE full (Ours) 81.11 –92.81 78.80 92.27 93.29 49.14 87.80 87.80 66.99
+
+6.4 EFFICIENCY ANALYSIS (EQ3) To answer EQ3, we evaluate the cost-performance profile of MACE under the same benchmark mixture used in Table 1. Rather than optimizing for minimal cost alone, this analysis asks whether the extra MACE reasoning loop yields a controlled cost-performance tradeoff. Table 3 summarizes the available measured runtime profile, while Figure 3 additionally overlays several additional measured baselines to provide a denser cost-performance comparison. MACE uses four structured LLM calls and 6.87K tokens per query on average, because it detects memory needs, composes a working MEM GOG subgraph, injects role-specific memory patches, and records feedback traces. This is more expensive than Direct and MAGMA, but the wall-clock overhead remains moderate: MACE averages 1.36 seconds per query, completes the 4,728-query evaluation suite in 106.78 minutes, and processes 44.28 queries per minute. Its latency is also lower than SAGE (2.41 seconds per query), with average scores of 81.11% and 78.97%, respectively, for the two methods. Even on the slowest subset, LCB v6, MACE remains at 3.76 seconds per query, and the remaining seven benchmarks stay below 1.82 seconds per query. These results indicate that the memory-agent co-evolution loop introduces acceptable runtime overhead for practical batch evaluation and deployment. 6.5 ROBUSTNESS ANALYSIS (EQ4) To answer EQ4, we conduct a controlled robustness stress-test suite that keeps the benchmark split, prompt template, memory construction procedure, and scoring script fixed while perturbing one deployment factor at a time. The suite covers four axes: serving-backbone replacement, network fluctuation, memory-cell budget reduction, and noisy memory retrieval. Figure 4 reports the measured stress-test trends rather than only listing the perturbation protocol. This setup separates practical deployment stability from raw effectiveness: a robust memory-agent system should degrade gradually when the model endpoint changes, remote calls become unstable, available memory cells are pruned, or retrieved cells include stale or irrelevant content. 8Preprint Table 3. E FFICIENCY AND RESOURCE COMPARISON FOR EQ3 ( AVAILABLE MEASURED RUNTIME LOGS ). A VG . A CC . REPORTS THE SINGLE -RUN PASS @1 ACCURACY FROM TABLE 1. P ROMPT ,
+
+COMPLETION , AND TOTAL TOKENS ARE MEASURED IN THOUSANDS PER QUERY . N ORMALIZED COST IS REPORTED RELATIVE TO DIRECT . TOTAL TIME REPORTS WALL -CLOCK MINUTES OVER 4,728 EVALUATED QUERIES , AND LATENCY REPORTS WALL -CLOCK SECONDS PER QUERY .DIRECT AND MACE USE PAIRED RUNTIME LOGS ; MAGMA AND SAGE USE THE AVAILABLE BASELINE RUNTIME LOGS . F OR AVG . A CC ., HIGHER IS BETTER ; FOR RESOURCE METRICS ,
+
+LOWER IS BETTER .
+
+Method Avg. Acc. # Calls Prompt Tok. Completion Tok. Total Tok. Norm. Cost Total Time Latency (%) (K) (K) (K) (×) (min) (s/query) Direct (LLM) 71.53 1.00 0.54 0.06 0.60 1.00 17.13 0.22 
+
+MAGMA (Graph Memory) 69.71 1.00 0.92 0.06 0.98 1.59 31.43 0.40 SAGE (Graph Retrieval) 78.97 3.00 4.61 0.89 5.50 9.69 190.10 2.41 MACE (Ours) 81.11 4.00 6.45 0.41 6.87 11.06 106.78 1.36 0.0 0.5 1.0 1.5 2.0 2.5 
+
+Latency (s/query) 
+
+> 68 72 76 80 82
+> Average accuracy (%)
+> Direct MAGMA RAG-lite CoT Self-Cons. Agent-Debate SAGE MACE
+
+(a) Accuracy-latency tradeoff 
+
+> Direct MAGMA RAG-lite CoT Self-Cons. Agent-Debate SAGE MACE
+> 0.0 0.7 1.4 2.1 2.8
+> Latency (s/query)
+> 0.22s 17m 0.40s 31m 0.61s 48m 0.76s 60m 1.18s 93m 1.72s 136m 2.41s 190m 1.35s 107m
+
+(b) Runtime profile  
+
+> Measured methods Efficiency frontier
+
+Figure 3. M EASURED COST -PERFORMANCE VISUALIZATION FOR EQ3. Left: average accuracy versus wall-clock latency per query. Right: runtime comparison; each bar label reports seconds per query and total wall-clock minutes. All markers and bars correspond to measured methods or measured baselines. Primary API Low-cost API Local fallback 
+
+> 72 74 76 78 80 82
+> Avg. score (%)
+
+(a) Backbone replacement    
+
+> 81.11 80.04 79.28
+> Clean +150ms +400ms 6% timeout 10% failure 15% unstable
+> 70 72 74 76 78 80 82
+> Avg. score (%)
+
+(b) Network fluctuation     
+
+> 81.11 80.56 79.72 78.94 77.86 76.92
+> 25 50 75 100
+
+Available memory cells (%) 
+
+> 70 75 80 85
+> Avg. score (%)
+
+(c) Memory-cell budget     
+
+> 81.76 84.40 85.74 86.63
+> 010 20 30
+
+Noisy memory candidates (%) 
+
+> 55 60 65 70 75 80
+> Avg. score (%)
+
+(d) Memory noise     
+
+> 78.97 77.00 73.80 70.30
+> 0510 15
+> Injected event rate (%)
+> Direct MAGMA SAGE MACE Network event rate
+
+Figure 4. M EASURED ROBUSTNESS RESULTS FOR EQ4. The four panels report stress-test perfor-mance under serving-backbone replacement, network fluctuation, memory-cell budget reduction, and noisy memory retrieval. Dashed or dotted references denote Direct and SAGE where applicable. Higher is better. 9Preprint Under backbone replacement, MACE changes from 81.11% with the primary API endpoint to 80.04% with a lower-cost endpoint and 79.28% with a local fallback model. All three configurations remain above the fixed Direct and SAGE references of 71.53% and 78.97%, respectively. The comparison tracks MACE performance across the three serving endpoints. Under network fluctuation, the score decreases smoothly as the injected instability becomes stronger: 80.56% with mild latency jitter, 79.72% with moderate jitter, 78.94% under timeout-with-retry, 77.86% with partial memory failure, and 76.92% in the severe unstable-network setting. The severe setting is 4.19 percentage points below the clean MACE run but still 5.39 points above Direct, indicating that retry and fail-open behavior can absorb a substantial part of remote-service instability. For memory-cell budget reduction, we average the measured scores over five representative bench-marks. MACE reaches 86.63% with the full memory budget, 85.74% at 75% budget, 84.40% at 50% budget, and 81.76% under the most aggressive 25% budget. The 75% setting is within 0.89 percentage points of full memory, while the 25% setting still stays clearly above the Direct average. This indicates that the composer does not require the entire memory graph to remain useful. For noisy memory retrieval, we keep the memory budget fixed and inject 0%, 10%, 20%, and 30% noisy candidates, including irrelevant, stale, or conflicting cells. Averaged over four task groups, MACE moves from 78.97% at 0% noise to 77.00%, 73.80%, and 70.30% as the noise ratio rises. At 30% noise, MACE scores 70.30%, compared with 66.95% for SAGE, 56.45% for MAGMA, and 55.65% for Direct. Across the three nonzero noise levels, MACE has the highest score among the four methods evaluated in this test. 
+
+7 CONCLUSION 
+
+We presented MACE, a memory-agent co-evolution framework that aligns reusable collaboration experience with the changing needs of multi-agent systems. Built on MemGoG, MACE organizes memory units at multiple granularities and composes working graphs according to agent needs, memory utility, and budget constraints. It then adapts memory content and presentation through agent-specific patches and uses local, downstream, and team feedback to refine memory units, graph relations, and subsequent memory use. MACE leads ten baselines across eight benchmarks, averaging 81.11% compared with 78.97% for SAGE. Ablation studies show the contributions of graph construction, memory composition, adaptive coupling, and feedback updates. These results support adapting memory organization and agent use through execution feedback. 
+
+REFERENCES 
+
+Weize Chen, Yusheng Su, Jingwei Zuo, Cheng Yang, Chenfei Yuan, Chi-Min Chan, Heyang Yu, Yaxi Lu, Yi-Hsin Hung, Chen Qian, Yujia Qin, Xin Cong, Ruobing Xie, Zhiyuan Liu, Maosong Sun, and Jie Zhou. AgentVerse. facilitating multi-agent collaboration and exploring emergent behaviors. In The Twelfth International Conference on Learning Representations , 2024. ICLR 2024 paper. Yilun Du, Shuang Li, Antonio Torralba, Joshua B. Tenenbaum, and Igor Mordatch. Improving factuality and reasoning in language models through multiagent debate. In Proceedings of the 41st International Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research , pp. 11733–11763. PMLR, 2024. ICML 2024 paper. Tao Feng, Haozhen Zhang, Zijie Lei, Peixuan Han, and Jiaxuan You. GraphPlanner. graph memory-augmented agentic routing for multi-agent LLMs. arXiv preprint, 2026. DOI 10.48550/arXiv.2604.23626. Sirui Hong, Mingchen Zhuge, Jiaqi Chen, Xiawu Zheng, Yuheng Cheng, Ceyao Zhang, Jinlin Wang, Zili Wang, Steven Ka Shing Yau, Zijuan Lin, Liyang Zhou, Chenyu Ran, Lingfeng Xiao, Chenglin Wu, and Jürgen Schmidhuber. MetaGPT. meta programming for a multi-agent collaborative framework. arXiv preprint, 2023. DOI 10.48550/arXiv.2308.00352. Chen Qian, Yufan Dang, Jiahao Li, Wei Liu, Zihao Xie, YiFei Wang, Weize Chen, Cheng Yang, Xin Cong, Xiaoyin Che, Zhiyuan Liu, and Maosong Sun. Experiential co-learning of software-developing agents. In Proceedings of the 62nd Annual Meeting of the Association for Computa-
+
+10 Preprint 
+
+tional Linguistics (Volume 1. Long Papers) . Association for Computational Linguistics, 2024. DOI 10.18653/v1/2024.acl-long.305. Alireza Rezazadeh, Zichao Li, Ange Lou, Yuying Zhao, Wei Wei, and Yujia Bao. Collaborative memory. multi-user memory sharing in LLM agents with dynamic access control. arXiv preprint, 2025. DOI 10.48550/arXiv.2505.18279. Zhixun Tan, Qiang Chen, Tairan Huang, Xiu Su, and Yi Chen. ConMem. structured memory-guided adaptation in training-free multi-agent systems. arXiv preprint, 2026. DOI 10.48550/arXiv.2606.08702. Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Awadallah, Ryen W. White, Doug Burger, and Chi Wang. AutoGen. enabling next-gen LLM applications via multi-agent conversations. In First Conference on Language Modeling , 2024. COLM 2024 paper. Siyu Yuan, Kaitao Song, Jiangjie Chen, Xu Tan, Dongsheng Li, and Deqing Yang. EvoAgent. towards automatic multi-agent generation via evolutionary algorithms. In Proceedings of the 2025 Conference of the Nations of the Americas Chapter of the Association for Computational Linguistics. Human Language Technologies (Volume 1. Long Papers) , pp. 6192–6217. Association for Computational Linguistics, 2025. DOI 10.18653/v1/2025.naacl-long.315. Guibin Zhang, Muxin Fu, Guancheng Wan, Miao Yu, Kun Wang, and Shuicheng Yan. G-Memory. tracing hierarchical memory for multi-agent systems. arXiv preprint, 2025. DOI 10.48550/arXiv.2506.07398. Mingchen Zhuge, Wenyi Wang, Louis Kirsch, Francesco Faccio, Dmitrii Khizbullin, and Jürgen Schmidhuber. Language agents as optimizable graphs. In Proceedings of the 41st International Conference on Machine Learning , 2024. DOI 10.48550/arXiv.2402.16823. 
+
+A EMPIRICAL STUDY PROTOCOL 
+
+Task partitions and execution. Historical, development, calibration, and evaluation sets are separated by source table or document, with near duplicates removed across partitions. Historical trajectories supply shared facts, actions, applicability conditions, artifacts, and relations. Retrieval, grouping, use formats, and selection rules are fixed on development tasks. Comparisons start from the same state before memory injection, with a fixed backbone, roles, tools, workflow, and equal repetition counts. Task success uses exact match for TAT-QA and accuracy for TabFact. 
+
+Organization and access controls. All conditions access the same facts and relation meanings, including relations across group boundaries. Items retrieves and reranks independent records, Graph selects nodes and expands relations, and MemGoG assembles linked functional subgraphs. Token budgets cover all injected memory, including repeated content, unit descriptions, and relations. Construction and retrieval use matched resource limits. The organization study fixes the rendering template and downstream use. 
+
+Functional boundaries and support metrics. Matched constrains nonfunctional groups to match the functional units in number, size distribution, overlap, and connectivity. Units and GoG use the same functional subgraphs and internal relations. GoG adds an explicit outer relation index and the associated access operations. Before inspecting retrieval outputs, we annotate support requirements from the visible task state and the common historical content. Each requirement can admit multiple valid support sets. An internal dependency requirement is satisfied when the injected memory retains the required endpoints, relations, and applicability conditions of at least one valid set. Internal retention is the fraction of these requirements satisfied. Cross-experience coverage is the fraction of requirements needing multiple experiences for which a complete valid support set is retrieved. Fixed requirement sets define both denominators, and empty retrieval receives zero coverage. A.1 COMPOSITION AND USE CONTEXTS 
+
+C1 selects units by relevance to the current task need. C2 additionally considers supporting relations and retrieves complementary units within the same token budget. For each task, both compositions 11 Preprint are fixed before execution and each is rendered as a guide or a checklist. The two formats preserve the composition’s facts and constraints, receiving agent, insertion point, and token allowance. Every evaluation task is run under all four pairings. The context rules are fixed on development tasks and use information available before execution. Complete inputs provide the inputs needed for the pending operation, while partial inputs leave some of them unresolved. Local support can be obtained from one historical experience. Cross-experience support requires complementary historical experiences to satisfy the current need. The four contexts are assigned as follows.           
+
+> Context Task inputs Support need S1 Complete Local S2 Complete Cross-experience S3 Partial Local S4 Partial Cross-experience
+
+Calibration and policy updates. The memory library and composition rules remain fixed. Each calibration task provides outcomes for all four pairings. Policies share initial records, subsequent feedback, and context labels. Within each context, Fixed retains the pairing selected from the initial batch. Separate averages each composition’s returns across formats and each format’s returns across compositions within each context, then selects the choices separately. Joint updates returns for individual pairings within each context. All checkpoints use the same held-out probe tasks, whose outcomes never enter policy updates. The comparisons assess pairing information and new feedback. 
+
+B EXPERIMENTAL SPECIFICATION 
+
+This appendix provides the complete experimental specification used by the current version of the paper. It expands the main experimental section with benchmark construction, scoring rules, baseline configuration, complete efficiency and robustness tables, implementation details of the memory-agent loop, and prompt/interface contracts. Unless explicitly marked as imported, all controlled results use the same prepared benchmark instances, answer parser, and scoring scripts across compared local methods. B.1 EVALUATION SCOPE 
+
+The experiments are organized around four questions. EQ1 evaluates overall effectiveness across eight benchmarks. EQ2 removes one MACE component at a time. EQ3 measures the cost-performance profile under the same benchmark mixture. EQ4 tests robustness under controlled perturbations to model serving, network reliability, memory budget, and retrieved memory quality. This design keeps the main paper concise while the appendix records the operational details needed to interpret or reproduce the comparisons. Two comparison regimes are used. The first is the controlled local regime, where Direct, MAGMA, SAGE, the additional efficiency baselines, ablations, and MACE are run with shared task files and common parsing/scoring code. The second is the imported G-MAS regime, where GPTSwarm, GraphSearch, and R-GFM are included as auxiliary multi-agent references from an external attach-ment. These imported rows are useful for positioning but are not treated as fully controlled local re-runs because their raw predictions and hidden configuration fields are unavailable. MAD, AgentVerse, AutoGen, and EvoAgent are additional general MAS baselines included in Table 1 across the eight benchmarks. B.2 BENCHMARK CONSTRUCTION AND METRICS 
+
+Table 4 lists the benchmark split, local sample size, and reported metric for each dataset. The eight benchmarks cover knowledge, mathematical reasoning, code generation, fact verification, table reasoning, and live programming. The local controlled rows in Table 1 use the same prepared files for a given benchmark. 12 Preprint Table 4. B ENCHMARK CONSTRUCTION AND SCORING DETAILS .                                    
+
+> Benchmark Domain Evaluated split / construction # Examples Metric MMLU Knowledge QA Validation split, first 153 records in original order 153 Accuracy MMLU-Pro Knowledge reasoning Test split, fixed seed-42 sample without replacement 500 Accuracy GSM8K Mathematical reasoning Complete available test split in original order 1,319 Parsed accuracy AQuA-RAT Mathematical reasoning Complete available test split in original order 254 Parsed accuracy HumanEval Code generation Official task set 164 pass@1 LiveCodeBench v6 Live programming Complete available v6 split in original order 175 pass@1 TabFact Fact verification Test split, seed-42 NumPy permutation, first 500 indices 500 Accuracy TAT-QA Table reasoning Complete available test split in original order 1,663 Exact match
+
+For multiple-choice tasks, the parser first reads an explicit answer field and otherwise falls back to the final unambiguous option mention. For mathematical and short-answer tasks, the parser normalizes punctuation, case, articles, and whitespace before comparison. For code-generation tasks, the completion is submitted to the benchmark execution harness and the reported metric is pass@1. For TAT-QA, the local official-style exact-match evaluator is used consistently for Direct, local baselines, ablations, and MACE. B.3 ANSWER CONTRACTS 
+
+Table 5 describes the answer interface used by the task adapter. Rationale fields are stored for feedback construction and error analysis, but they are not counted by the scorer unless the benchmark itself requires executable code or a structured answer. Table 5. T ASK -FAMILY OUTPUT CONTRACTS .
+
+Task family Required output Scoring field Multiple choice Final option plus optional short ratio-nale Parsed option label Short-answer QA Compact final answer plus optional rationale Normalized answer string Mathematical reasoning Final numerical or option answer plus optional derivation Parsed final value or option Fact verification Entailed / refuted style label as re-quired by the benchmark Parsed label Table reasoning Final cell, value, span, or expression answer Exact-match normalized answer Code generation Executable completion under the of-ficial benchmark interface Official pass@1 result 
+
+B.4 BASELINE FAMILIES 
+
+Table 6 summarizes the compared methods and the controlled mechanism changed by each baseline. Direct isolates the base model without explicit memory. MAGMA and SAGE represent graph-memory and graph-retrieval alternatives. RAG-lite, CoT, Self-Consistency, and Agent-Debate are used in EQ3 to make the cost-performance visualization denser. The general MAS additions cover debate, expert collaboration, configurable conversations, and evolutionary agent generation. The G-MAS rows are imported multi-agent references, and MACE combines memory composition, role-specific coupling, and feedback evolution. General MAS configurations specify agent roles, agent counts, interaction limits, final-answer rules, and token budgets. AutoGen uses an explicit conversation configuration, while EvoAgent settings include population size and generation count. Resource accounting covers role generation, discussion, execution, and answer aggregation. B.5 ACCOUNTING RULES 
+
+Efficiency and cost are reported per query. Prompt tokens, completion tokens, and total tokens are averaged over the evaluated queries and reported in thousands. Latency is wall-clock seconds per query, and total time is the elapsed wall-clock time over the 4,728-query evaluation suite. Normalized 13 Preprint Table 6. C OMPARED SYSTEMS AND CONTROLLED MECHANISM .                            
+
+> Method Family Controlled mechanism Direct LLM-only Single model answer without explicit graph construction, retrieval, or memory evolution. MAGMA Graph memory Structured graph memory is provided as task context. SAGE Graph retrieval Graph-indexed evidence is retrieved and used to guide answer generation. MAD General MAS Multiple model instances discuss and revise candidate answers. AgentVerse General MAS Experts collaborate through recruitment, execution, and evaluation. AutoGen General MAS Configured agents coordinate through conversations and tool calls. EvoAgent General MAS Evolutionary operators generate diverse agent configurations. RAG-lite Retrieval baseline Lightweight retrieved context is appended to the task prompt. CoT Reasoning prompt The model is prompted to produce intermediate reasoning before the final answer. Self-Consistency Sampling / aggregation Multiple candidate answers are generated and aggregated. Agent-Debate Multi-agent workflow Multiple agent responses are compared before the final answer is emitted. GPTSwarm / GraphSearch / R-GFM Imported G-MAS Values are imported from the auxiliary multi-agent attachment for overlapping datasets. MACE Memory-agent co-evolution Need-aware memory composition, adaptive coupling, and feedback-driven graph evolution.
+
+cost divides each method’s measured per-query cost by the Direct per-query cost. It is therefore a relative accounting statistic, not a deployment price quote. 
+
+C ADDITIONAL RESULT DETAILS 
+
+C.1 DOMAIN -L EVEL EQ1 S UMMARY 
+
+The main paper reports the full benchmark-by-benchmark table. Table 7 compresses the same values into three domain groups to show where the gains are concentrated. The QA & Reasoning group averages MMLU, MMLU-Pro, and GSM8K. The Code group averages HumanEval and LiveCodeBench v6. The Fact & Table group averages AQuA-RAT, TabFact, and TAT-QA. Table 7. D OMAIN -LEVEL AVERAGES DERIVED FROM TABLE 1. 
+
+Method Overall Avg. QA & Reasoning Code Fact & Table Direct 71.53 74.35 66.36 72.15 MAGMA 69.71 67.59 69.71 71.83 SAGE 78.97 86.76 66.86 79.25 MAD 77.78 83.98 66.35 79.21 AgentVerse 76.79 82.39 69.69 75.92 AutoGen 76.54 81.92 65.79 78.33 EvoAgent 77.45 82.94 70.22 76.79 GPTSwarm 74.12 83.64 52.10 79.27 GraphSearch 73.96 84.11 51.70 78.65 R-GFM 74.72 83.08 54.23 80.03 MACE 81.11 87.96 71.22 80.86 
+
+MACE leads all three domain groups after including the four general MAS baselines. On QA & Reasoning, it averages 87.96%, followed by SAGE at 86.76%. On Code, it averages 71.22%, followed by EvoAgent at 70.22%. On Fact & Table, it averages 80.86%, followed by R-GFM at 80.03%. The strongest baseline thus differs across groups, while MACE retains the highest group average in each comparison. Overall scores weight all eight benchmarks equally, with three benchmarks in QA & Reasoning, two in Code, and three in Fact & Table. C.2 ABLATION COMPONENT ROLES 
+
+The EQ2 ablation table in the main text reports the benchmark scores. Table 8 adds the interpretation of each ablation. The ablations are designed to change one functional role while preserving the same benchmark files, scoring script, and model-serving setup. The largest losses occur when removing the coupling mechanism or replacing M EM GOG, suggesting that the key advantage is not simply longer context or more calls. The smaller loss from Fixed Patch Mode suggests that once memory is structured and routed, mode adaptation provides an additional but less dominant improvement. 14 Preprint Table 8. F UNCTIONAL MEANING OF EACH MACE ABLATION .                     
+
+> Variant Component removed or constrained Avg. / Drop Diagnostic target w/o M EM GOGReplaces graph-structured memory with a fixed memory form 75.91 / -5.20 Tests whether typed memory structure matters. w/o Memory Composer Removes need-aware memory selection before answer generation 77.58 / -3.53 Tests whether compact memory construction matters. w/o Agent-Memory Coupler Uses plain memory injection instead of role-specific coupling 75.23 / -5.88 Tests whether adaptive memory-agent alignment matters. w/o Feedback Co-Evolver Disables post-run feedback evolution 79.70 / -1.41 Tests whether outcome-aware memory updates matter. Fixed Patch Mode Keeps patching active but removes mode adaptation 80.48 / -0.63 Tests whether adaptive patch mode matters beyond fixed patching. Full MACE Uses all components 81.11 / – Full memory-agent co-evolution loop.
+
+C.3 EXTENDED EFFICIENCY TABLE 
+
+The main text reports the measured runtime logs for Direct, MAGMA, SAGE, and MACE. Figure 3 also includes additional measured baselines to make the cost-performance frontier less sparse. Table 9 gives the values used in that figure. Table 9. E XTENDED MEASURED COST -PERFORMANCE POINTS FOR EQ3. 
+
+Method Avg. Acc. (%) Latency (s/query) Total Time (min) Total Tok. (K/query) Norm. Cost ( ×)Direct 71.53 0.22 17.13 0.60 1.00 MAGMA 69.71 0.40 31.43 0.98 1.59 RAG-lite 73.24 0.61 48.08 1.73 2.81 CoT 74.86 0.76 59.90 2.08 3.36 Self-Cons. 77.42 1.18 93.00 3.62 5.86 Agent-Debate 78.18 1.72 135.57 4.98 8.07 SAGE 78.97 2.41 190.10 5.50 9.69 MACE 81.11 1.36 106.78 6.87 11.06 
+
+Table 10. D ATASET -LEVEL RUNTIME PROFILE FOR DIRECT AND MACE. 
+
+Dataset # Queries Direct MACE Latency (s/query) Total Tok. (K/query) Latency (s/query) Total Tok. (K/query) AQuA-RAT 254 0.15 0.16 1.09 4.83 GSM8K 1,319 0.13 0.14 0.77 4.26 HumanEval 164 0.28 0.47 1.06 5.87 LiveCodeBench v6 175 1.66 1.27 3.76 12.57 MMLU 153 0.22 0.15 1.20 4.30 MMLU-Pro 500 0.29 0.33 1.33 5.07 TabFact 500 0.12 0.62 0.83 6.20 TAT-QA 1,663 0.15 1.09 1.81 9.72 
+
+The runtime profile shows two different sources of overhead. On short question-answering and mathematical reasoning tasks, MACE’s overhead is mainly the additional memory-agent calls. On LiveCodeBench v6 and TAT-QA, the prompt and output are longer, so both latency and token count increase more sharply. Even in those cases, the measured average latency remains below four seconds per query. C.4 ROBUSTNESS PROTOCOL 
+
+The EQ4 stress tests perturb one deployment factor at a time while keeping the benchmark split, prompt template, memory construction procedure, and scoring script fixed. Table 11 summarizes the controlled variables. These experiments measure whether the memory-agent loop degrades smoothly under plausible deployment changes; they are not intended as a fully adversarial security evaluation. Table 11. C ONTROLLED ROBUSTNESS PROTOCOL FOR EQ4. 
+
+Axis Perturbation levels Held fixed Serving backbone Primary API, low-cost API, local fallback model Benchmark instances, memory loop, parser, scorer Network condition Clean, latency jitter, timeout with retry, partial memory failure Prompt, memory budget, endpoint assignment Memory-cell budget 25%, 50%, 75%, and 100% available cells Ranking rule, scorer, benchmark subset Noisy memory retrieval 0%, 10%, 20%, and 30% noisy candidates Candidate count, memory budget, task prompt 
+
+For backbone replacement, MACE is evaluated with the same memory-agent pipeline and different serving endpoints. For network fluctuation, the runner injects latency, timeout, and partial memory-15 Preprint service failure events and then uses the same retry and fail-open policy across affected calls. For memory-cell budget reduction, available cells are pruned before composition. For noisy retrieval, irrelevant, stale, or conflicting candidates are injected into the candidate set while the answer contract remains unchanged. C.5 COMPLETE ROBUSTNESS VALUES 
+
+Table 12 reports the backbone-replacement values used by Figure 4. Direct and SAGE are included as fixed references. The local fallback produces the largest drop for MACE, but the score remains above both references. Table 12. B ACKBONE REPLACEMENT RESULTS FOR EQ4. 
+
+Condition Serving change MACE Direct ref. SAGE ref. Primary API Clean serving endpoint 81.11 71.53 78.97 Low-cost API Cost-constrained serving endpoint 80.04 71.53 78.97 Local model On-premise fallback endpoint 79.28 71.53 78.97 
+
+Table 13. N ETWORK FLUCTUATION RESULTS FOR EQ4. 
+
+Condition Added latency Timeout rate Partial failure Retry rate MACE Direct ref. Clean serving 0 ms 0% 0% 0.0% 81.11 71.53 Mild latency jitter 150 ms 0% 0% 1.5% 80.56 71.53 Moderate latency jitter 400 ms 0% 0% 4.0% 79.72 71.53 Timeout with retry 400 ms 6% 0% 6.8% 78.94 71.53 Partial memory failure 400 ms 6% 10% 11.4% 77.86 71.53 Severe unstable network 650 ms 8% 15% 16.7% 76.92 71.53 
+
+Table 14 reports average scores over MMLU, GSM8K, HumanEval, TabFact, and TAT-QA when the available memory-cell budget is reduced. Direct is unchanged because it does not use the memory-cell budget. The graph-memory and graph-retrieval baselines degrade more steeply when the budget is reduced to 25%, while MACE retains a larger fraction of its full-budget score. Table 14. M EMORY -CELL BUDGET RESULTS AVERAGED OVER FIVE BENCHMARKS .
+
+Method 25% budget 50% budget 75% budget 100% budget Direct 74.63 74.63 74.63 74.63 MAGMA 69.64 72.36 74.10 75.77 SAGE 80.44 83.56 85.30 86.64 MACE 81.76 84.40 85.74 86.63 
+
+Table 15 reports average performance over four task groups under noisy memory retrieval. The 0% column is the clean candidate-set condition for this stress test. As the injected noise ratio increases, MACE leads the four compared methods at 10%, 20%, and 30% noise. Table 15. N OISY MEMORY RETRIEVAL RESULTS AVERAGED OVER FOUR TASK GROUPS .
+
+Method 0% noise 10% noise 20% noise 30% noise Direct 68.40 65.03 60.62 55.65 MAGMA 69.67 66.38 62.08 56.45 SAGE 80.10 76.82 72.35 66.95 MACE 78.97 77.00 73.80 70.30 
+
+D MACE I MPLEMENTATION DETAILS 
+
+D.1 MEMORY -A GENT EXECUTION LOOP 
+
+Each MACE query is processed by a four-call memory-agent loop. First, the Need-aware Memory Composer determines whether the instance requires external memory and selects a compact working 16 Preprint Table 16. P ER -TASK -GROUP NOISY RETRIEVAL VALUES FOR MACE. 
+
+Task group 0% noise 10% noise 20% noise 30% noise Knowledge QA 84.10 82.30 79.40 76.30 Math Reasoning 92.30 90.10 86.70 83.40 Code Generation 62.10 59.80 56.20 52.40 Table Reasoning 77.40 75.80 72.90 69.10 
+
+MEM GOG subgraph. Second, the Adaptive Agent-Memory Coupler converts the selected cells into role-specific memory patches rather than injecting all retrieved content into a single flat prompt. Third, the answer agent solves the task with the current task prompt and assigned memory patch. Fourth, the Feedback Co-Evolver records the outcome, updates cell utility, and stores reusable traces for later queries. Gold answers are used only by the scorer and post-run feedback step; they are not exposed to the answer-generation prompt. Table 17. H IGH -LEVEL MACE EXECUTION STAGES .
+
+Step Stage Output 1 Task adaptation A normalized task specification with public context, question, benchmark tag, and answer schema. 2 Need-aware composition A compact working M EM GOG subgraph and a memory-need decision. 3 Agent-memory coupling Role-specific memory patches with provenance and confidence notes. 4 Answer generation A raw completion plus parsed prediction under the benchmark answer contract. 5 Scoring Task metric, success flag, and error type when available. 6 Feedback co-evolution Utility updates, reusable traces, and revised memory state for future tasks. 
+
+D.2 ALGORITHMIC DETAILS 
+
+Algorithms 1–3 give the implementation-level pseudocode for the MACE loop. The algorithms mirror the execution invariants in Table 19: memory is read before prediction, gold labels are used only by the scorer, and graph updates are committed only after scoring. 
+
+Algorithm 1 MACE INFERENCE AND MEMORY EVOLUTION FOR ONE QUERY 
+
+Require: task instance x, graph snapshot Gt, memory budget B, scorer S
+
+Ensure: prediction ˆy, updated graph Gt+1 , log record r
+
+1: τ ← ADAPT TASK (x)
+
+2: (d, C ) ← DETECT MEMORY NEED (τ, G t, B )
+
+3: if d = NOMEMORY then 
+
+4: W ← ∅ ; P ← ∅ 
+
+5: else 
+
+6: (W, P ) ← COMPOSE AND COUPLE (τ, G t, C, B )
+
+7: end if 
+
+8: z ← ANSWER (τ, P )
+
+9: ˆy ← PARSE (z, τ. schema) 
+
+10: m ← S(ˆ y, x )
+
+11: r ← BUILD RECORD (τ, W, P, z, ˆy, m )
+
+12: Gt+1 ← FEEDBACK COEVOLVE (Gt, r, B )
+
+13: return ˆy, G t+1 , r 
+
+D.3 MEM GOG S TATE 
+
+MEM GOG is used as a structured memory substrate rather than a flat retrieval list. The working subgraph contains task-relevant memory cells, provenance records, role assignments, and feedback 17 Preprint 
+
+Algorithm 2 NEED -AWARE COMPOSITION AND AGENT -MEMORY COUPLING 
+
+Require: task specification τ , graph snapshot Gt, candidates C, memory budget B
+
+Ensure: working subgraph W , role-specific memory patches P
+
+1: C ← VALIDATE CANDIDATES (C, G t)
+
+2: for all c ∈ C do 
+
+3: sc ← SCORE CELL (c, τ, utility( c), freshness( c), conflict( c)) 
+
+4: end for 
+
+5: W ← ∅ 
+
+6: for all c ∈ SORT BYSCORE (C, s ) do 
+
+7: if FITS BUDGET (W, c, B ) and ADDS NEW EVIDENCE (W, c ) then 
+
+8: W ← W ∪ LINEAGE SUBGRAPH (c, G t)
+
+9: end if 
+
+10: end for 
+
+11: for all role a ∈ τ. roles do 
+
+12: Pa ← SELECT VISIBLE CELLS (W, a )
+
+13: Pa ← DEDUPLICATE AND MARK RISK (Pa)
+
+14: Pa ← TRIM TOPATCH BUDGET (Pa, B )
+
+15: end for 
+
+16: return W, {Pa}a∈τ. roles 
+
+Algorithm 3 FEEDBACK CO -EVOLUTION AFTER SCORING 
+
+Require: graph snapshot Gt, prediction record r, update budget B
+
+Ensure: updated graph Gt+1 
+
+1: ∆ ← ∅ 
+
+2: for all memory cell c ∈ r. usedCells do 
+
+3: qc ← CREDIT (c, r. score , r. errorType) 
+
+4: ∆ ← ∆ ∪ UPDATE UTILITY (c, q c)
+
+5: end for 
+
+6: if REUSABLE SUCCESS (r) then 
+
+7: ∆ ← ∆ ∪ WRITE TRACE CELL (r)
+
+8: else if ACTIONABLE FAILURE (r) then 
+
+9: ∆ ← ∆ ∪ WRITE WARNING CELL (r)
+
+10: end if 
+
+11: ∆ ← APPLY LIFECYCLE RULES (Gt, ∆, B )
+
+12: ∆ ← VALIDATE DELTA (Gt, ∆) 
+
+13: Gt+1 ← COMMIT (Gt, ∆) 
+
+14: return Gt+1 
+
+traces. The graph state is read before prediction and updated only after scoring, which prevents the current gold answer from leaking into its own prediction. Table 18. C ONCEPTUAL NODE AND EDGE TYPES IN THE MACE MEMORY GRAPH .
+
+Object Stored content Role in the loop Task node Benchmark id, task family, public metadata Anchors retrieval and feedback to the evaluated instance. Memory cell Reusable strategy, warning, fact pattern, or solution trace Provides prior experience to the composer. Role patch Cell subset assigned to an answer role Controls which memory is exposed to generation. Feedback trace Score, parsed answer, error type, useful-cell signal Supervises utility and memory-state updates. Utility state Freshness, confidence, and usefulness estimates Ranks cells and resolves memory-budget pressure. Typed edge Selection, assignment, support, conflict, or update link Preserves provenance and relation structure. 
+
+18 Preprint D.4 NEED -A WARE MEMORY COMPOSER 
+
+The composer decides how much memory to expose before answer generation. It uses the task specification to identify memory demand, retrieves candidate cells from M EM GOG, filters low-utility or conflicting candidates, and keeps a compact subgraph under the active memory budget. This stage is responsible for converting a potentially large memory state into a small set of task-relevant cells. The composer has three diagnostic functions. First, it can abstain from retrieving memory when the task is better answered directly. Second, it can prefer high-utility cells over high-similarity but stale cells. Third, it can preserve provenance links so that the answer agent can distinguish reusable experience from unsupported claims. D.5 ADAPTIVE AGENT -M EMORY COUPLER 
+
+The coupler converts selected cells into memory patches. It does not simply append every retrieved cell to the prompt. Instead, it groups memory by role, deduplicates near-identical advice, marks stale or conflicting cells, and orders the remaining content so that high-value cells appear earlier in the patch. This is the component tested by the “w/o Agent-Memory Coupler” ablation, which produces the largest EQ2 drop. D.6 FEEDBACK CO-E VOLVER 
+
+The co-evolver runs after scoring. It stores the raw response, parsed answer, metric value, selected memory cells, and error type. Positive feedback can increase a cell’s utility or promote a reusable trace, while negative feedback can lower confidence, attach a warning, or keep a failure mode available as a cautionary memory. The update is causal: prediction is completed before any gold-derived feedback is written. D.7 EXECUTION INVARIANTS 
+
+Table 19 lists the invariants enforced across the local evaluation runs. These constraints are important because the method updates memory over time; without them, memory evolution could make comparisons ambiguous. Table 19. E XECUTION INVARIANTS FOR CONTROLLED MACE EVALUATION .    
+
+> Invariant Purpose Fixed task file per bench-mark Ensures that local methods answer the same instances in the same evalua-tion set. Read-before-write memory order Prevents current-task feedback from influencing the current prediction. Shared answer parser Avoids method-specific parsing advantages. Scorer-only gold access Keeps gold answers outside model-facing prompts. Logged raw completions Makes parsing and scoring decisions auditable. Stable perturbation axis in EQ4 Changes one deployment factor at a time for interpretability.
+
+E HYPERPARAMETERS AND REPRODUCIBILITY 
+
+E.1 SHARED EVALUATION SETTINGS 
+
+Table 20 records the shared settings that are explicitly controlled by the current experimental draft. Parameters not exposed by an imported baseline are left unspecified rather than inferred. E.2 METHOD -L EVEL RESOURCE SETTINGS 
+
+Table 21 summarizes the measured resource profile for the four methods with complete runtime logs in the main EQ3 table. The number of LLM calls is the average call count used by the logged implementation. 19 Preprint Table 20. S HARED EVALUATION SETTINGS USED BY THE CONTROLLED LOCAL ROWS .
+
+Category Setting Value / rule Task pool Total local queries 4,728 queries across eight benchmarks. MMLU sampling Local split rule Validation first153 in original CSV order. MMLU-Pro sampling Local split rule Seed-42 sample of 500 test examples without replacement. TabFact sampling Local split rule Seed-42 NumPy permutation, first 500 test indices. Other local datasets Local split rule Complete available test split in original order. Evaluation statistic Main tables Single-run percentage score for each reported row. Resource statistic EQ3 Mean tokens and wall-clock latency per query. Robustness statistic EQ4 One perturbation axis changed at a time. 
+
+Table 21. M EASURED RESOURCE SETTINGS FOR MAIN EQ3 METHODS .
+
+Method LLM calls Prompt Tok. (K) Completion Tok. (K) Total Tok. (K) Tasks / min Direct 1.00 0.54 0.06 0.60 276.03 MAGMA 1.00 0.92 0.06 0.98 150.42 SAGE 3.00 4.61 0.89 5.50 24.87 MACE 4.00 6.45 0.41 6.87 44.28 
+
+E.3 RUN LOGS 
+
+The local evaluation logs store the raw model response, parsed answer, task identifier, benchmark name, prompt-token count, completion-token count, wall-clock latency, and scorer output. MACE additionally records the selected memory cells, role-specific memory patch, feedback signal, and updated memory state. Failed requests are retried under the same prompt and decoding configuration; accepted completed records are reused when resuming a run. Table 22. R EPRODUCIBILITY FIELDS RETAINED BY LOCAL RUNS .
+
+Field group Stored fields Task metadata Benchmark name, task id, task family, split source, and prompt template version. Model output Raw completion, parsed answer, parser fallback path, and final scorer input. Resource usage Prompt tokens, completion tokens, total tokens, latency, elapsed time, and retry count. Memory trace Selected memory ids, assigned patch, discarded candidates, and conflict or stale-cell flags. Feedback trace Score, success flag, error type, useful-cell signal, and memory update summary. Resume state Completed task ids and accepted result records. 
+
+E.4 FAILURE AND RETRY HANDLING 
+
+For normal evaluation, a failed model request is retried with the same prompt and decoding configu-ration. For EQ4 network perturbations, injected failures are logged separately from model errors so that the effect of the perturbation can be measured. If memory retrieval fails in a fail-open setting, the answer agent proceeds with the available patch or an empty patch rather than receiving fabricated memory content. 20 Preprint 
+
+F PROMPT AND INTERFACE SPECIFICATION 
+
+F.1 TASK PROMPT BOUNDARY 
+
+Every non-code benchmark instance is converted into a task prompt with four ordered fields: public context or table content, question text, dataset-specific directive, and answer schema. The answer schema asks for a compact answer field and, when useful for feedback analysis, a short rationale field. The scorer uses only the parsed answer field. Code-generation benchmarks retain the official function signature and test harness interface. The task prompt boundary is also a safety boundary for evaluation. Retrieved memory is presented as prior experience, not as ground truth. The task prompt does not contain gold answers, post-task feedback, or future evaluation outcomes. Dataset directives specify the expected output format and scoring criterion rather than providing solution content. F.2 MEMORY -P ATCH INTERFACE 
+
+The Adaptive Agent-Memory Coupler serializes memory as role-specific patches. Each patch contains a memory identifier, compact cell content, provenance summary, and an optional warning when the cell is stale or low-confidence. Internal controller features such as utility, freshness, and role affinity are used to select and order cells, but are not shown as numeric scores in the task prompt. The prompt instructs the answer agent to treat memory as reusable experience rather than factual authority. Table 23. S TRUCTURED INTERFACES USED BY THE MACE LOOP .            
+
+> Interface Required fields Purpose Task specification Instance id, benchmark, public context, question, output schema Creates the model-facing task prompt. Memory request Need type, candidate budget, task entities, role target Guides memory composition before answer generation. Memory patch Cell id, content summary, provenance, confidence note Provides compact role-specific experience. Agent response Answer field, optional rationale, raw completion Supports scoring and post-run analysis. Feedback record Score, error type, useful cells, update signal Updates M EM GOG after the prediction is scored.
+
+F.3 PARSING AND VALIDATION 
+
+For multiple-choice tasks, the parser first reads an explicit answer field and otherwise falls back to the final unambiguous option mention. For open-answer tasks, the parser normalizes case, punctuation, articles, and whitespace before matching. For code tasks, no natural-language parser is used; the completion is passed to the official execution harness. Memory updates are applied only after the scorer returns a task outcome, which preserves the causal separation between pre-task memory retrieval and post-task feedback. F.4 END -TO -E ND DATA FLOW 
+
+Table 24 connects the prompt boundary to the memory update boundary. The scorer is the only stage that consumes gold labels, and its output becomes feedback only after the prediction is complete. Table 24. E ND -TO -END INTERFACE FLOW FOR ONE MACE QUERY .
+
+Stage Input Validated output Task adapter Raw benchmark instance Task specification with public context and answer schema. Memory composer Task specification and graph snapshot Candidate memory set and compact working subgraph. Agent-memory coupler Working subgraph and role target Role-specific memory patch. Answer agent Task prompt and memory patch Raw completion and answer object. Parser and scorer Raw completion and scorer-only target Parsed answer, metric value, and success flag. Feedback co-evolver Prediction record and scorer output Updated utility, trace record, and memory-state delta. 
+
+21
