@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-22</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-23</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 2 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-22 22:20:45 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-23 21:57:18 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读2篇、速读1篇，聚焦大模型长会话中KV缓存该放GPU、CPU还是SSD，以及多副本27B推理共享缓存的正确性与性能边界。最值得看的是缓存分层放置策略（9.0分）和共享缓存的失效风险与性能上限（8.0分），速读篇则用H100实测前缀复用与首token延迟。普通读者可优先读第一篇，再结合速读的H100数据判断自己场景该不该做前缀复用或分层缓存。</p>
+<p>今日精读 H100 上 LLM 服务的前缀复用与首 token 时延研究，速读 O-RAN 多智能体仲裁稳定性方案。最值得看的是 PrefixBench-H100 对首 token 时延的实测刻画，对推理服务优化有直接参考价值。普通读者可先关注该基准的测量方法，再结合自身部署场景评估前缀缓存收益。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions">Where Should the KV Cache Live? Placement Policies Across GPU, CPU, and SSD for Long-Lived Sessions</span></li><li><span class="dpr-home-dashboard-paper-title" title="Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries">Shared KV Caching for Replicated 27B Inference: Correctness Failures and Performance Boundaries</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving">PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,9 +87,9 @@
     <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving">PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Taming the Agentic RAN: Stability-Guaranteed Arbitration of Autonomous AI Agents in O-RAN">Taming the Agentic RAN: Stability-Guaranteed Arbitration of Autonomous AI Agents in O-RAN</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 
