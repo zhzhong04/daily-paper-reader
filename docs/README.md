@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-24</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-25</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 3 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 7 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>1</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>2</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-24 21:57:13 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-25 21:52:55 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读1篇、速读2篇，聚焦大模型推理中的KV-Cache管理与注意力稀疏控制。最值得看的是8分精读《Risk-Controlled KV-Cache Eviction》，把显存预算转化为可调风险目标，另可关注7分的路由记忆注意力ARM。普通读者可先读精读文的摘要与实验结论，再按需跟进两篇速读。</p>
+<p>今日精读2篇、速读5篇，聚焦LLM前缀复用场景下的缓存替换与H100服务前缀复用、首token时延特征。最值得看的是《When Fancy Eviction Fails》对花哨淘汰策略的反思（9.0分），以及PrefixBench-H100对H100真实服务中前缀复用与TTFT的实测刻画（8.0分）。普通读者可先读这两篇精读，再按兴趣速览Dynamo显存生命周期快速恢复、KV缓存工作集容量规划与风险可控淘汰三篇。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">2 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets">Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="When Fancy Eviction Fails: Rethinking Cache Replacement For LLM Prefix Reuse">When Fancy Eviction Fails: Rethinking Cache Replacement For LLM Prefix Reuse</span></li><li><span class="dpr-home-dashboard-paper-title" title="PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving">PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">2 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ARM: Attention with Routed-Memory for Learnable Sparse Control">ARM: Attention with Routed-Memory for Learnable Sparse Control</span></li><li><span class="dpr-home-dashboard-paper-title" title="PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving">PrefixBench-H100: Characterizing Prefix Reuse and Time-to-First-Token in H100 LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo">Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo</span></li><li><span class="dpr-home-dashboard-paper-title" title="The KV Cache Working Set: Online Capacity Planning for LLM Inference Systems">The KV Cache Working Set: Online Capacity Planning for LLM Inference Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets">Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span></div>
 </section>
 </div>
 
