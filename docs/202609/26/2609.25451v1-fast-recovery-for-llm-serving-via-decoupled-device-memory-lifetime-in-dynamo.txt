@@ -1,0 +1,567 @@
+Title: Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo
+
+URL Source: https://arxiv.org/pdf/2609.25451v1
+
+Published Time: Wed, 23 Sep 2026 00:24:48 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+## Schwinn Saereesitthipitak 
+
+NVIDIA 
+
+schwinns@nvidia.com 
+
+## Mohammed Abdulwahhab 
+
+NVIDIA 
+
+mabdulwahhab@nvidia.com 
+
+## Hannah Zhang 
+
+NVIDIA 
+
+hannahz@nvidia.com 
+
+## Dan Feigin 
+
+NVIDIA 
+
+dfeigin@nvidia.com 
+
+## Neelay Shah 
+
+NVIDIA 
+
+neelays@nvidia.com 
+
+## Maksim Khadkevich 
+
+NVIDIA 
+
+mkhadkevich@nvidia.com 
+
+## Itay Neeman 
+
+NVIDIA 
+
+ineeman@nvidia.com 
+
+## Vikram Sharma Mailthody 
+
+NVIDIA 
+
+vmailthody@nvidia.com 
+
+## Wen-mei W. Hwu 
+
+NVIDIA Research 
+
+whwu@nvidia.com 
+
+## Abstract 
+
+Large language model (LLM) inference replicas run across tightly coupled GPUs and serve traffic continuously for weeks. Hardware and software failures are therefore in-evitable, and one worker failure can disrupt an entire replica. Recovery requires reinitializing the engine, taking minutes even when weights and compilation artifacts are cached. Pro-duction deployments overprovision serving capacity to mask this window. We argue that the dominant cost is loss of ready serving capacity, not request progress, so recovery should preserve initialized engine state rather than reconstruct it. We present fast recovery for Dynamo based on this princi-ple. Snapshots capture an initialized engine once and restore it instead of reinitializing it. Analysis of 18 weeks of fail-ures from the Dynamo cluster shows that most failures are 
+
+device-preserving : the engine process fails while the GPU and its resident allocations remain intact. Our key insight is that independent engine processes can reuse the same GPU-resident state while keeping mutable execution state private. The GPU Memory Service (GMS) decouples device-memory ownership from engine processes, enabling engines to share and reattach surviving allocations without copying them. GMS preserves model weights and shares them read-only between replacement and Shadow Engines, avoiding weight reloads. A second initialized runtime on the same GPUs reduces recovery to promotion. Across four models on vLLM and SGLang, these mechanisms recover a failed replica in under 7 seconds, 13–29 times faster than a warm restart, using a fixed 4–8 GiB of device memory per GPU independent of model size. Replaying the production trace, we estimate they would reclaim 79% of GPU-hours lost to recovery. 
+
+## 1 Introduction 
+
+Modern LLM inference has evolved into a large-scale dis-tributed systems workload, with a single serving endpoint spanning dozens to hundreds of tightly coupled GPUs. Each endpoint comprises several homogeneous replicas of the same model across a large GPU cluster, which may also host many endpoints. A replica is an instance of an inference engine that typically comprises several to dozens of GPUs, optimized for maximum throughput subject to latency and interactivity objectives [1, 42, 68]. Replicas often sustain hundreds of thousands of tokens per second and exceed one million tokens per second on rack-scale systems [12, 34]. These engines are long-running, continuously serving traf-fic for weeks. Consequently, even infrequent component failures (software or hardware) become inevitable over an engine’s lifetime. Moreover, because GPUs within an engine are tightly coupled, a failure of a single worker can disrupt the entire replica. Recovering a failed replica requires restarting the infer-ence engine, a process that can take several minutes even when all caches are warm (Figure 1). During this recovery window, in-flight requests are re-queued, and new traffic is redirected to the remaining replicas. The resulting capacity loss increases admission delays and degrades interactivity, ultimately leading to service-level objective (SLO) violations. Under sustained load, the remaining replicas may be unable to absorb the displaced traffic, causing requests to be dropped entirely. Meanwhile, the recovering replica continues to oc-cupy provisioned GPUs without producing tokens, wasting valuable GPU capacity (Figure 2). Fault tolerance has been extensively studied for large-scale training [23]. Existing approaches bound lost computation through checkpointing [32, 54], maintain execution through redundant resources [21, 51], or elastically remap computa-tion onto surviving resources [2, 16]. These techniques fun-damentally aim to preserve training progress: model weights and optimizer states evolve with every iteration and encode the computation performed thus far. Prior work has applied a similar principle to inference by preserving request progress, either by replicating the KV cache [49, 58] or by reconfig-uring parallelism to continue execution despite failed work-ers [26, 66]. arXiv:2609.25451v1 [cs.DC] 21 Sep 2026 Qwen3.8 27B DSV4 Flash GLM-5.2 NVFP4 DSV4 Pro 050 100 150        
+
+> Time to readiness (s)
+> 106 s 110 s 144 s 156 s
+> 42 34 35 34 23 42 58 16 31 45 42 21
+> Bootstrap Weights Warmup + graphs CUDA + NCCL Memory + KV Serving setup
+
+Figure 1. Restart time for vLLM 0.27.1 on 8xB200 GPUs (TP/TEP8). Compilation artifacts are pre-cached and weights pre-pulled into page cache. For inference, however, the cost of failure is fundamen-tally different: the dominant loss is not request progress, but ready serving capacity . Before a replica can serve re-quests, every rank must load its model shard and construct the host and device execution environment, including collec-tive state, specialized kernels, tuning decisions, and CUDA graphs (Section 2.1). This initialization is independent of re-quest traffic, yet conventional recovery reconstructs much of this expensive state from scratch (Figure 1). In contrast, the transient state associated with an interrupted request—its scheduler and KV state—can be reconstructed by replay-ing the request’s prefill, typically within seconds. Thus, as-suming failures can be detected promptly, the primary recovery objective for inference should be restoring ready serving capacity, rather than preserving individ-ual request progress. 
+
+Production inference deployments routinely reserve spare GPU capacity to mask the multi-minute recovery time of failed replicas. Rather than placing restart latency on the critical path, operators overprovision the serving fleet so that healthy replicas can absorb displaced traffic while a re-placement becomes ready. This is a pragmatic response to expensive engine initialization: large-model startup can take several minutes even when model artifacts are locally avail-able in nodes’ SSDs, as engines must load weights, initial-ize distributed state, compile and tune kernels, and capture CUDA graphs [36]. The cost, however, is substantial: over-provisioned GPUs are paid for continuously, despite being needed only during transient failures. This strategy is particularly attractive because it provides a uniform recovery mechanism for both process failures and hardware loss. However, our production failure analysis re-veals an important asymmetry: most failures observed over 18 weeks are device-preserving . Although the inference en-gine process fails, the underlying GPU remains healthy, and unrelated resident allocations remain intact and trustworthy across the failure boundary (Section 2.2). This observation exposes a key opportunity: if the lifetime of a replica’s commit-ted resident state is decoupled from that of the engine process, this state can survive engine failures and be reused during recovery. 
+
+Together, these observations motivate a fast-recovery ar-chitecture for Dynamo , built from three complementary mechanisms: 
+
+• Snapshots (Section 3.1) eliminate repeated framework initialization. An initialized engine is checkpointed once, before entering service, and subsequently re-stored after failure. Recovery therefore replaces a com-plex and compute-intensive initialization path with predictable state restoration and data movement, with-out requiring shadow resources. 
+
+• GPU Memory Service (GMS) (Section 3.2) eliminates model reloading after device-preserving failures. This per-GPU service owns committed model allocations independently of engine processes. Using CUDA vir-tual memory management, engines import allocation handles and map the same physical model state read-only into their own address spaces, without copying model bytes or adding indirection to execution. A re-placement engine can therefore reattach surviving model state. 
+
+• Shadow Engines (Section 3.4) remove runtime initial-ization from the promotion path. GMS lets a shadow share the primary’s model weights on the same GPUs while retaining an independent, initialized host and de-vice runtime. This avoids a second model copy and re-duces recovery to promotion and installation of fresh KV backing. For device-preserving failures, Dynamo’s GMS and Shadow Engines directly reuse state that survives on the original GPUs, avoiding reconstruction of model and engine state. Device-invalidating failures instead fall back to a durable Snapshot, which restores the engine on a healthy device while GPU-resident state is reconstructed. When composed, the three mechanisms form a tiered recovery path: a resident shadow provides near-immediate recovery for the common case, and Snapshots replenish consumed shadows outside the serving critical path, while providing a recovery fallback for broader failures. Table 2 describes this composition and the resulting design space, which trades storage and memory headroom for progressively lower recovery latency. Our evaluation shows that a Shadow Engine in Dynamo recovers a replica experiencing a device-preserving failure in under 7 seconds, 13–29 × faster than a warm restart, at the expense of 4–8 GiB of per-GPU memory occupation over-head. Under a device-invalidating failure, Snapshots (when used with GMS) can recover an engine 2.1–5.4 × faster than Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+warm restart. A counterfactual analysis of 18 weeks of pro-duction failures shows that reducing recovery to 7 seconds with Shadow Engines would have reclaimed 79% of all GPU-hours lost to recovery, counting savings only for failures we can confirm as device-preserving. Overall, this work makes the following key contributions: 
+
+• Production failure characterization. We charac-terize inference-engine failures and their recovery costs using large-scale production data, including the prevalence and properties of device-preserving and device-invalidating failures (Section 2.2). 
+
+• A composable recovery architecture. We design a unified recovery architecture that combines serializa-tion and residency to preserve initialized engine state across failures (Section 3). 
+
+• End-to-end implementation and evaluation. We implement all proposed mechanisms in a production-scale inference stack and evaluate them under con-trolled failure injection, quantifying recovery latency, shadow memory overhead, TTFT and ITL during replica failure, serving behavior during replenishment, and shadow replenishment time (Section 5). 
+
+> The open-source implementation is available at https://github.com/ ai-dynamo/dynamo and https://github.com/ai-dynamo/snapshot.
+
+## 2 Background and Motivation 
+
+2.1 Inference Engine Startup Sequence 
+
+An inference engine must complete a sequence of initializa-tion steps on every worker rank before it can serve requests. Each worker first creates its device execution context (e.g., a CUDA context), followed by collective communication state, including host- and device-side handles, channels, and buffers. The engine then constructs the model and loads each rank’s weight shard into device memory. Representa-tive prefill and decode passes initialize or specialize kernels, select tuned implementations, and capture CUDA graphs for supported shape and batch-size buckets. Finally, the engine profiles its peak device-memory footprint and reserves the remaining capacity for the KV-cache pool. On restart, some artifacts may already be cached—for example, model weights in the host page cache and compiled kernel artifacts—but much of the process- and device-local state must still be reconstructed before the engine can serve requests. Consider the hypothetical scenario of two engine instances initialized with the same model configuration and topology. The rank-local weight tensors have identical shapes and con-tents after initialization. We refer to these tensors as model state . Initialization also creates runtime state : the host and device state required to execute the inference loop. Device runtime state includes the CUDA context, CUDA graphs, communicators, and execution buffers. Because initializa-tion is deterministic for a fixed configuration, topology, and hardware [27], engine instances have the same runtime-state 
+
+Table 1. Failures in the Dynamo cluster over 18 weeks. En-gine failures count replica restarts, excluding crash loops. The other rows count episodes.         
+
+> Failure / signal Count Recovery action
+> Engine failure, device-preserving 4,443 Restart replica. Engine failure, ambiguous 1,319 Restart replica. GPU hang (XIDs 32/109) 2Reset affected GPUs. Contained memory error (XID 94) 1Reset affected GPUs.
+
+structure, including CUDA graphs and device virtual-address layouts [36, 41]. The underlying physical allocations and deployment-specific host state, such as network endpoints and communication handles, may differ. Importantly, host and device runtime state can be coupled. For example, NCCL operations captured in CUDA graphs depend on host-side communication state [40]. Finally, request state is traffic-dependent and includes host-side scheduler metadata and KV mappings [25], and device-side KV-cache contents. Unlike model and runtime state, request state depends on the traffic processed by an engine. 
+
+2.2 Failure Model 
+
+A production inference deployment consists of many repli-cas, each comprising multiple processes spanning several to dozens of GPUs. Because ranks execute collectively, a failure in one rank can stall the entire replica, requiring all ranks to restart. We classify failures by what recovery must rebuild. A failure is device-preserving if the GPUs need no reset and the resident state of other processes on them remains intact and trustworthy, so that a replacement engine can reuse it. A failure is device-invalidating if a GPU must be reset or replaced, or a memory-integrity error makes its contents suspect, so that resident state must be reconstructed. Most engine failures raise no XID: hangs, out-of-memory errors, or exceptions can interrupt serving while GPUs re-main schedulable. However, neither schedulability nor the absence of XIDs guarantees that resident state is safe to reuse. When reuse is uncertain, recovery falls back to checkpoint restoration and state reconstruction on a healthy device, which may be the original GPU after remediation. Applica-tion faults (XIDs 13, 31, and 43) generally permit application restart [35], whereas memory-integrity errors (XIDs 48, 94, and 95) and reset-class faults (XIDs 32, 79, 109, and 119) inval-idate resident-state reuse under our policy [38, 39]. Appendix Table 4 summarizes these signals and recovery actions. 
+
+Production failure distribution. Over 18 weeks, we collected production failure data from one of the Dynamo W1 W2 W3 W4 W5 W6 W7 W8 W9 W10 W11 W12 W13 W14 W15 W16 W17 W18 0500 1000      
+
+> Recoveries
+> Recoveries GPU-h lost
+> 30 s 2 min 10 min 1 h 3 h
+> Recovery duration
+> 050 100%
+> Recoveries
+> 0200 400 600
+> GPU-h lost
+
+Figure 2. Recoveries in the Dynamo cluster over 18 weeks: recoveries per week and the GPU-hours lost to them (top), and the distribution of device-preserving recovery duration, from container restart to ready (bottom). Whiskers show timing uncertainty (Appendix B). clusters. The measured cluster comprises 783 NVIDIA B200 and 135 NVIDIA RTX PRO 6000 Blackwell GPUs. The ser-vice hosts a mix of LLM and diffusion models across ap-proximately 150 concurrent inference-engine replicas. Each replica typically spans 8 GPUs (a B200 node) or fewer de-pending on the served model. We observed 5,762 in-place restarts of serving replicas, an average of 46 per day, with a median recovery time of 3.5 minutes and 2,967 GPU-hours lost to recovery alone, excluding capacity reserved through overprovisioning. 
+
+Most observed failures were device-preserving. To be con-servative, we count a restart as device-preserving only if the replica returned to service on the same GPUs, the node lost no schedulable GPU meanwhile, and no reset-class or memory-integrity XID was reported on that host in the same week. These retrospective criteria estimate the opportunity for state reuse. They do not establish its safety at recovery time. 4,443 restarts meet these conditions, accounting for 2,375 GPU-hours with a median recovery of 4 minutes (Fig-ure 2). The remaining 1,319 are ambiguous and excluded from our analysis (Table 1). Device-invalidating failures, such as GPU hangs that required a device reset (XIDs 32/109) and contained memory errors (XID 94), were rare. Thus, pro-duction recovery reconstructs an entire inference engine even though the underlying GPUs, and potentially reusable resident state, remain available. 
+
+## 3 Design 
+
+Dynamo’s recovery architecture accelerates inference re-covery by preserving initialized engine state across failures     
+
+> Warm engine 1
+> Host runtime
+> Device state
+> Runtime Model pages KV pages
+> Prepared engine 2
+> Host runtime
+> Device state
+> Runtime Model pages KV pages Prune Remap
+> Host process 3
+> Host runtime
+> Device state Capture (Device) Restore (Device)
+> Snapshot
+> 4Capture (Host) Restore (Host)
+> present absent / lost
+
+Figure 3. Snapshot capture and restore. Capture releases empty KV pages, stages remaining device state in the host runtime, and checkpoints the process. Restore reloads the process and device state and remaps fresh KV pages. rather than reconstructing it. Section 2.1 separates an ini-tialized engine into model, runtime, and request state. The architecture focuses on model and runtime state, which are independent of request traffic and can therefore be prepared before serving and reused after failure. Request state is or-thogonal to these mechanisms. Our implementation replays interrupted requests, as discussed in Section 4. The architecture provides three mechanisms that progres-sively remove work from the recovery path. Snapshots seri-alize an initialized engine into a reusable artifact, replacing framework initialization with state restoration (Figure 3). 
+
+GMS decouples model allocations from the engine process, enabling committed model state to remain resident across device-preserving failures and be reattached by a replace-ment engine. Finally, Shadow Engines keep runtime state initialized alongside the primary engine while sharing the same GMS-owned model state. Recovery then requires only promoting the shadow, provisioning fresh KV pages, and replaying interrupted requests. These mechanisms compose into a tiered recovery path. For the common device-preserving failure, a shadow retains both runtime state and access to resident model state, provid-ing the fastest recovery. If no shadow is available, a Snapshot can restore the runtime while GMS preserves the model state. For device-invalidating failures, where resident state cannot be reused, the durable Snapshot provides the fallback and reconstructs device state on a healthy GPU, while the GMS is populated in parallel to accelerate recovery time. The result-ing configurations trade storage and memory capacity for progressively less work on the recovery critical path. Table 2 summarizes the resulting device-preserving recovery paths and memory tradeoffs. 
+
+3.1 Snapshots 
+
+A Snapshot is a durable snapshot of an initialized engine. It captures the host process tree, including address spaces, Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+threads, registers, and file-descriptor metadata, together with CUDA state such as contexts, execution state, virtual-address mappings, and referenced GPU allocations [8, 33]. Figure 3 shows capture and restore in Dynamo. 1 The engine fully initializes and warms up before accepting traffic.  
+
+> 2
+
+It prunes device memory by releasing disposable alloca-tions and detaching externally owned ones, while retaining required process-owned state. 3 CUDA execution is frozen, and the remaining device state is staged into host memory.  
+
+> 4
+
+The host process tree and staged device state are serial-ized to durable storage. Recovery reverses these steps: the process tree is restored, CUDA state is reinstated, released or detached allocations are recreated or re-imported, and serv-ing resumes. Because the checkpoint is durable, it can also recover device-invalidating failures on compatible devices and rank topologies. Checkpoint recovery is dominated by moving the serial-ized state. For an artifact of size 𝑆 , the data transfer compo-nent of recovery latency is approximately 𝑆 /𝐵 eff , where 𝐵 eff 
+
+is the effective restore bandwidth. Thus, recovery improves either by increasing transfer bandwidth or reducing 𝑆 . We reduce 𝑆 by excluding state that need not be checkpointed. The checkpoint is captured before request admission, so the KV cache contains no request data even though its physical pool may occupy most remaining GPU memory. We release these KV pages while retaining their virtual-address reserva-tions, preserving addresses embedded in CUDA graphs and tensor metadata. Fresh KV pages are remapped at the same addresses after restore. Model weights are typically the largest remaining compo-nent of 𝑆 . GMS (Section 3.2) moves these allocations outside the engine process, allowing them to remain resident while being detached before capture. Section 3.3 describes this com-position, which removes model weights from the checkpoint artifact as well. 
+
+3.2 GMS: GPU Memory Service 
+
+Conventionally, model allocations are owned by the engine’s CUDA context and are destroyed with it. GMS decouples their lifetime from the engine by owning physical alloca-tions in a separate process on each GPU and exporting their handles to engines over Unix-domain sockets. GMS retains      
+
+> EMPTY
+> no layout
+> RW
+> 1 writer
+> COMMITTED 
+> 0 readers
+> RO 
+> 𝑛 ≥1readers RW connect abort commit RW connect RO connect last disconnect RO connect disconnect (not last)
+
+Figure 4. The GMS model-state FSM. Committed and RO refer to the same committed model state. They differ only in whether a reader lease is attached. the allocation handles but never maps or accesses the pages. Thus, committed model state survives a device-preserving engine failure as long as GMS and the GPU remain healthy. Figure 4 shows the ownership protocol. A cold-starting engine acquires an exclusive read-write lease, populates the GMS allocations, and commits them. Commit makes the model state immutable. The writer subsequently reconnects read-only, and additional engines may attach as readers. If a writer fails before commit, GMS discards the incomplete state. Reader failures only release their leases, leaving committed state intact. Exclusive write access becomes available again after the last reader disconnects. GMS enforces read-only access using cuMemSetAccess .An invalid write from an engine triggers a GPU MMU fault (XID 31) before modifying the shared pages, isolating the fault to the offending engine while preserving the GMS-owned model state [35, 41]. Integrity errors or device loss in-validate the corresponding GMS state and follow the device-invalidating recovery path [37, 38]. After an engine failure, a replacement reconstructs its run-time state but avoids reloading model weights. It acquires a read-only lease, imports the GMS allocations, and maps them into its CUDA context’s virtual address space. Dur-ing reconstruction, host-side model initialization is replayed while device operations are suppressed until the existing model state is attached. 
+
+3.3 Snapshots with GMS 
+
+Composing Snapshots with GMS requires preserving model virtual addresses embedded in runtime state while excluding the underlying model allocations from the checkpoint. Before 
+
+Table 2. Comparison of recovery paths for device-preserving failures.                    
+
+> Configuration State to recover Recovery action Extra device memory
+> Warm restart Model state, host & device runtime, request state Reinitialize runtime and load model state None Snapshot Model state, host & device runtime, request state Restore Snapshot None GMS Host & device runtime, request state Reinitialize runtime and attach model state read-only None Snapshot + GMS Host & device runtime, request state Restore runtime and attach model state read-only None GMS + Shadow Engine Request state Promote Shadow Engine and install KV backing, replenish shadow Shadow device runtime All three Request state Promote Shadow Engine and install KV backing, restore shadow from Snapshot Shadow device runtime (a) Populate
+> Writer
+> Device state
+> Model VA GMS pages RW
+> (b) Serve
+> Reader
+> Device state
+> Model VA GMS pages
+
+ 
+
+> RO
+> (c) Prepared for Snapshot
+> Host process
+> Device state
+> Model VA GMS pages
+
+ 
+
+> Commit Detach Re-attach
+
+Figure 5. GMS mappings with a Snapshot. A loader popu-lates the GMS pages through an exclusive read-write map-ping. Commit makes the pages immutable, and the engine reconnects with a read-only mapping. To prepare the en-gine for checkpoint, the GMS is detached from it, where the mapping and its imported handles are destroyed, but the virtual addresses are maintained. After restore, the process is reversed and the GMS is re-attached. capture, the engine synchronizes, unmaps each GMS range, releases its imported handle, and retains the virtual-address reservation (Figure 5). GMS retains ownership of the physical allocations, so committed model state remains resident and other readers are unaffected. The resulting checkpoint contains the virtual addresses of the model tensors but not their underlying physical alloca-tions, mappings, or contents [33]. After a device-preserving failure, the restored engine imports the surviving GMS allo-cations and maps them read-only at the retained addresses, avoiding model restoration entirely. After a device-invalidating failure, the model state is reconstructed in fresh GMS allo-cations in parallel with runtime restoration, and the two are reattached once both complete. In either case, the re-stored runtime requires compatible model layout, contents, permissions, and virtual addresses [36, 41]. The two mechanisms remove complementary recovery work. Snapshots replace engine initialization with runtime restoration, while GMS excludes model state from the check-point and eliminates model restoration while its resident state survives. Even when GMS state does not survive, re-populating it in parallel with runtime restoration shortens re-covery relative to a Snapshot alone, because current runtime-state restoration does not saturate storage bandwidth. Snap-shot restoration nevertheless remains on the recovery critical path. 
+
+3.4 Shadow Engines 
+
+A Shadow Engine removes runtime restoration from the recovery path by keeping a second initialized runtime on the same GPUs. Before serving begins, the shadow initializes its host and device runtime, maps the committed model state read-only through GMS, and then parks. Because it executes in a separate CUDA context, its runtime remains intact after a device-preserving failure of the primary engine. The shadow preserves its CUDA context, communicators, fixed buffers, kernels, CUDA Graphs, and the virtual-address  
+
+> (a) Ready Primary A
+> Host runtime
+> Device runtime
+> Model VA KV VA KV pages
+> Shadow B
+> Host runtime
+> Device runtime
+> Model VA KV VA KV pages GMS pages
+
+  
+
+> RO RO
+> (b) Promote Failed A Primary B
+> Host runtime
+> Device runtime
+> Model VA KV VA KV pages
+> Replay
+> GMS pages
+
+ RO 
+
+Figure 6. Shadow Engine recovery. Primary and shadow share read-only GMS model state; only the primary holds KV pages. After failure, the shadow installs fresh KV pages and serves replayed requests.  
+
+> Phase 1
+> Init
+> Both loaded
+> Phase 2
+> Serving
+> A active
+> Phase 3
+> Failure
+> A fails
+> Phase 4
+> Cutover
+> B fills KV
+> Phase 5
+> Restarted
+> Shadow A
+> GMS pages
+
+ 
+
+> B runtime A runtime Free GMS pages
+
+ 
+
+> A KV pages B runtime A runtime Free GMS pages
+
+ 
+
+> B runtime Free GMS pages
+
+ 
+
+> B KV pages B runtime Free GMS pages
+
+
+
+> B KV pages B runtime A runtime Free
+> Time
+
+Figure 7. Device-memory occupancy during shadow recov-ery. After primary A fails, shadow B retains its runtime, installs KV pages, and serves while A restarts as the new shadow. layout they depend on. It requires neither a second copy of the model nor physical KV pages: model pages are shared through GMS, while the unused KV pool retains only its virtual-address reservations. Thus, the shadow’s additional GPU footprint is limited to engine-private runtime state. Figure 6 illustrates the resulting recovery path. The pri-mary engine alone holds KV pages and request-specific state, while both engines retain read-only mappings of the same GMS model state. If the active engine fails, the loss of its reader lease does not disturb the shadow’s mapping. The shadow can then install fresh KV pages at the retained ad-dresses, recreate the resources tied to those pages, and join the serving system once its GPU state is complete. Because neither request records nor their KV values survive the fail-ure, the requests themselves must still be replayed. After promotion, a new shadow is prepared while the pro-moted engine serves (Figure 7). We preferentially replenish it from a Snapshot, avoiding exercising the much slower warm restart path. Furthermore, Snapshots implicitly seri-alize CUDA graphs. Capturing them anew would require eager warmup execution that contends with the primary en-gine for GPU resources and decreases its serving throughput. Once restored, the new shadow reattaches to the existing GMS model state and parks. Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+Replenishment also determines resilience to closely spaced failures. If another failure occurs before a new shadow is ready, recovery falls back to GMS with a warm restart or Snapshot restoration, placing runtime recovery back on the critical path. Faster checkpoint-based replenishment there-fore shortens this vulnerability window. Additional shadows can eliminate it at the cost of duplicating more runtime state. 
+
+## 4 Implementation 
+
+Our implementation consists of the node-local Snapshot runtime, GMS, and Shadow Engines, integrated with vLLM, SGLang, and TensorRT-LLM. The current implementation replays interrupted requests rather than preserving request state. This is not a design constraint: preserving request state is compatible with Dynamo, but requires upstream changes to request scheduling and KV-cache management and is left as ongoing future work (Section 6). Our recovery implementation in Dynamo consists of 23k lines of Python, Go, and C. 
+
+Snapshotting. A privileged node agent enters the engine container’s namespaces and uses Checkpoint/Restore In Userspace (CRIU) to checkpoint the host process tree and cuda-checkpoint 
+
+for CUDA state [8, 33, 47]. We contributed upstream CRIU changes that parallelize host-memory page restoration speed-ing it up by 7.9 × for a 129 GiB checkpoint. 
+
+cuda-checkpoint preserves allocation contents but does not reconstruct peer mappings or multicast objects required by multi-GPU engines. We interpose on CUDA VMM and multicast APIs using an LD_PRELOAD shim that records these mappings. Before capture, the shim removes peer mappings, imported handles, and multicast resources. After restore, it reconstructs them at their original virtual addresses. The underlying handles may change, but preserving virtual ad-dresses keeps previously captured CUDA Graphs valid [36]. The engine and node agent coordinate through marker files in a pod-local Kubernetes emptyDir . After initializa-tion, the engine releases its KV pages and signals ready-for-snapshot . The agent captures the checkpoint and, after recovery, signals restore-complete . The engine then reinstalls KV pages and registers with the serving control plane. 
+
+GMS. One GMS server per GPU creates physical allocations with cuMemCreate and retains their creator handles. Clients receive ephemeral POSIX descriptors over Unix-domain sock-ets, import them, and map the allocations with the requested permissions [41]. A GMS-backed PyTorch CUDA memory pool wraps model construction and weight loading, captur-ing model allocations without engine-specific enumeration. To amortize VMM operations, the pool uses a first-fit sub-allocator over 2 GiB slabs, with larger dedicated slabs for individual allocations exceeding 2 GiB. Export/import, map-ping, and permission setup therefore occur per slab rather than per tensor, at the cost of internal fragmentation. Before commit, the client records tensor layouts, removes loading scratch space, and moves mutable state to private allocations. For checkpoint recovery with a cold GMS, a separate read-write client repopulates model state from storage in parallel with process restoration and commits it before the restored engine reattaches. 
+
+Shadow Engines. The operator launches engine candidates concurrently, whose leaders contend on a shared kernel file lock. The winner becomes the primary engine. When it fails, the kernel releases its descriptor and a shadow acquires the lock and becomes the new primary. The engine’s exist-ing control plane coordinates follower ranks, extending the protocol across multi-rank and multi-node replicas. Each shadow maps GMS weights read-only and reserves its final KV virtual addresses. Upon promotion, it installs fresh KV backing, activates its ranks, and registers with the serving control plane. 
+
+## 5 Evaluation 
+
+5.1 Experimental setup 
+
+We evaluate Dynamo’s recovery mechanisms on an eight-GPU NVIDIA DGX B200 node configured similarly to the Dynamo cluster. Although the production cluster contains 
+
+∼900 GPUs, recovery operates independently within each replica; its recovery latency and resource overhead are inde-pendent of the number of replicas in the serving fleet. Our single-replica experiments therefore exercise the complete recovery path of a production-sized replica, while Section 5.6 separately evaluates fleet-level impact by replaying the 18-week trace collected from the Dynamo cluster. We evaluate vLLM (v0.27.1) and SGLang (v0.5.18) across four eight-GPU model configurations: Qwen3.8-27B (BF16, TP8), DeepSeek-V4-Flash (NVFP4, TEP8), GLM-5.2 (NVFP4, TEP8), and DeepSeek-V4-Pro (NVFP4, TEP8). Each replica occupies all eight GPUs, with prefix caching and chunked prefill enabled and device-memory utilization set to 0.8. Pre-fill and decode are co-located. We evaluate device-preserving failures, which account for most failures in our production trace (Section 2.2). We inject a failure by sending SIGKILL to all processes in the engine pro-cess tree. Snapshots and GMS artifacts are stored on a VAST-backed network file system mounted with nconnect=16 .
+
+5.2 Recovery Latency 
+
+Table 3 compares recovery latency across mechanisms im-plemented in Dynamo. For Shadow Engines, we measure from failure injection until the promoted engine registers with the discovery plane and is ready to serve. For all other configurations, we measure from container start until the same point. We use a warm restart as the baseline, with model weights already in the host page cache and compilation artifacts Table 3. Recovery latency (seconds) and speedup over warm restart for different models and frameworks. 
+
+Configuration Qwen3.8-27B DSV4-Flash GLM-5.2 DSV4-Pro vLLM 
+
+Warm restart 106.4 (1.0 ×) 109.5 (1.0 ×) 144.4 (1.0 ×) 156.5 (1.0 ×)
+
+GMS 80.0 (1.3 ×) 85.3 (1.3 ×) 82.0 (1.8 ×) 91.9 (1.7 ×)
+
+Snapshot 40.5 (2.6 ×) 60.0 (1.8 ×) 131.7 (1.1 ×) 189.7 (0.8 ×)
+
+Snapshot + cold GMS 21.9 (4.9 ×) 26.8 (4.1 ×) 26.8 (5.4 ×) 50.0 (3.1 ×)
+
+Snapshot + warm GMS 16.6 (6.4 ×) 24.1 (4.5 ×) 24.9 (5.8 ×) 25.7 (6.1 ×)
+
+GMS + Shadow Engine 4.6 (23.1 ×) 5.6 (19.6 ×) 5.6 (25.8 ×) 5.4 (29.0 ×)
+
+SGLang 
+
+Warm restart 79.6 (1.0 ×) 95.7 (1.0 ×) 144.6 (1.0 ×) 151.2 (1.0 ×)
+
+Snapshot + cold GMS 37.1 (2.1 ×) 31.1 (3.1 ×) 38.0 (3.8 ×) 55.2 (2.7 ×)
+
+Snapshot + warm GMS 33.3 (2.4 ×) 31.1 (3.1 ×) 35.3 (4.1 ×) 29.8 (5.1 ×)
+
+GMS + Shadow Engine 6.2 (12.8 ×) 6.2 (15.4 ×) 5.7 (25.4 ×) 5.3 (28.5 ×)
+
+cached. This is optimistic relative to production: most re-coveries in the Dynamo cluster take longer than even our slowest warm restart (Figure 2). Dynamo’s GMS alone provides a 1.3–1.8 × speedup by eliminating model loading, but still executes the remaining engine initialization path. Snapshots eliminate initialization but must restore captured device memory. This yields a 2.6 ×
+
+speedup for Qwen3.8-27B, but scales poorly with model size and is slower than the warm-restart baseline for the largest model we tested (DeepSeek-V4-Pro). Figure 8 shows that CUDA restoration dominates this cost, as cuda-checkpoint 
+
+copies device memory serially and does not saturate PCIe bandwidth. Combining Snapshots with a cold GMS loads weights into GMS in parallel with runtime-state restoration. This occurs on first startup or upon a device-invalidating failure. The recovery latency is the slower of the two paths, yielding a 2.1–5.4 × speedup over warm restart. Snapshots with a warm No GMS Warm GMS No GMS Warm GMS No GMS Warm GMS No GMS Warm GMS     
+
+> 050 100 150 200
+> Restore time (s)
+> 40.0 16.4 59.5 23.9 131.2 24.2 189.2 25.5
+> Qwen3.8-27B DSV4-Flash GLM-5.2 DSV4-Pro
+> CRIU restore CUDA restore
+
+Figure 8. vLLM Snapshot restoration time without GMS and with a warm GMS, where model weights are already resident, excluding KV cache reallocation and discovery registration time. Qwen3.8 DSV4-Flash GLM-5.2 DSV4-Pro   
+
+> 048Additional Device Memory (GiB/GPU)
+> 4.3 7.4 8.1 7.8
+> Other persistent runtime CUDA graphs CUDA runtime GMS fragmentation
+
+Figure 9. Breakdown of the additional steady-state device memory occupied by one vLLM Shadow Engine. GMS, where weights are already resident , remove GMS pop-ulation from the recovery path and yield a 2.4–6.4 × speedup over warm restart. The remaining variation is dominated by restoring the reduced Snapshot artifact and by second-restore page-cache warming, rather than by loading model weights (Figure 8). Shadow Engines remove runtime restora-tion from the critical path as well, as recovery reduces to installing fresh KV backing and registering the engine for serving. Consequently, recovery completes in 4.6–6.2 s across all models and frameworks, a 12.8–29.0 × speedup over warm restart. 
+
+5.3 Device-Memory Cost of a Shadow Engine 
+
+Shadow Engines trade device memory for recovery latency. Because the shadow shares model state through GMS and holds no physical KV pages while parked, its additional foot-print consists primarily of engine-private runtime state, re-ducing the memory available to the active engine’s KV cache. Figure 9 decomposes this overhead into GMS fragmenta-tion, CUDA runtime, CUDA Graphs, and other persistent runtime state. We measure total overhead as the difference in nvidia-smi device memory between deployments with Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo −50 0 50 100 150 200     
+
+> Seconds After Promotion
+> 050 100 150
+> ITL (ms)
+> 010 20
+> TTFT (s)
+> Replenished 38 s Replenished 157 s
+> Warm Restart Snapshot
+> Engine Start CUDA Graph Capture Ready Restore Ready Promotion
+> Warm Restart Snapshot P50 P90 Pre-Failure Median
+
+Figure 10. Shadow-replenishment interference during serv-ing (vLLM GLM-5.2). Curves show 10-s sliding p50/p90 la-tencies. Dashed lines mark replenishment completion. The top rows show each replacement shadow’s lifecycle. and without a shadow. GMS fragmentation corresponds to the slab allocations’ unused portions that is unrelated to the shadow; CUDA runtime contributes 718 MiB, measured using a minimal CUDA process (empty CUDA program) that initializes the runtime; and vLLM reports CUDA Graph memory during capture. The remainder includes persistent communication and execution buffers such as NCCL and FlashInfer. The shadow adds 4.3 GiB/GPU for Qwen3.8-27B and 7.4– 8.1 GiB/GPU for the three larger models. In contrast, the shared model state grows from 8 to 124 GiB/GPU. Thus, shadow overhead is largely independent of model size, since model weights and KV-cache backing are not duplicated. 
+
+5.4 Interference During Shadow Replenishment 
+
+We evaluate whether Snapshots replenish a consumed shadow faster and with less serving interference than a warm restart (Section 3.4). We run vLLM with GLM-5.2 and TEP8 paral-lelism, promote its shadow after failure, and replenish a new shadow on the same GPUs while the promoted engine serves 32K/1K input/output requests. Requests arrive as a Poisson process at 0.35 requests/s, a rate that a healthy replica sus-tains without queuing. Figure 10 shows that Snapshot restoration replenishes the shadow in 38s, versus 157s for a warm restart. Of the 157s, 94s is spent capturing CUDA Graphs. This initialization competes with the serving engine for GPU execution: prefill throughput drops from 9,600 to 6,400 tokens/s, while median TTFT and ITL increase from 1.33s and 25ms before failure to 5.96s and 43ms for requests issued during replenishment. Latency recovers only after initialization completes. On the other hand, Snapshot restoration causes no mea-surable serving interference: TTFT and ITL remain at their pre-failure values, and the waiting queue never exceeds one request. It also reduces the interval without a shadow from 157s to 38s, shortening the window in which a second failure must fall back to a slower recovery path (Table 3). 
+
+5.5 Serving Impact of Losing a Replica 
+
+We next evaluate how recovery latency affects the service when traffic from a failed replica is redirected to the re-maining replicas until recovery completes. If this displaced traffic exceeds their spare capacity, the survivors become overloaded. This can occur when deployments operate with limited headroom, failures coincide with peak load, or multi-ple failures occur within a short recovery window. We deploy two vLLM GLM-5.2 replicas with the workload from Section 5.4, but double the arrival rate to 0.7 requests/s— a load sustainable by two replicas but not one. Requests are distributed round-robin with distinct prefixes. After 450s of steady-state serving, we terminate one replica. We compare a warm restart against Shadow Engine recov-ery. The warm restart uses cached weights, compiled kernels, and autotuning results, yet requires 148s to rejoin the service. The Shadow Engine resumes serving in 5.8s. Both runs have identical pre-failure throughput, TTFT, and ITL. Figure 11 shows the resulting serving impact. With Shadow Engine recovery, only requests immediately following the failure see a brief TTFT increase, and recovery completes be-fore the surviving replica becomes overloaded. With a warm restart, the survivor carries the full load for 148s: median TTFT increases from 1.3s to approximately 20s, median ITL from 23 to 80ms, and six requests fail, compared with one under shadow recovery. The dominant effect is admission pressure. With 32K input tokens and 1K output tokens per request, each request occu-pies 33K KV tokens, limiting the survivor’s 1.8M-token KV pool to 55 concurrent sequences. During the warm restart, this pool fills approximately 110s after failure, forcing subse-quent requests to wait for admission. TTFT therefore contin-ues to grow with the recovery window and remains elevated while the queue drains after recovery. ITL is comparatively bounded because admitted requests decode within the fixed concurrency limit. In contrast, the 5.8s shadow promotion restores capacity well before KV exhaustion, despite reduc-ing the primary engine’s KV capacity by 9% while parked (Section 5.3). 
+
+5.6 Production GPU-Hour Savings 
+
+Our previous experiments show that Shadow Engines reduce recovery to under 7s. We next ask how much production GPU capacity this reduction would have reclaimed in the Dynamo cluster over the 18-week trace (Section 2.2). 0.5 110 50        
+
+> TTFT (s)  Promoted 5.8 s Restarted 148 s
+> −300 −150 0150 300 450
+> Seconds from SIGKILL (by request start time)
+> 040 80
+> ITL (ms)
+> Warm Restart Shadow Engine
+
+Figure 11. 15-second rolling median time-to-first-token and inter-token latency during replica loss in a loaded two-replica vLLM GLM-5.2 deployment. Dotted lines mark recovery com-pletion. We perform a counterfactual analysis over the 4,443 device-preserving failures identified in Section 2.2, excluding the 1,319 ambiguous restarts. For each failure, we retain its ob-served replica size and recovery duration, but replace the recovery duration with 7s, conservatively rounding up the slowest Shadow Engine promotion in Table 3. The reclaimed capacity for a failure is therefore the reduction in recov-ery time multiplied by the number of GPUs in that replica. Summing across failures directly translates the measured recovery improvement into production GPU-hours. We evaluate only Shadow Engines because their measured promotion latency is nearly independent of model size and framework. In contrast, GMS and Snapshot recovery depend on the amount of model and runtime state and are measured only for the configurations in Section 5.2. The analysis also excludes failure-detection time and any savings from reduc-ing overprovisioned capacity, and assumes that a shadow is available at each failure and replenished off the critical path (Section 5.4). Figure 12 shows the result. Shadow Engines alone would reclaim 2,339 GPU-hours lost across the 18-week production trace. This corresponds to 98% of the 2,375 GPU-hours lost to device-preserving recoveries, and 79% of the 2,967 GPU-hours lost to all in-place recoveries, including ambiguous ones. 
+
+## 6 Limitations and Extensions 
+
+Host-resident shadow. A Shadow Engine consumes 4– 8 GiB/GPU (Section 5.3), less than 5% of device memory on NVIDIA B200 and equivalent to approximately 128K tokens of KV capacity for a 64 KiB/token model. We consider this a modest cost for reducing recovery from minutes to under 7 s, particularly when serving is not KV-capacity bound. More-over, Section 5.5 shows that this reduction in KV capacity W1 W2 W3 W4 W5 W6 W7 W8 W9 W10 W11 W12 W13 W14 W15 W16 W17 W18 0200 400 600  
+
+> GPU-h lost to recovery
+> Observed restart Shadow Engine (7 s)
+
+Figure 12. Weekly GPU-hours lost to recovery in the Dy-namo cluster, observed versus 7-s shadow promotion for device-preserving failures. Arrows show savings. Whiskers show timing uncertainty (Appendix B). can be preferable to losing an entire replica for minutes: de-spite a slightly smaller KV pool, the shadow restores capacity before the surviving replica becomes saturated. For deployments where KV capacity is the primary bot-tleneck, even this overhead may be undesirable. An inter-mediate design could retain only the shadow’s host runtime state and checkpoint its device state, restoring the latter with 
+
+cuda-checkpoint on failover. This trades lower steady-state memory for higher recovery latency, occupying a middle point between Snapshots and Shadow Engines. We leave this design, together with optimizing device-state restora-tion toward its bandwidth limit, to future work. 
+
+Large deployments. Our production trace and evaluation cover single-node replicas. Rack-scale replicas with wide expert parallelism [12, 34] span many GPUs across multi-ple nodes, increasing the capacity lost when any rank fails. Dynamo’s recovery implementation already supports multi-node recovery: its shadow election coordinates ranks across nodes, while GMS preserves model state independently on each GPU (Section 4). However, our production failure char-acterization may not generalize to this setting. Larger repli-cas introduce additional failure domains, including inter-node fabric and hardware faults, which may increase the fraction of device-invalidating failures. Quantifying this dis-tribution requires production traces from rack-scale deploy-ments and remains future work. 
+
+Preserving KV state. The design accelerates recovery of serving capacity but currently reconstructs request state after failure. Near-instantaneous resumption of in-flight requests would additionally require preserving scheduler metadata, KV mappings, and KV contents. Existing KV-offloading sys-tems such as LMCache and kvcached [28, 56, 61] can preserve committed KV blocks in host memory or storage, allowing them to be restored even after device-invalidating failures Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+when the host remains available. For device-preserving fail-ures, GMS could instead own physical KV pages, allowing KV contents to remain resident and be reattached after re-covery. These mechanisms provide complementary tiers of request-state resilience, but require inference engines [25, 67] to expose and restore KV-cache and scheduler metadata. We leave this integration to future work. 
+
+Fast engine reconfiguration. The design can also accel-erate engine reconfiguration. Changes to scheduling poli-cies, CUDA graph shapes, or other runtime configuration currently require reinitializing the engine [25, 67]. When the reconfiguration preserves the rank-local weight shards, GMS allows a new engine configuration to reuse the active engine’s committed model state. A Shadow Engine can there-fore be initialized with the new configuration and promoted without reloading model weights. Snapshots can similarly capture frequently used configurations for later restoration. Thus, the same separation of model and runtime state that accelerates failure recovery can also reduce reconfiguration latency. 
+
+## 7 Related Work 
+
+Fault-tolerant LLM serving. Training systems bound lost progress through checkpointing, redundancy, or pipeline adaptation [16, 21, 32, 48, 51, 53, 54]. DéjàVu, GhostServe, LU-MEN, and Concordia preserve request progress through KV state [6, 15, 22, 49]; FailSafe, Tarragon, KevlarFlow, and Re-viveMoE reconfigure parallelism around failed workers [26, 45, 58, 66]; SpotServe adapts to GPU preemption [31]. These mechanisms complement Dynamo’s recovery mechanisms, which target the loss of initialized serving capacity (Sec-tion 2). Extending this recovery design to training is future work. 
+
+Classical recovery principles. Crash-only design, mi-croreboot, and CuriOS separate recoverable state from restartable components [4, 5, 11]. Rio and Otherworld retain memory across OS crashes [7, 13]; shadow drivers conceal driver failures [50], and Remus provides warm shadows [10]. Dy-namo’s recovery design applies state separation and shadow recovery to inference engines and GPU state. 
+
+External ownership of inference state. AnchorTP exter-nalizes weights and KV caches for elastic parallelism; Server-lessLLM exposes loaded weights for cold starts [14, 57]; KV offloading layers retain blocks across requests [17, 28, 29]. Torpor shares GPU runtimes through external executors [60]. vAttention and GMLake separate virtual mappings from physical allocations [19, 44]; GPM provides GPU access to host persistent memory [43]. Dynamo’s GMS instead de-couples volatile allocation ownership from engine lifetime; Dynamo also restores runtime readiness. 
+
+GPU checkpoint and restore. CRIU, CUDA checkpoint-ing, CRIUgpu, and Singularity restore process or GPU state [8, 33, 46, 47]. HeteroCheckpoint coordinates host/device check-points [24]; CRUM uses a proxy process and CRAC a split-process architecture to checkpoint CUDA unified memory [18, 20]. PhoenixOS, gCROP, and GCR reduce checkpoint/restore overhead [55, 59, 62]. Dynamo’s recovery design builds on these foundations for serving recovery and composition with GMS. 
+
+Fast startup and runtime materialization. VM restore and REAP prioritize working sets [52, 65]. PipeSwitch, BlitzS-cale, and HydraServe accelerate weight movement [3, 30, 64]; Medusa, TIDAL, and Foundry restore CUDA graphs and GPU function state from runtime snapshots [9, 27, 63]. Dynamo’s recovery design distinguishes device-preserving from device-invalidating failures to reuse surviving allocations and ini-tialized shadows. Device memory survival does not imply durability across resets. Accelerated reconstruction remains complementary when state is lost. 
+
+## 8 Conclusion 
+
+LLM inference recovery need not reconstruct an engine from scratch. Our production study shows that most failures are device-preserving: the engine process fails, but the GPUs and reusable state on them survive. Dynamo’s recovery ar-chitecture exploits this asymmetry by decoupling initialized model and runtime state from the lifetime of the engine pro-cess. Snapshots preserve initialized runtimes, GMS preserves GPU-resident model state, and Shadow Engines preserve a ready runtime on the same GPUs. Together, these mecha-nisms progressively remove initialization from the recovery critical path while retaining a durable fallback for device-invalidating failures. Across multiple models and serving frameworks, Dynamo reduces recovery from minutes to under 7 s with 4–8 GiB/GPU of shadow memory, prevents prolonged overload when a replica fails, and would reclaim 2,339 of the 2,375 GPU-hours lost to device-preserving failure recovery in our 18-week trace from the Dynamo cluster. The implementation is open source as part of Dynamo and deployed in produc-tion, demonstrating that these mechanisms integrate with real inference serving stacks agnostic to inference engines like vLLM, SGLang, or TensorRT-LLM. More broadly, our results show that fast inference resiliency is fundamentally a state-lifetime problem: when initialized state survives in-dependently of the process that created it, restoring serving capacity becomes promotion and reattachment rather than reinitialization. 
+
+## References  
+
+> [1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran
+
+Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Infer-ence with Sarathi-Serve. In 18th USENIX Symposium on Operating Sys-tems Design and Implementation (OSDI) . USENIX Association, Berke-ley, CA, USA, 117–134. https://www.usenix.org/conference/osdi24/ presentation/agrawal 
+
+[2] Sanjith Athlur, Nitika Saran, Muthian Sivathanu, Ramachandran Ram-jee, and Nipun Kwatra. 2022. Varuna: Scalable, Low-cost Training of Massive Deep Learning Models. In Proceedings of the 17th European Conference on Computer Systems (EuroSys) . Association for Computing Machinery, New York, NY, USA, 472–487. doi: 10.1145/3492321.3519584 
+
+[3] Zhihao Bai, Zhen Zhang, Yibo Zhu, and Xin Jin. 2020. PipeSwitch: Fast Pipelined Context Switching for Deep Learning Applications. In 14th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 499–514. https: //www.usenix.org/conference/osdi20/presentation/bai 
+
+[4] George Candea and Armando Fox. 2003. Crash-Only Software. In 
+
+9th Workshop on Hot Topics in Operating Systems (HotOS) . USENIX Association, Berkeley, CA, USA, 67–72. https://www.usenix.org/ conference/hotos-ix/crash-only-software 
+
+[5] George Candea, Shinichi Kawamoto, Yuichi Fujiki, Greg Friedman, and Armando Fox. 2004. Microreboot — A Technique for Cheap Recovery. In 6th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 31– 44. https://www.usenix.org/legacy/events/osdi04/tech/candea.html 
+
+[6] Zhang Cao, Shujie Han, Juncheng Zhang, Yuanming Ren, Yongkun Li, and Patrick P. C. Lee. 2026. LUMEN: Coordinated Failure Recovery for Distributed LLM Serving. arXiv:2606.17787 [cs.DC] doi: 10.48550/ arXiv.2606.17787 
+
+[7] Peter M. Chen, Wee Teck Ng, Subhachandra Chandra, Christopher Aycock, Gurushankar Rajamani, and David Lowell. 1996. The Rio File Cache: Surviving Operating System Crashes. In Proceedings of the seventh international conference on Architectural support for program-ming languages and operating systems . Association for Computing Machinery, New York, NY, USA, 74–83. doi: 10.1145/237090.237154 
+
+[8] CRIU contributors. 2025. CRIU: Checkpoint/Restore In Userspace. 
+
+https://criu.org .[9] Weihao Cui, Ziyi Xu, Han Zhao, Quan Chen, Zijun Li, Bingsheng He, and Minyi Guo. 2025. Efficient Function-as-a-Service for Large Language Models with TIDAL. arXiv:2503.06421 [cs.OS] doi: 10.48550/ arXiv.2503.06421 
+
+[10] Brendan Cully, Geoffrey Lefebvre, Dutch Meyer, Mike Feeley, Norm Hutchinson, and Andrew Warfield. 2008. Remus: High Availability via Asynchronous Virtual Machine Replication. In 
+
+5th USENIX Symposium on Networked Systems Design and Im-plementation (NSDI) . USENIX Association, Berkeley, CA, USA, 161–174. https://www.usenix.org/conference/nsdi-08/remus-high-availability-asynchronous-virtual-machine-replication 
+
+[11] Francis M. David, Ellick M. Chan, Jeffrey C. Carlyle, and Roy H. Camp-bell. 2008. CuriOS: Improving Reliability through Operating System Structure. In 8th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 59– 72. https://www.usenix.org/legacy/events/osdi08/tech/full_papers/ david/david_html/index.html 
+
+[12] DeepSeek-AI. 2025. DeepSeek-V3/R1 Inference System Overview. https://github.com/deepseek-ai/open-infra-index/blob/main/202502OpenSourceWeek/day_6_one_more_ thing_deepseekV3R1_inference_system_overview.md .[13] Alex Depoutovitch and Michael Stumm. 2010. Otherworld: Giving Applications a Chance to Survive OS Kernel Crashes. In Proceedings of the 5th European conference on Computer systems . Association for Computing Machinery, New York, NY, USA, 181–194. doi: 10.1145/ 1755913.1755933 
+
+[14] Yao Fu, Leyang Xue, Yeqi Huang, Andrei-Octavian Brabete, Dmitrii Ustiugov, Yuvraj Patel, and Luo Mai. 2024. ServerlessLLM: Low-Latency Serverless Inference for Large Language Models. In 18th USENIX Symposium on Operating Systems Design and Implementa-tion (OSDI) . USENIX Association, Berkeley, CA, USA, 135–153. https: //www.usenix.org/conference/osdi24/presentation/fu 
+
+[15] Yuhang Gan, Yiwei Yang, Yuyi Li, Xiangyu Gao, Yichen Wang, Rain Jiang, Xiaoning Ding, Andi Quinn, and Chen Qian. 2026. Concordia: JIT-Compiled Persistent-Kernel Checkpointing for Fault-Tolerant LLM Inference. arXiv:2606.23521 [cs.DC] doi: 10.48550/arXiv.2606.23521 
+
+[16] Swapnil Gandhi, Mark Zhao, Athinagoras Skiadopoulos, and Christos Kozyrakis. 2024. ReCycle: Resilient Training of Large DNNs using Pipeline Adaptation. In Proceedings of the 30th Symposium on Operating Systems Principles (SOSP) . Association for Computing Machinery, New York, NY, USA, 211–228. doi: 10.1145/3694715.3695960 
+
+[17] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient Large Language Model Serving for Multi-turn Conversations with CachedAttention. In USENIX Annual Technical Conference (ATC) .USENIX Association, Berkeley, CA, USA, 111–126. https://www. usenix.org/conference/atc24/presentation/gao-bin-cost 
+
+[18] Rohan Garg, Apoorve Mohan, Michael Sullivan, and Gene Cooperman. 2018. CRUM: Checkpoint-Restart Support for CUDA’s Unified Memory. In 2018 IEEE International Conference on Cluster Computing (CLUSTER) .IEEE, Piscataway, NJ, USA, 302–313. doi: 10.1109/cluster.2018.00047 
+
+[19] Cong Guo, Rui Zhang, Jiale Xu, Jingwen Leng, Zihan Liu, Ziyu Huang, Minyi Guo, Hao Wu, Shouren Zhao, Junping Zhao, and Ke Zhang. 2024. GMLake: Efficient and Transparent GPU Memory Defragmentation for Large-scale DNN Training with Virtual Memory Stitching. In 
+
+Proceedings of the 29th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 .Association for Computing Machinery, New York, NY, USA, 450–466. doi: 10.1145/3620665.3640423 
+
+[20] Twinkle Jain and Gene Cooperman. 2020. CRAC: Checkpoint-Restart Architecture for CUDA with Streams and UVM. In SC20: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE, Piscataway, NJ, USA, 1–15. doi: 10.1109/sc41405.2020. 00081 
+
+[21] Insu Jang, Zhenning Yang, Zhen Zhang, Xin Jin, and Mosharaf Chowd-hury. 2023. Oobleck: Resilient Distributed Training of Large Models Using Pipeline Templates. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . Association for Computing Ma-chinery, New York, NY, USA, 382–395. doi: 10.1145/3600006.3613152 
+
+[22] Shakya Jayakody, Youpeng Zhao, Chinmay Dhanraj Nehate, and Jun Wang. 2026. GhostServe: A Lightweight Checkpointing System in the Shadow for Fault-Tolerant LLM Serving. In Pro-ceedings of Machine Learning and Systems (MLSys) , Vol. 8. ML-Sys. https://proceedings.mlsys.org/paper_files/paper/2026/hash/ d99e8e80a6c41e148db686918dd7eab3-Abstract-Conference.html 
+
+[23] Ziheng Jiang, Haibin Lin, Yinmin Zhong, Qi Huang, Yangrui Chen, Zhi Zhang, Yanghua Peng, Xiang Li, Cong Xie, Shibiao Nong, Yulu Jia, Sun He, Hongmin Chen, Zhihao Bai, Qi Hou, Shipeng Yan, Ding Zhou, Yiyao Sheng, Zhuo Jiang, Haohan Xu, Haoran Wei, Zhang Zhang, Pengfei Nie, Leqi Zou, Sida Zhao, Liang Xiang, Zherui Liu, Zhe Li, Xiaoying Jia, Jianxi Ye, Xin Jin, and Xin Liu. 2024. MegaScale: Scaling Large Language Model Training to More Than 10,000 GPUs. In 21st USENIX Symposium on Networked Systems Design and Implementation (NSDI) . USENIX Association, Berkeley, CA, USA, 745–760. https: //www.usenix.org/conference/nsdi24/presentation/jiang-ziheng 
+
+[24] Sudarsun Kannan, Naila Farooqui, Ada Gavrilovska, and Karsten Schwan. 2014. HeteroCheckpoint: Efficient Checkpointing for Accelerator-Based Systems. In 2014 44th Annual IEEE/IFIP International Conference on Dependable Systems and Networks . IEEE, Piscataway, NJ, USA, 738–743. doi: 10.1109/dsn.2014.76 Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+[25] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . Association for Computing Machinery, New York, NY, USA, 611–626. doi: 10.1145/3600006.3613165 
+
+[26] Haley Li, Xinglu Wang, Cong Feng, Chunxu Zuo, Yanan Wang, Hei Lo, Yufei Cui, Bingji Wang, Duo Cui, Shuming Jing, Yizhou Shan, Ying Xiong, Jiannan Wang, Yong Zhang, and Zhenan Fan. 2026. ReviveMoE: Fast Recovery for Hardware Failures in Large-Scale MoE LLM Inference Deployments. arXiv:2602.21140 [cs.DC] doi: 10.48550/arXiv.2602.21140 
+
+[27] Xueshen Liu, Yongji Wu, Yuncheng Yao, Danyang Zhuo, Ion Sto-ica, and Z. Morley Mao. 2026. Foundry: Template-Based CUDA Graph Context Materialization for Fast LLM Serving Cold Start. arXiv:2604.06664 [cs.DC] doi: 10.48550/arXiv.2604.06664 
+
+[28] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaot-ing Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv:2510.09665 [cs.LG] doi: 10. 48550/arXiv.2510.09665 
+
+[29] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Anantha-narayanan, Michael Maire, Henry Hoffmann, Ari Holtzman, and Junchen Jiang. 2024. CacheGen: KV Cache Compression and Stream-ing for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference . Association for Computing Machinery, New York, NY, USA, 38–56. doi: 10.1145/3651890.3672274 
+
+[30] Chiheng Lou, Sheng Qi, Chao Jin, Dapeng Nie, Haoran Yang, Yu Ding, Xuanzhe Liu, and Xin Jin. 2026. HydraServe: Minimizing Cold Start Latency for Serverless LLM Serving in Public Clouds. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI) . USENIX Association, Berkeley, CA, USA, 415–430. https: //www.usenix.org/conference/nsdi26/presentation/lou 
+
+[31] Xupeng Miao, Chunan Shi, Jiangfei Duan, Xiaoli Xi, Dahua Lin, Bin Cui, and Zhihao Jia. 2024. SpotServe: Serving Generative Large Language Models on Preemptible Instances. In Proceedings of the 29th ACM International Conference on Architectural Support for Pro-gramming Languages and Operating Systems, Volume 2 . Associa-tion for Computing Machinery, New York, NY, USA, 1112–1127. doi: 10.1145/3620665.3640411 
+
+[32] Jayashree Mohan, Amar Phanishayee, and Vijay Chidambaram. 2021. CheckFreq: Frequent, Fine-Grained DNN Checkpointing. In 19th USENIX Conference on File and Storage Technologies (FAST) . USENIX Association, Berkeley, CA, USA, 203–216. https://www.usenix.org/ conference/fast21/presentation/mohan 
+
+[33] NVIDIA Corporation. 2024. cuda-checkpoint: CUDA Checkpoint and Restore Utility. https://github.com/NVIDIA/cuda-checkpoint .[34] NVIDIA Corporation. 2025. Delivering 1.5M TPS Inference on NVIDIA GB200 NVL72: NVIDIA Accelerates OpenAI gpt-oss Models from Cloud to Edge. https://developer.nvidia.com/blog/delivering-1-5-m-tps-inference-on-nvidia-gb200-nvl72-nvidia-accelerates-openai-gpt-oss-models-from-cloud-to-edge/ .[35] NVIDIA Corporation. 2026. Analyzing XID Errors. NVIDIA GPU De-bug Guidelines, https://docs.nvidia.com/deploy/xid-errors/analyzing-xid-catalog.html .[36] NVIDIA Corporation. 2026. CUDA Graphs. CUDA Programming Guide, https://docs.nvidia.com/cuda/cuda-programming-guide/04-special-topics/cuda-graphs.html .[37] NVIDIA Corporation. 2026. Dynamic Page Offlining. NVIDIA A100 GPU Memory Error Management, https://docs.nvidia.com/deploy/ a100-gpu-mem-error-mgmt/latest/dynamic-page-offlining.html .[38] NVIDIA Corporation. 2026. Error Containment. NVIDIA A100 GPU Memory Error Management, https://docs.nvidia.com/deploy/a100-gpu-mem-error-mgmt/latest/error-containment.html .[39] NVIDIA Corporation. 2026. Error Recovery and Re-sponse Flags. NVIDIA A100 GPU Memory Error Manage-ment, https://docs.nvidia.com/deploy/a100-gpu-mem-error-mgmt/latest/error-recovery-and-response-flags.html .[40] NVIDIA Corporation. 2026. NVIDIA Collective Communications Library (NCCL) User Guide. https://docs.nvidia.com/deeplearning/ nccl/user-guide/ .[41] NVIDIA Corporation. 2026. Virtual Memory Management. CUDA Pro-gramming Guide, https://docs.nvidia.com/cuda/archive/13.2.1/cuda-programming-guide/04-special-topics/virtual-memory-management.html .[42] NVIDIA Dynamo. 2025. Dynamo: The open-source, datacenter-scale inference stack. https://github.com/ai-dynamo/dynamo .[43] Shweta Pandey, Aditya K Kamath, and Arkaprava Basu. 2022. GPM: Leveraging Persistent Memory from a GPU. In Proceedings of the 27th ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems . Association for Computing Machinery, New York, NY, USA, 142–156. doi: 10.1145/3503222.3507758 
+
+[44] Ramya Prabhu, Ajay Nayak, Jayashree Mohan, Ramachandran Ram-jee, and Ashish Panwar. 2025. vAttention: Dynamic Memory Man-agement for Serving LLMs without PagedAttention. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 . Asso-ciation for Computing Machinery, New York, NY, USA, 1133–1150. doi: 10.1145/3669940.3707256 
+
+[45] Shangshu Qian, Kipling Liu, P. C. Sruthi, Lin Tan, and Yongle Zhang. 2026. Towards Resiliency in Large Language Model Serving with KevlarFlow. arXiv:2601.22438 [cs.DC] doi: 10.48550/arXiv.2601.22438 
+
+[46] Dharma Shukla, Muthian Sivathanu, Srinidhi Viswanatha, Bhargav Gulavani, Rimma Nehme, Amey Agrawal, Chen Chen, Nipun Kwatra, Ramachandran Ramjee, Pankaj Sharma, Atul Katiyar, Vipul Modi, Vaib-hav Sharma, Abhishek Singh, Shreshth Singhal, Kaustubh Welankar, Lu Xun, Ravi Anupindi, Karthik Elangovan, Hasibur Rahman, Zhou Lin, Rahul Seetharaman, Cheng Xu, Eddie Ailijiang, Suresh Krish-nappa, and Mark Russinovich. 2022. Singularity: Planet-Scale, Preemp-tive and Elastic Scheduling of AI Workloads. arXiv:2202.07848 [cs.DC] doi: 10.48550/arXiv.2202.07848 
+
+[47] Radostin Stoyanov, Viktória Spišaková, Jesus Ramos, Steven Gurfinkel, Andrei Vagin, Adrian Reber, Wesley Armour, and Rodrigo Bruno. 2025. CRIUgpu: Transparent Checkpointing of GPU-Accelerated Workloads. arXiv:2502.16631 [cs.DC] doi: 10.48550/arXiv.2502.16631 
+
+[48] Foteini Strati, Michal Friedman, and Ana Klimovic. 2025. PCcheck: Persistent Concurrent Checkpointing for ML. In Proceedings of the 30th ACM International Conference on Architectural Support for Pro-gramming Languages and Operating Systems, Volume 1 . Association for Computing Machinery, New York, NY, USA, 811–827. doi: 10.1145/ 3669940.3707255 
+
+[49] Foteini Strati, Sara McAllister, Amar Phanishayee, Jakub Tarnawski, and Ana Klimovic. 2024. DéjàVu: KV-cache Streaming for Fast, Fault-tolerant Generative LLM Serving. In Proceedings of the 41st In-ternational Conference on Machine Learning (ICML) (Proceedings of Machine Learning Research, Vol. 235) . PMLR, 46745–46771. https: //proceedings.mlr.press/v235/strati24a.html 
+
+[50] Michael M. Swift, Muthukaruppan Annamalai, Brian N. Bershad, and Henry M. Levy. 2004. Recovering Device Drivers. In 6th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .USENIX Association, Berkeley, CA, USA, 1–16. https://www.usenix. org/conference/osdi-04/recovering-device-drivers 
+
+[51] John Thorpe, Pengzhan Zhao, Jonathan Eyolfson, Yifan Qiao, Zhihao Jia, Minjia Zhang, Ravi Netravali, and Guoqing Harry Xu. 2023. Bam-boo: Making Preemptible Instances Resilient for Affordable Training of Large DNNs. In 20th USENIX Symposium on Networked Systems Design and Implementation (NSDI) . USENIX Association, Berkeley, CA, USA, 497–513. https://www.usenix.org/conference/nsdi23/presentation/ thorpe 
+
+[52] Dmitrii Ustiugov, Plamen Petrov, Marios Kogias, Edouard Bugnion, and Boris Grot. 2021. Benchmarking, Analysis, and Optimization of Serverless Function Snapshots. In Proceedings of the 26th ACM Interna-tional Conference on Architectural Support for Programming Languages and Operating Systems . Association for Computing Machinery, New York, NY, USA, 559–572. doi: 10.1145/3445814.3446714 
+
+[53] Borui Wan, Mingji Han, Yiyao Sheng, Yanghua Peng, Haibin Lin, Mofan Zhang, Zhichao Lai, Menghan Yu, Junda Zhang, Zuquan Song, Xin Liu, and Chuan Wu. 2025. ByteCheckpoint: A Unified Checkpointing System for Large Foundation Model Development. In 
+
+22nd USENIX Symposium on Networked Systems Design and Imple-mentation (NSDI) . USENIX Association, Berkeley, CA, USA, 559–578. 
+
+https://www.usenix.org/conference/nsdi25/presentation/wan-borui 
+
+[54] Zhuang Wang, Zhen Jia, Shuai Zheng, Zhen Zhang, Xinwei Fu, T. S. Eu-gene Ng, and Yida Wang. 2023. Gemini: Fast Failure Recovery in Distributed Training with In-Memory Checkpoints. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) . As-sociation for Computing Machinery, New York, NY, USA, 364–381. doi: 10.1145/3600006.3613145 
+
+[55] Xingda Wei, Zhuobin Huang, Tianle Sun, Yingyi Hao, Rong Chen, Mingcong Han, Jinyu Gu, and Haibo Chen. 2025. PhoenixOS: Concur-rent OS-level GPU Checkpoint and Restore with Validated Speculation. In Proceedings of the 31st Symposium on Operating Systems Principles (SOSP) . Association for Computing Machinery, New York, NY, USA, 996–1013. doi: 10.1145/3731569.3764813 
+
+[56] Jiarong Xing, Yifan Qiao, Simon Mo, Xingqi Cui, Gur-Eyal Sela, Yang Zhou, Joseph Gonzalez, and Ion Stoica. 2025. Towards Efficient and Practical GPU Multitasking in the Era of LLM. arXiv preprint arXiv:2508.08448 (2025). [57] Wendong Xu, Chujie Chen, He Xiao, Kuan Li, Jing Xiong, Chen Zhang, Wenyong Zhou, Chaofan Tao, Yang Bai, Bei Yu, and Ngai Wong. 2026. AnchorTP: Resilient LLM Inference with State-Preserving Elastic Ten-sor Parallelism. In Design, Automation and Test in Europe Conference (DATE) . IEEE, Piscataway, NJ, USA. arXiv:2511.11617. [58] Ziyi Xu, Zhiqiang Xie, Swapnil Gandhi, and Christos Kozyrakis. 2025. FailSafe: High-performance Resilient Serving. arXiv:2511.14116 [cs.DC] doi: 10.48550/arXiv.2511.14116 
+
+[59] Yanning Yang, Dong Du, Haitao Song, and Yubin Xia. 2024. On-demand and Parallel Checkpoint/Restore for GPU Applications. In 
+
+Proceedings of the ACM Symposium on Cloud Computing . Association for Computing Machinery, New York, NY, USA, 415–433. doi: 10.1145/ 3698038.3698510 
+
+[60] Minchen Yu, Ao Wang, Dong Chen, Haoxuan Yu, Xiaonan Luo, Zhuo-hao Li, Wei Wang, Ruichuan Chen, Dapeng Nie, Haoran Yang, and Yu Ding. 2025. Torpor: GPU-Enabled Serverless Computing for Low-Latency, Resource-Efficient Inference. In 2025 USENIX Annual Techni-cal Conference (USENIX ATC) . USENIX Association, Berkeley, CA, USA, 597–612. https://www.usenix.org/conference/atc25/presentation/yu 
+
+[61] Shan Yu, Yifan Qiao, Mingyuan Ma, Yangmin Li, Shuo Yang, Xinyuan Tong, Yang Wang, Zhiqiang Xie, Yuwei An, Shiyi Cao, Ke Bao, Deepak Vij, Xiaoning Ding, Yichen Wang, Qingda Lu, Zhong Wang, Gao Gao, Harry Xu, Junyi Shu, Jiarong Xing, and Ying Sheng. 2026. Prism: Cost-Efficient Multi-LLM Serving via GPU Memory Ballooning. OSDI 
+
+(2026). [62] Shaoxun Zeng, Tingxu Ren, Jiwu Shu, and Youyou Lu. 2026. GPU Checkpoint/Restore Made Fast and Lightweight. In 24th USENIX Con-ference on File and Storage Technologies (FAST) . USENIX Association, Berkeley, CA, USA, 239–254. https://www.usenix.org/conference/ fast26/presentation/zeng 
+
+[63] Shaoxun Zeng, Minhui Xie, Shiwei Gao, Youmin Chen, and Youyou Lu. 2025. Medusa: Accelerating Serverless LLM Inference with Ma-terialization. In Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS) . Association for Computing Machinery, New York, NY, USA, 653–668. doi: 10.1145/3669940.3707285 
+
+[64] Dingyan Zhang, Haotian Wang, Yang Liu, Xingda Wei, Yizhou Shan, Rong Chen, and Haibo Chen. 2025. BlitzScale: Fast and Live Large Model Autoscaling with O(1) Host Caching. In 19th USENIX Sympo-sium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 275–293. https://www.usenix.org/ conference/osdi25/presentation/zhang-dingyan 
+
+[65] Irene Zhang, Alex Garthwaite, Yury Baskakov, and Kenneth C. Barr. 2011. Fast Restore of Checkpointed Memory Using Working Set Esti-mation. In Proceedings of the 7th ACM SIGPLAN/SIGOPS international conference on Virtual execution environments . Association for Com-puting Machinery, New York, NY, USA, 87–98. doi: 10.1145/1952682. 1952695 
+
+[66] Songyu Zhang, Aaron Tam, Myungjin Lee, Shixiong Qi, and K. K. Ramakrishnan. 2026. Making MoE-based LLM Inference Resilient with Tarragon. arXiv:2601.01310 [cs.DC] doi: 10.48550/arXiv.2601.01310 
+
+[67] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Ad-vances in Neural Information Processing Systems 37 (NeurIPS) . Neural Information Processing Systems Foundation, Inc., San Diego, CA, USA, 62557–62583. doi: 10.52202/079017-2000 
+
+[68] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . USENIX Association, Berkeley, CA, USA, 193– 210. https://www.usenix.org/conference/osdi24/presentation/zhong-yinmin Fast Recovery for LLM Serving via Decoupled Device Memory Lifetime in Dynamo 
+
+Table 4. XID signals, resident-state reuse decision, and recovery action.                                
+
+> XID(s) Meaning Resident state Recovery action
+> 8GPU stopped processing work for the application (channel idle timeout). Survives Restart the replica. 13 Graphics-engine exception, typically an application fault such as an out-of-bounds access. Survives Restart the replica. 31 GPU MMU page fault, often from an illegal address access. Survives Restart the replica. 43 The application channel terminated after a software-induced fault and the GPU remains healthy. A preceding XID may identify the underlying fault. Survives Restart the replica. 45 The driver removed a channel with work still pending, typically after a preceding error or when its process was killed mid-kernel. Survives Restart the replica. 11, 32, 69, 109, 145 PBDMA, context-switch timeout, and related graphics-engine faults that leave the GPU unresponsive. Lost Reset the GPU. 48 Double-bit ECC error. Lost Reset the GPU. 79 The GPU is inaccessible over PCIe (“fallen off the bus”). Lost Reboot/repair the node. 94 Contained uncorrectable memory error, isolated to one application. Lost Reset the GPU. 95 Uncontained memory error affecting multiple applications. Lost Reset the GPU. 119/120 GSP RPC timeout or GSP error. Lost Reset the GPU and/or reboot the node.
+
+## A Failure Signals and Recovery Actions 
+
+Table 4 lists the GPU-side fault signals relevant to the re-covery policy and the resident-state reuse decision each im-plies [35, 38, 39, 41]. The trace records XIDs as a last-value gauge per GPU, which shows that a fault occurred but can-not attribute it to a particular restart. We therefore exclude every restart on a host that reported a reset-class or memory-integrity code in the same week. 
+
+## B Timing Recoveries in the Trace 
+
+The recovery durations in Figures 2 and 12 come from the cluster’s monitoring system, which scrapes the Kubernetes restart counter and readiness condition of every worker con-tainer every 15 seconds. We count only in-place container restarts, which increment this counter. Worker pods run with restartPolicy: Always , so a crashed engine restarts inside the same pod, and the same pod, node, and GPUs are on both sides of the interval. Pod replacement, which results from rollouts, configuration changes, autoscaling, or eviction rather than from failures, does not increment the counter and is not counted. A recovery starts at the first sample where the restart counter has increased and ends at the first later sample where the container is ready again. Its lost GPU-hours are that duration times the replica’s GPU limit. A first pass over 12-hour windows returns 2-minute samples and enumerates the recoveries, counting a counter jump of several restarts inside one sample as one idle in-terval. A second pass re-queries every 2-hour window that contains a recovery at 30-second resolution and re-times each one, keeping the 2-minute timing for the 12% whose readiness series has gaps or contradicts the coarse reading. Pods that served no requests that week are excluded, as are pods with 24 or more restarts in a week. The restart distribution is bimodal: serving replicas restart a few times per week, whereas a small number of misconfigured deploy-ments crash-loop during initialization without ever serving, some restarting more than a hundred times in a day. The threshold sits between these two populations. Excluding the loops is also conservative, since an engine that never fin-ishes initialization loses no serving capacity that a shadow could restore. The three device-invalidating episodes did not restart in place and therefore do not appear. This enumer-ates 5,762 recoveries, of which 1,319 (592 GPU-hours) are excluded as ambiguous: 810 ran on hosts whose GPUs re-ported a reset-class or memory-integrity XID that week, 506 cannot be attributed to a node by the monitoring data, 38 saw the node’s allocatable GPU count drop during the recovery, and 2 were part of a node-wide restart burst. No recovery followed a node reboot. The 98 remaining recoveries that ended in another crash before the container was ready, about 6% of the lost GPU-hours, are included with the next restart as their end. We cross-checked the timing against Kubernetes events, which are retained for the whole trace with timestamps to the second, on a sample of 108 recoveries, six per week, from pods that restarted at most three times in the trace. The kubelet’s container-start event precedes our start by a median of 15 seconds and by under 32 seconds in 90% of cases. Kubernetes records probe failures but not the success that ends them, so an event-based end can only be bracketed to one probe period, and where the failure stream is complete the bracket agrees with our end within 30 seconds. The shadow latency of Section 5.2 ends at registration rather than at the probe. The 7-second assumption in Section 5.6 sits above the slowest measured promotion plus its 1-second probe period, so the two ends are comparable. Two biases run toward late ends. The observed end trails registration by up to one probe period of 10 seconds, and about 1.5% of readiness series have gaps that the monitoring system fills by interpolation. Together they can overstate the trace total by at most 77 GPU-hours, or 3%. Random timing error averages out over 4,443 recoveries to about 4 GPU-hours. Timing every recovery at the short end of its sampling window, and no shorter than one 15-second scrape, gives a lower bound of 2,174 GPU-hours lost, of which the replay of Section 5.6 reclaims 2,138, again 98%.

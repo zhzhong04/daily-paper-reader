@@ -1,0 +1,321 @@
+Title: Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets
+
+URL Source: https://arxiv.org/pdf/2609.27981v1
+
+Published Time: Thu, 24 Sep 2026 01:06:53 GMT
+
+Number of Pages: 14
+
+Markdown Content:
+# Risk-Controlled KV-Cache Eviction: From Memory Budgets to Risk Targets 
+
+Beomgu Kang, SoJin Yun, Hojoon Kim, Hyunseok Seo *
+
+Department of Artificial Intelligence, Korea University, Republic of Korea 
+
+Abstract 
+
+KV-cache eviction is typically evaluated through average quality–memory trade-offs, yet a small average loss can hide requests whose utility degrades materially. We refor-mulate eviction as a deployment risk-control problem: a material degradation occurs when eviction lowers task utility by more than a deployment-specified tolerance relative to full-KV inference on the same request, and deployment risk is the population frequency of such events. Given a reliability contract specifying a target risk level and confidence requirement, we use a compressor-agnostic post-hoc certification procedure to select a retention policy from calibration data with a finite-sample guarantee, falling back to full KV when no compressed policy is cer-tified. Across multiple eviction methods, Llama and Mistral models, and LongBench and RULER-32K, the same contract supports substantially different levels of eviction: on Llama, it certifies SnapKV at 75% reten-tion on LongBench but no tested compressed policy on RULER-32K, triggering full-KV fallback. Policies with empirical degrada-tion rates below the 5% target can still fail finite-sample certification; on Llama Long-Bench, empirical thresholding selects uncer-tified policies that retain 5–10 percentage points less cache across fixed-budget meth-ods. The proposed framework converts a deployment-level reliability requirement into a KV-memory operating point. 
+
+1 Introduction 
+
+Large language models (LLMs) increasingly sup-port extended context windows, enabling long-context workloads such as multi-document ques-tion answering, long-document summarization, and code completion (Bai et al., 2024). However, effi-ciently serving these long-context LLMs remains 
+
+> *Corresponding author: seoh@korea.ac.kr
+
+challenging due to the growing memory cost of the key-value (KV) cache. During autoregressive decoding, the KV cache stores the key and value states of previously processed tokens to avoid re-dundant recomputation and accelerate token gen-eration. As the sequence length and the number of active requests increase, the KV cache grows ac-cordingly and can become a major memory bottle-neck. This challenge has motivated a growing body of work on KV-cache eviction (Zhang et al., 2023; Li et al., 2024; Feng et al., 2025; Cai et al., 2025; Zhou et al., 2025; Feng et al., 2026a,b). These methods primarily focus on which KV states to retain under a limited memory budget while pre-serving model quality. Deployment introduces a complementary ques-tion: how aggressive can an eviction policy be while remaining reliable at the request level? Good average benchmark performance does not guaran-tee that individual requests are reliably preserved. Let Ufull (X) denote task utility under full KV and 
+
+Uπ(X) the utility under an eviction policy π. De-fine the signed eviction-induced degradation 
+
+∆π(X) = Ufull (X) − Uπ(X). (1) A small average degradation does not imply that large request-level degradations are rare. In partic-ular, a small value of E[∆ π(X)] does not imply 
+
+P[∆ π(X) > τ ] ≤ ϵ. (2) The mean captures aggregate quality, whereas the exceedance probability captures how often evic-tion causes a drop larger than a deployment toler-ance. Figure 1 illustrates this distinction under our main materiality threshold τ = .10 . Across evic-tion methods and retention ratios, configurations with similar mean degradation can exhibit different material-degradation risks. This motivates control-ling the exceedance risk directly rather than select-ing an eviction budget from average performance alone. arXiv:2609.27981v1 [cs.CL] 23 Sep 2026 0 2 4 6Mean signed degradation, [ (X)] (LongBench points) 
+
+> 246810 12 14 16 Empirical material-degradation risk at  = . 10 (%)
+> 5% material-degradation target
+> SnapKV AdaKV DefensiveKV Layer-DefensiveKV
+
+Figure 1: Mean degradation versus request-level risk for Llama-3.1-8B on LongBench. Similar aver-age degradation can correspond to different material-degradation risks under τ = .10 . Lines connect candi-date policies from conservative to aggressive eviction, and dashed lines indicate zero mean degradation and the target ϵ = .05 .
+
+We address this deployment problem through finite-sample risk control. Building on Learn-then-Test (LTT) (Angelopoulos et al., 2025), we use an independent calibration set to determine how ag-gressively the KV cache may be evicted while con-trolling the frequency of request-level utility degra-dations that exceed a deployment-specified toler-ance. We refer to such tolerance-violating cases as 
+
+material degradation events . Our procedure is a compressor-agnostic calibration wrapper: it does not modify the underlying eviction algorithm and can be applied to any pre-specified family of poli-cies. Given a degradation tolerance and a reliabil-ity requirement, fixed-sequence testing evaluates a pre-specified sequence of policies and returns the most aggressive policy certified before the first failure, while falling back to full KV if no evic-tion policy can be certified. We evaluate four fixed-budget methods with Llama and Mistral on LongBench (Bai et al., 2024) and with Llama on RULER-32K (Hsieh et al., 2024): SnapKV (Li et al., 2024), AdaKV (Feng et al., 2025), De-fensiveKV, and Layer-DefensiveKV (Feng et al., 2026a). We additionally evaluate the request-adaptive ReFreeKV (Ni et al., 2026) with Llama on LongBench. These settings allow us to study risk-controlled deployment across different forms of KV-memory allocation. The main contributions of our work are summa-rized as follows: • Reliability-first formulation of KV-cache eviction: We formulate KV-cache eviction as a request-level risk-control problem, where a reliability contract specifies the tolerated util-ity loss and its allowed population frequency relative to paired full-KV inference. • Compressor-agnostic finite-sample certifi-cation: Building on Learn-then-Test, we instantiate a fixed-sequence procedure that selects the most aggressive retention pol-icy, with full-KV fallback, without modify-ing the underlying eviction algorithm. Our task-stratified calibration design provides a finite-sample guarantee for the declared task-balanced population. • Empirical consequences of certification: 
+
+Certified operating points vary substantially across models, compressors, and long-context benchmarks under the same reliability con-tract. On Llama LongBench, finite-sample certification selects 5–10 percentage points more retention than empirical thresholding, even when the empirical calibration risk does not exceed 5% .
+
+2 Related Work 
+
+2.1 KV-cache eviction 
+
+KV-cache eviction reduces memory by retaining a subset of cached states while discarding those deemed less important. H2O retains recent tokens together with attention heavy hitters (Zhang et al., 2023), while SnapKV uses an observation window to identify prompt positions likely to remain use-ful during generation (Li et al., 2024). AdaKV allocates a global budget non-uniformly across at-tention heads (Feng et al., 2025), whereas Pyra-midKV and DynamicKV adapt retention across layers (Cai et al., 2025; Zhou et al., 2025). De-fensiveKV further improves robustness to shifts in token importance through defensive aggregation, while its Layer-DefensiveKV extension addition-ally allocates the KV budget across layers (Feng et al., 2026a). Chen et al. (2026) show that KV-cache compression can disproportionately degrade individual instructions in multi-instruction prompts, using system-prompt leakage as a case study of instruction-following failure. They mitigate these failures by protecting selected tokens or balancing eviction across instruction spans. Beyond adapting how a fixed budget is dis-tributed within a request, recent work has ex-plored adapting the total KV budget across re-quests. ReFreeKV uses an input-dependent signal to determine request-specific retention (Ni et al., 2026), while CompilerKV uses prompt-level sig-nals such as attention entropy and local perplex-ity to adapt compression aggressiveness through offline-compiled thresholds (Yang et al., 2026). These methods adapt retention to the input but do not report finite-sample control of the population frequency of downstream material degradation. Recent work has introduced formal guarantees for KV compression. Xie (2026) derives per-step attention-output error certificates by replacing de-terministic eviction with a randomized sampling design, while WitCert develops runtime attention-fidelity bounds and fallback gating for KV-cache quantization (Wei et al., 2026). Both certify how faithfully attention is preserved, while downstream task quality is evaluated empirically. We instead certify a bound on the population frequency of request-level task degradations relative to full-KV inference, without modifying the underlying evic-tion mechanism. 
+
+2.2 Distribution-free and quantile risk control for inference 
+
+Distribution-free risk-controlling prediction sets provide finite-sample guarantees on population risk using calibration data (Bates et al., 2021). Learn-then-Test (LTT) casts candidate configura-tions as a family of statistical hypotheses, con-structs valid p-values from calibration outcomes, and applies multiple-testing procedures to obtain risk guarantees for selected configurations (An-gelopoulos et al., 2025). Quantile Risk Control highlights that expected loss may obscure the high-loss tail of a distribution (Snell et al., 2023). Our material-degradation event asks a related tail ques-tion through a fixed-threshold exceedance probabil-ity, P[∆ π(X) > τ ] ≤ ϵ; finite-sample certification is performed using LTT. A closely related line of work is risk-controlled adaptive inference. CALM dynamically allocates decoder computation through early exiting and calibrates stopping thresholds to preserve gener-ation quality (Schuster et al., 2022). Fast yet Safe explicitly combines early exiting with post-hoc distribution-free risk control across vision and lan-guage tasks (Jazbec et al., 2024). Wynn et al. (2026) use related machinery to control degrada-tion from corrupted context relative to a zero-shot baseline. Conformal Thinking reframes adaptive reasoning as a compute-allocation problem, cali-brating stopping rules to limit risk while reducing reasoning tokens (Wang et al., 2026). Collectively, these works illustrate how risk-control frameworks can calibrate resource-saving inference decisions from a reliability requirement rather than solely from a preset resource budget. These methods adapt how much computation to allocate to an input, through choices such as decoder depth or reasoning length. KV-cache evic-tion instead requires calibrating how aggressively cached context can be discarded: candidate poli-cies may vary a scalar retention ratio, redistribute a global budget across heads or layers, or adapt retention across requests. We define risk as the population frequency of material degradation rel-ative to paired full-KV inference and instantiate a task-stratified finite-sample certification procedure over these pre-specified policy families, without modifying the underlying compressor. 
+
+3 Risk-Controlled KV Deployment 
+
+3.1 Risk-Controlled KV Eviction Formulation 
+
+Let X denote a request drawn from a target pop-ulation P, defined below as the uniform mixture over the evaluated tasks. An eviction policy π de-termines the KV representation retained for gener-ation. It may use a fixed retention ratio, allocate a global KV budget nonuniformly across heads or layers, or adapt retention to each request. Let Uπ(X) ∈ [0 , 1] and Ufull (X) denote the normalized downstream utilities under π and full KV, respectively, evaluated using the same model, prompt, generation settings, and evaluator. De-fine the signed degradation ( ∆π) and material-degradation indicator ( Vτ ) as 
+
+∆π(X) = Ufull (X) − Uπ(X), (3) 
+
+Vτ (X; π) = 1{∆π(X) > τ } , (4) where τ ∈ (0 , 1) is the material-degradation toler-ance. The deployment risk is 
+
+Rτ (π) = EX∼P [Vτ (X; π)] . (5) This risk measures degradation relative to full KV rather than absolute task failure. Utility improve-ments on some requests do not offset material degradations on others. The reliability contract requires 
+
+Rτ (π) ≤ ϵ, (6) where ϵ is the maximum allowable frequency of material degradation. Our main setting, (τ, ϵ ) = (0 .10 , 0.05) , permits utility drops greater than 0.10 
+
+on at most 5% of requests under P. For the policy 
+
+bπ returned by calibration, including the full-KV fallback, we seek the finite-sample guarantee 
+
+Pr  
+
+> CAL
+
+{R τ (bπ) > ϵ } ≤ δ, (7) where probability is over the calibration sample (CAL). We use δ = 0 .05 in the main setting. Here, 
+
+ϵ bounds the population frequency of a request-level event, whereas δ bounds the probability, over calibration sampling, of returning a policy that vi-olates that population bound. Neither is a guaran-tee for each individual request. The finite-sample statement is conditional on the sampling and pre-specification assumptions below. For a fixed-budget policy, let b(π) ∈ (0 , 1] de-note the retained-cache fraction. The ideal deploy-ment objective is 
+
+min  
+
+> π∈Π
+
+b(π) s.t. Rτ (π) ≤ ϵ. (8) For request-adaptive policies, the objective can in-stead use EX∼P [bπ(X)] . Rather than directly solv-ing (8), we select from a finite, pre-specified policy sequence using statistical certification, with full KV as the fallback. This procedure guarantees risk control, not global resource optimality. 
+
+3.2 Finite-Sample Certification with Fixed-Sequence Testing 
+
+We instantiate Learn-then-Test (LTT) (Angelopou-los et al., 2025) by treating each candidate evic-tion policy as a risk hypothesis and applying fixed-sequence testing to valid calibration p-values. Our task-stratified calibration design uses the bino-mial comparison below to establish p-value valid-ity while allowing violation probabilities to differ across task strata. 
+
+Candidate sequence. For fixed-budget compres-sors, we pre-specify the retention sequence 
+
+(b1, . . . , b m) = (0 .80 , 0.75 , . . . , 0.20) ,
+
+where πj := π(bj ) and b1 > · · · > b m orders candidates from conservative to aggressive com-pression. The shared grid enables comparisons across compressors at matched retention budgets without compressor-specific grid tuning on CAL. For every confirmatory model–compressor– benchmark sequence, the candidate policies, their order, and (τ, ϵ, δ ) are fixed before its CAL outcomes are inspected; any policy fitting or compressor-specific tuning uses separate data. Can-didates may be evaluated sequentially, stopping at the first non-certification. When post-stop can-didates are additionally evaluated for descriptive curves, their outcomes do not enter confirmatory selection or alter the stopping rule. TEST is not used to choose the certified operating point. 
+
+Calibration design and target population. Let 
+
+Ph denote the request distribution for task h ∈{1, . . . , H }. Our target population is the task-uniform mixture 
+
+P = 1
+
+H
+
+> H
+
+X
+
+> h=1
+
+Ph. (9) CAL contains n/H observations from each task. We assume that calibration requests are indepen-dently sampled from their corresponding task dis-tributions Ph.For a fixed candidate πj , let qij =Pr {Vτ (Xi; πj ) = 1}. Equal task allocation implies 
+
+¯qj := 1
+
+n
+
+> n
+
+X
+
+> i=1
+
+qij = 1
+
+H
+
+> H
+
+X
+
+> h=1
+
+EX∼P h [Vτ (X; πj )] = Rτ (πj ).
+
+(10) The guarantee therefore applies to task-uniform mixture risk, not per-task risk or risk under dif-ferent deployment task proportions or within-task distributions. 
+
+Finite-sample risk test. For candidate πj , let 
+
+Kj =
+
+> n
+
+X
+
+> i=1
+
+Vτ (Xi; πj ) (11) be the CAL violation count, with empirical risk 
+
+bRτ,j = Kj /n . We test 
+
+Hj : Rτ (πj ) ≥ ϵ vs. HAj : Rτ (πj ) < ϵ. 
+
+(12) We conservatively include equality in the null, so certification requires evidence that risk is strictly below the target. The violation indicators ( Vτ ) are independent Bernoulli variables whose probabilities may differ across tasks. Under Hj , (10) gives ¯qj ≥ ϵ. For integer k ≤ ⌊ nϵ ⌋ − 1, Hoeffding’s comparison theorem (Hoeffding, 1956) and monotonicity of the binomial lower tail imply 
+
+Pr( Kj ≤ k) ≤ Pr {Bin( n, ¯qj ) ≤ k}≤ Pr {Bin( n, ϵ ) ≤ k}. (13) Thus, 
+
+penv  
+
+> j
+
+=
+
+(
+
+Pr {Bin( n, ϵ ) ≤ Kj }, Kj ≤ ⌊ nϵ ⌋ − 1,
+
+1, otherwise (14) is a valid, possibly conservative p-value: 
+
+Pr {penv  
+
+> j
+
+≤ α} ≤ α under Hj for every α ∈ [0 , 1] .A candidate reached by fixed-sequence testing is certified when penv  
+
+> j
+
+≤ δ.For n = 1200 , ϵ = 0 .05 , and δ = 0 .05 , the largest certifiable violation count is Kmax = 47 ,corresponding to an empirical risk of 3.92% . This is stricter than the nominal 5% target because of finite-sample uncertainty. 
+
+Fixed-sequence selection and fallback. Candi-dates are tested in the pre-specified order, from conservative to increasingly aggressive compres-sion. Testing continues while penv  
+
+> j
+
+≤ δ and stops at the first non-rejection, returning the last certi-fied candidate. If all candidates are certified, the procedure returns πm; if the first candidate is not certified, it returns F ULL KV. The fallback is iden-tified with the paired full-KV reference, so that 
+
+∆full (X) = 0 and Rτ (full) = 0 by definition. Within a pre-specified sequence, fixed-sequence testing controls the probability of any false cer-tification at level δ (Angelopoulos et al., 2025): rejecting any true null requires rejecting the first true null in that sequence, whose rejection prob-ability is at most δ. Together with the full-KV fallback, this establishes (7). The result permits ar-bitrary dependence among candidate p-values and does not require risk to be monotone in retention. The returned policy is the last policy certified be-fore the procedure stops, not necessarily the lowest-retention candidate that could pass under another testing procedure. When risk is non-monotone, stopping at the first non-rejection can exclude later candidates that would pass their individual tests. The guarantee is sequence-specific. We apply it separately to each model–compressor–benchmark sequence and do not claim a simultaneous 1 − δ
+
+guarantee across all reported sequences. Selecting among multiple sequence outputs using their CAL outcomes requires additional multiplicity control or fresh calibration data. 
+
+3.3 Request-Adaptive Policies 
+
+The same framework applies to request-adaptive compressors. For example, ReFreeKV uses a threshold T to determine a request-specific retained fraction bT (X) (Ni et al., 2026). Each threshold therefore defines a policy πT , despite variable mem-ory usage across requests. We fix the ordered threshold sequence 
+
+(T1, . . . , T 10 ) = ( .0005 , . 001 , . 002 , . 003 , . 005 ,.0075 , . 01 , . 015 , . 02 , . 03) 
+
+independently of CAL outcomes, following the compressor’s intended progression from conserva-tive to aggressive compression. For each πTj , we compute the same degradation and violation indi-cators and apply the finite-sample test and fixed-sequence selection rule, including the full-KV fall-back. For the selected policy, we estimate its mean retained fraction EX∼P [bT (X)] overall and within each task on TEST using equal task weights. 
+
+4 Experimental Setup 
+
+4.1 Models and eviction methods 
+
+We evaluate two open-weight LLMs: Llama-3.1-8B-Instruct (Grattafiori et al., 2024) and Mistral-7B-Instruct-v0.3 (Jiang et al., 2023). Our pri-mary LongBench evaluation considers four repre-sentative fixed-budget KV-cache eviction methods: SnapKV (Li et al., 2024), AdaKV (Feng et al., 2025), DefensiveKV, and Layer-DefensiveKV (Feng et al., 2026a). Layer-DefensiveKV ex-tends DefensiveKV with layer-wise budget allo-cation, allowing different layers to retain different amounts of KV cache. We additionally evaluate ReFreeKV (Ni et al., 2026) as a request-adaptive method whose realized retention varies across re-quests. The reported experiments were run on NVIDIA RTX A6000 (48 GB) GPUs. Fixed-budget runs use FlashAttention-2 (Dao, 2024), whereas the ReFreeKV implementation uses ea-ger attention. 
+
+4.2 Benchmarks and evaluation populations LongBench Benchmark. LongBench (Bai et al., 2024) contains heterogeneous long-context tasks spanning question answering, summarization, re-trieval, classification, and code, with task-specific evaluation metrics. We define the evaluation pop-ulation as a task-balanced mixture so that tasks with more available examples do not dominate the aggregate deployment risk. We include the 12 tasks with at least 200 distinct contexts in the preprocessed corpus: 2WikiMQA, GovReport, HotpotQA, LCC, MultiNews, MuSiQue, Passage-Count, PassageRetrieval-en, RepoBench-P, SAM-Sum, TREC, and TriviaQA. This inclusion rule and task set were fixed before CAL outcomes were inspected. For each task, we uniformly sample 200 eligible requests without replacement using the fixed ran-dom seed 20260904. We then randomly partition them into disjoint 100-request calibration (CAL) and held-out test (TEST) splits, yielding n = 1200 
+
+requests per split. For the finite-sample analysis, requests within each task stratum are modeled as independent draws from the corresponding task distribution Ph. The resulting certificate therefore applies to the aggregate task-balanced population, not to each task individually; per-task TEST risks are reported only as descriptive diagnostics. ReFreeKV is evaluated separately under its im-plementation’s 8K protocol. The input budget is 8192 tokens minus the task-specific generation limit and a 20-token margin; longer prompts re-tain the first and last halves of the available budget. Its prompt formatting also differs from the fixed-budget protocol on some tasks. ReFreeKV and its full-KV reference use identical processed inputs and generation settings. This experiment therefore assesses adaptive-policy calibration only within that matched protocol, and its certificate does not cover preprocessing-induced degradation. We do not make direct cross-protocol comparisons of ab-solute utility or retention efficiency. 
+
+RULER Benchmark. RULER (Hsieh et al., 2024) provides 13 controlled long-context tasks covering needle-in-a-haystack retrieval, variable tracking, word extraction, and question answering. We evaluate all 13 tasks at a 32K context length and define the RULER population analogously as a uniform mixture over tasks. CAL and TEST each contain 100 requests per task, yielding n = 1300 requests per split. For this sample size and (ϵ, δ ) = ( .05 , . 05) , the largest certifiable violation count is Kmax = 51 (3.92% empirical CAL risk). We independently apply the same calibration and fixed-sequence certification procedure to this RULER population. As with LongBench, the resulting certificate is an aggregate guarantee over the task-balanced population rather than a simultaneous guarantee for each individual task. 
+
+4.3 Reliability Contract and Experimental Details 
+
+Unless stated otherwise, each confirmatory model– compressor–benchmark sequence uses (τ, ϵ, δ ) = (0 .10 , 0.05 , 0.05) . Thus, with probability at least 
+
+0.95 over calibration sampling, the selected policy has population material-degradation risk at most 
+
+0.05 under the declared task-balanced population. This guarantee applies separately to each confirma-tory sequence, rather than simultaneously across all methods, models, and benchmarks, and does not require the finite-sample TEST violation rate to be below 0.05 .For both benchmarks, we normalize the official example-level metric to [0 , 1] before computing paired degradation. A material-degradation event is then determined from the paired compressed and full-KV utilities according to Eq. 4. For fixed-budget experiments, we use the prompt, answer prefix, and task-specific generation limit stored with each preprocessed benchmark re-quest. We instantiate each eviction method with the default hyperparameters of its evaluated im-plementation and vary only the retained fraction. All four methods use an observation window of 32 and kernel size 5, and AdaKV additionally uses 
+
+α = 0 .2. The retained fraction is defined relative to the processed prefill sequence length, with the 32-token observation window counted within the stated budget. Integer budgets and method-specific allocation across heads and layers follow the eval-uated implementations. All generations use deter-ministic greedy decoding, eliminating decoding-sampling randomness from the paired full-KV and compressed evaluations. 
+
+4.4 Calibration and Held-out Evaluation Protocol 
+
+Policy selection is performed exclusively on CAL. Candidates are tested in the pre-specified conservative-to-aggressive order until the first non-certification. Post-stop candidates are evaluated only for the descriptive Llama LongBench analy-ses and do not affect selection. After the CAL-selected policy is frozen, TEST is used only for descriptive held-out evaluation Method Retention CAL risk TEST risk Llama-3.1-8B SnapKV .75 3.50% 2.50% AdaKV .65 3.33% 3.08% DefensiveKV .40 3.67% 4.08% Layer-DefensiveKV .35 3.58% 4.00% Mistral-7B SnapKV .70 3.33% 3.33% AdaKV .70 3.58% 2.58% DefensiveKV .40 3.67% 5.08% Layer-DefensiveKV .45 3.17% 3.92%         
+
+> Table 1: LongBench results under (τ, ϵ, δ )=(.10 , . 05 , . 05) . Retention is the CAL-selected retained-KV fraction; smaller values indicate more aggressive compression. CAL and TEST columns show empir-ical material-degradation event rates. Each model– compressor sequence is calibrated separately.
+
+against its paired full-KV baseline. No TEST out-come is used to modify the candidate sequence, certification decision, or selected operating point. LongBench and RULER are calibrated indepen-dently. 
+
+5 Results 
+
+5.1 LongBench Results 5.1.1 Selected Operating Points and Held-out Evaluation 
+
+Table 1 reports the retained fraction of the pol-icy selected by fixed-sequence certification for each model–compressor sequence. Across both Llama-3.1-8B and Mistral-7B, the certified op-erating points vary substantially across eviction methods, with the DefensiveKV variants sup-porting markedly lower retained fractions than SnapKV and AdaKV. The CAL-selected reten-tion ratios differ by model. In particular, Layer-DefensiveKV reaches lower retention than De-fensiveKV on Llama ( 0.35 versus 0.40 ), whereas the order reverses on Mistral ( 0.45 versus 0.40 ). On held-out TEST, seven of the eight selected model–compressor pairs have empirical material-degradation risk below 5% ; Mistral DefensiveKV has 61 /1200 events ( 5.08% ), one event above that proportion. The TEST rates are descriptive and do not change the CAL-based certification decision. In particular, the one-event excess neither invali-dates the CAL certificate nor by itself establishes that the population risk exceeds 5% .Figure 2 visualizes the full Llama-3.1-8B cal-ibration frontier. For every compressor, the next more aggressive candidate fails certification despite having empirical risk below the nominal 5% target; Sec. 5.1.2 analyzes these first-fail cases in detail. Across the tested grid, material-degradation risk generally increases as retention decreases (Fig-ure 2). Retention is therefore a useful empirical efficiency–reliability control variable, although the certification procedure does not assume monotonic-ity. 
+
+5.1.2 Certified versus Empirical-Risk Selection 
+
+A naive plug-in rule would accept any candidate whose observed CAL risk satisfies bR.10 ≤ .05 .With n = 1200 , this rule allows up to 60 observed events. In contrast, under (ϵ, δ ) = ( .05 , . 05) , the finite-sample test certifies at most 47 events. The first non-certified candidate exceeds this cut-off for every eviction method: SnapKV at 70% retention has 50 violations (4.17%), AdaKV at 60% has 49 (4.08%), DefensiveKV at 35% has 58 (4.83%), and Layer-DefensiveKV at 30% has 48 (4.00%). Thus, all four candidates would sat-isfy the nominal 5% target under empirical thresh-olding, yet none provides sufficient finite-sample evidence for certification under the pre-specified level-δ = .05 test. Across the four Llama compres-sors, certification consequently selects retention ratios 0.05 –0.10 higher than selection based on the observed CAL event rate alone. For Layer-DefensiveKV, the plug-in rule selects retention 
+
+0.30 , whereas certification selects 0.35 ; on the same held-out TEST requests, these policies yield 
+
+64 /1200 (5.33% ) and 48 /1200 (4.00% ) material-degradation events, respectively. This comparison illustrates the difference between the selected op-erating points but does not establish a statistically significant paired difference or imply that the pop-ulation risk at retention 0.30 exceeds 5% for future deployment requests. The TEST results do not affect certification. 
+
+5.2 RULER-32K Results 
+
+To assess whether the certification behavior extends to controlled long-context stress tests, we indepen-dently apply the same reliability contract and fixed-sequence certification procedure to four eviction methods on the task-balanced RULER-32K pop-ulation. For each method, the operating point is selected using only the RULER CAL split and then evaluated on the common held-out TEST split; no LongBench-certified retention ratio is transferred. 20 30 40 50 60 70 80 KV cache reduction (%) 0246810 12 14 16 Empirical material-degradation risk (%)  
+
+> Nominal target = 5%
+> 95% cert. cutoff = 3.92% certified × first non-certified
+> SnapKV AdaKV DefensiveKV Layer-DefensiveKV
+
+Figure 2: Empirical material-degradation risk for Llama-3.1-8B on LongBench CAL under τ = .10 . Horizontal lines denote the nominal risk target ϵ = .05 and the finite-sample certification cutoff. Open circles and crosses indicate the certified and first non-certified operating points, respectively. 
+
+Table 2 summarizes the resulting operating points. Layer-DefensiveKV permits the most ag-gressive compression, retaining 0.35 of the cache with CAL and TEST risks of 3.92% and 3.54% , re-spectively. DefensiveKV retains 0.45 with a TEST risk of 3.00% , whereas AdaKV requires 0.70 re-tention and has a TEST risk of 2.77% . SnapKV’s first candidate, retention 0.80 , has 135 /1300 CAL events ( 10 .38% ) and fails certification, so the pro-cedure returns full KV. This fallback is specific to the evaluated sequence: retention fractions between 
+
+0.80 and 1.00 were not tested, so the result does not establish that every compressed SnapKV policy is infeasible. Thus, all three certified compressed policies remain empirically below the nominal 5% 
+
+target on held-out TEST, while the selected reten-tion varies substantially across eviction methods. The aggregate result still masks task heterogene-ity: TEST risk is concentrated on common-word extraction (CWE), reaching 9% , 15% , and 29% 
+
+for AdaKV, DefensiveKV, and Layer-DefensiveKV, respectively. These per-task rates are descriptive. 
+
+5.3 Request-Adaptive Certification with ReFreeKV 
+
+We examine request-adaptive KV-cache retention within the separate 8K preprocessing protocol. Re-FreeKV uses a global threshold but retains a differ-               
+
+> Method Retention CAL risk TEST risk Llama-3.1-8B SnapKV 1.00 0.00% 0.00% AdaKV .70 3.62% 2.77% DefensiveKV .45 3.77% 3.00% Layer-DefensiveKV .35 3.92% 3.54%
+
+Table 2: RULER-32K results under (τ, ϵ, δ ) =(.10 , . 05 , . 05) . Retention denotes the CAL-selected retained-cache fraction. SnapKV’s first compressed candidate fails certification, so its row reports the full-KV fallback. CAL and TEST columns report empirical material-degradation event rates. 
+
+ent KV fraction for each request. Under the pre-specified contract (τ, ϵ, δ ) = ( .10 , . 05 , . 05) , fixed-sequence LTT certifies T = .0005 (39/1200 CAL events, 3.25%); the next threshold, T = .001 , is not certified despite its 4.42% empirical CAL risk. The selected policy retains 87.48% of the cache on av-erage in CAL. On held-out TEST, it retains 87.36% and has 42/1200 (3.50%) degradation events. This result shows that the same risk-control framework can calibrate a global threshold for a request-adaptive compressor without prescribing a fixed retention ratio for every request. Compressor τ ϵ = .05 ϵ = .10 ϵ = .20                                     
+
+> SnapKV .05 1.00 .60 .30 .10 .75 .45 .20 AdaKV .05 .80 .55 .30 .10 .65 .40 .20 DefensiveKV .05 .65 .35 .20 .10 .40 .25 .20 Layer-DefensiveKV .05 .65 .30 .20 .10 .35 .20 .20
+> Table 3: Exploratory Llama LongBench contract sen-sitivity recomputed from the same saved request-level CAL utilities. The retained-KV fraction selected by ap-plying fixed-sequence testing separately at δ=.05 for each contract is reported; they do not constitute a simul-taneous guarantee across contracts. The pre-specified main contract is (τ, ϵ ) = ( .10 , . 05) . A value of 1.00
+> denotes full-KV fallback, and .20 is the lowest retained fraction in the tested grid.
+
+6 Additional Analyses 
+
+The main experiments use the pre-specified con-tract (τ, ϵ, δ ) = ( .10 , . 05 , . 05) across models and benchmarks. This contract and the candidate order were fixed before the CAL outcomes used for main certification were inspected. We subsequently re-computed alternative choices for τ ∈ { .05 , . 10 }
+
+and ϵ ∈ {.05 , . 10 , . 20 } from the saved Llama CAL utilities as an exploratory sensitivity analysis. These post-hoc calculations do not alter the frozen main operating points or their held-out TEST eval-uations. 
+
+Sensitivity to the reliability contract. Table 3 shows the CAL-selected retention for τ ∈{.05 , . 10 } and ϵ ∈ { .05 , . 10 , . 20 }, using δ = .05 
+
+separately for each contract. In prospective use, a deployment owner specifies the tolerated loss 
+
+τ and its allowed frequency ϵ before inspecting calibration outcomes, potentially using a separate development (DEV) set; the procedure then returns a retained fraction or the full-KV fallback. At ϵ = .05 , tightening τ from .10 to .05 raises Layer-DefensiveKV retention from .35 to .65 and moves SnapKV from .75 to full KV. At ϵ = .20 , six of eight entries reach .20 , the lowest ratio evaluated. For fixed τ , increasing ϵ raises the nominal risk target in Fig. 2 and also changes the finite-sample certification cutoff. Except for the pre-specified main contract, these post-hoc cells are descriptive. A nominal δ = .05 
+
+interpretation would apply prospectively to a con-tract fixed independently of CAL. Choosing a fa-vorable contract after inspecting the table requires fresh calibration data or an appropriate multiplicity correction. 
+
+Task and metric heterogeneity. Table 4 re-ports held-out TEST outcomes for twelve Long-Bench tasks at the CAL-selected settings of four fixed-budget compressors and ReFreeKV. The fixed-budget methods have aggregate risks of 
+
+2.50% –4.08% , yet DefensiveKV reaches 10% on 2WikiMQA and Layer-DefensiveKV reaches 10% 
+
+on SAMSum. ReFreeKV has 3.50% aggregate risk but 20% on TriviaQA; its mean retention ranges from 75 .7% on TriviaQA to 97 .7% on MultiNews. Under its separate evaluation protocol, ReFreeKV’s aggregate mean utility changes only from 32 .1 un-der full KV to 32 .0. Thus, adaptive retention and stable aggregate utility need not imply uniform task-level reliability. These task-level rates are empirical estimates from 100 TEST requests per task; the certificate applies to the task-balanced mixture and does not provide a per-task 5% guarantee. To assess whether the largest observed task-level risks reflect sam-pling variability or task-specific population risks exceeding ϵ, we conduct a post-hoc simultaneous analysis of held-out TEST outcomes for all 147 nontrivial selected-policy–task combinations: 60 from Llama LongBench, 48 from Mistral Long-Bench, and 39 from RULER. Combinations with full-KV fallback are excluded because their degra-dation risk is zero by definition. We construct two-sided Clopper–Pearson intervals with a Bonferroni correction across the full family. Even under this correction, the lower confidence bound exceeds 
+
+.05 for RULER common-word extraction under Layer-DefensiveKV ( 29 /100 ; 95% simultaneous CI: [14 .6% , 47 .1%] ) and DefensiveKV ( 15 /100 ;
+
+[5 .1% , 31 .1%] ), and for LongBench TriviaQA un-der ReFreeKV ( 20 /100 ; [8 .2% , 37 .1%] ). These results provide evidence that some task-specific population risks exceed 5% even when the policy is certified for the task-balanced mixture. The Re-FreeKV result further suggests that request adaptiv-ity alone may be insufficient for uniform task-level reliability, motivating risk-aware adaptive policies that allocate KV retention according to estimated material-degradation risk. Task means and degradation events capture dif-ferent properties. On LCC, full-KV utility in the fixed-budget protocol averages 71 .0 points and Layer-DefensiveKV at retention 0.35 averages 75 .2Llama-3.1-8B Multi-Doc QA Summarization Few-shot Learning Synthetic Code Method HotpotQA 2WikiMQA MuSiQue GovReport MultiNews TREC TriviaQA SAMSum PassageCount PassageRetrieval-en LCC RepoBench-P Avg. Full KV mean 58.7 49.0 29.8 35.0 27.8 72.0 96.4 44.0 8.0 99.0 71.0 52.2 53.6 risk – – – – – – – – – – – – –SnapKV (.75) mean 58.8 49.5 29.1 34.0 27.1 69.0 96.1 44.2 6.0 99.0 72.3 52.7 53.2 risk 1% 6% 5% 1% 1% 4% 1% 2% 2% 0% 1% 6% 2.50% AdaKV (.65) mean 58.2 54.0 27.9 33.1 26.6 69.0 95.1 43.7 5.3 99.0 71.8 54.2 53.2 risk 3% 3% 6% 2% 1% 4% 2% 4% 3% 0% 2% 7% 3.08% DefensiveKV (.40) mean 57.0 48.7 27.8 33.5 26.8 70.0 96.4 43.6 7.0 99.0 72.3 56.3 53.2 risk 5% 10% 9% 0% 3% 2% 0% 8% 2% 0% 4% 6% 4.08% Layer-DefensiveKV (.35) mean 57.2 48.8 26.2 33.7 27.0 70.0 95.9 43.9 6.0 100.0 75.2 58.4 53.5 risk 3% 8% 8% 2% 2% 2% 2% 10% 3% 0% 3% 5% 4.00%                                                                     
+
+> ReFreeKV protocol (8K preprocessing and separate prompt formatting)
+> Full KV mean 18.0 42.7 6.9 34.8 27.7 12.0 82.1 17.1 4.1 74.0 26.1 39.2 32.1 risk –––––––––––––ReFreeKV ( T=.0005 )retention 87.5% 85.3% 87.5% 94.8% 97.7% 94.3% 75.7% 93.4% 82.9% 87.0% 85.6% 76.7% 87.36% mean 21.0 43.7 7.4 34.2 27.6 19.1 71.9 17.4 3.4 74.2 26.3 37.5 32.0 risk 1% 0% 2% 1% 0% 0% 20% 1% 2% 4% 3% 8% 3.50%
+
+Table 4: LongBench task-level TEST results at CAL-selected settings. Mean utility is on the 0–100 scale; risk is the material-degradation event rate (%) at τ = .10 . Fixed-budget retention is shown in parentheses, while the ReFreeKV retention row reports mean retained KV (%). Each task has 100 TEST requests; per-task risks are descriptive. 
+
+points, yet 3% of requests lose more than ten points relative to full KV. Because LongBench tasks use different example-level metrics, the com-mon threshold τ = .10 consistently represents a ten-point utility loss on the 0–100 scale but has task-dependent semantic meaning and need not correspond to a correct-to-incorrect transition. In the fixed-budget protocol, full-KV utility is zero on 253 /1200 TEST requests. More generally, because compressed utility is nonnegative, any re-quest with Ufull (X) ≤ τ cannot incur degradation strictly greater than τ . Low relative-degradation risk therefore does not imply high absolute task quality and must be interpreted alongside the full-KV reference utility. 
+
+7 Limitations 
+
+The certificate is specific to the declared benchmark population and assumes independent calibration re-quests drawn from each task. It does not imply task-specific guarantees or robustness under distri-bution shift. Correlated samples or simultaneous guarantees across tasks would require an appropri-ate sampling and calibration design. We evaluate two 7–8B model families and a lim-ited set of eviction methods on discrete candidate grids. The selected operating points may not trans-fer to larger models, other architectures, or serving stacks. Finer grids could improve resolution but would increase the offline cost of paired full-KV and candidate evaluation. The guarantee requires the contract, candidate policies, and their order to be fixed before CAL outcomes are inspected; post-hoc selection requires multiplicity control or fresh calibration data. The choices of τ and ϵ are application-dependent, and because degradation is defined relative to full KV, low certified risk does not guarantee high absolute utility. We do not directly evaluate system-level latency or throughput; our analysis characterizes retained-KV fraction and certifies utility risk rather than end-to-end serving efficiency. 
+
+8 Conclusion 
+
+We formulate KV-cache eviction as a reliability-first retention-selection problem: rather than fixing a memory budget and evaluating average quality afterward, we specify an allowable frequency of material request-level degradation and use calibra-tion data to select a retention policy. Building on fixed-sequence Learn-then-Test (LTT), the result-ing procedure provides finite-sample risk control for the returned policy without modifying the un-derlying compressor or assuming monotone risk. Across multiple eviction methods, models, and long-context benchmarks, the same reliability contract leads to substantially different retention choices. We further show that average utility can conceal request-level failures and that poli-cies meeting the empirical calibration-risk target can still fail finite-sample certification. The frame-work therefore shifts KV-cache compression from budget-first evaluation toward risk-controlled de-ployment, providing a principled way to determine how aggressively KV memory can be reduced for a declared population and utility metric. References 
+
+Anastasios N. Angelopoulos, Stephen Bates, Em-manuel J. Candès, Michael I. Jordan, and Lihua Lei. 2025. Learn then test: Calibrating predic-tive algorithms to achieve risk control. The An-nals of Applied Statistics , 19(2):1641–1662. Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2024. LongBench: A bilingual, multitask benchmark for long con-text understanding. In Proceedings of the 62nd Annual Meeting of the Association for Compu-tational Linguistics (Volume 1: Long Papers) ,pages 3119–3137, Bangkok, Thailand. Associa-tion for Computational Linguistics. Stephen Bates, Anastasios Angelopoulos, Lihua Lei, Jitendra Malik, and Michael Jordan. 2021. Distribution-free, risk-controlling prediction sets. 
+
+J. ACM , 68(6). Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. 2025. PyramidKV: Dynamic KV cache compres-sion based on pyramidal information funneling. In Second Conference on Language Modeling .Alex Chen, Renato Geh, Aditya Grover, Guy Van Den Broeck, and Daniel Mingyi Israel. 2026. The pitfalls of KV cache compression. In Pro-ceedings of the 64th Annual Meeting of the Asso-ciation for Computational Linguistics (Volume 1: Long Papers) , pages 41530–41553, San Diego, California, United States. Association for Com-putational Linguistics. Tri Dao. 2024. FlashAttention-2: Faster attention with better parallelism and work partitioning. In 
+
+The Twelfth International Conference on Learn-ing Representations .Yuan Feng, Haoyu Guo, Junlin Lv, S. Kevin Zhou, and Xike Xie. 2026a. DefensiveKV: Taming the fragility of KV cache eviction in LLM inference. In The Fourteenth International Conference on Learning Representations .Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S. Kevin Zhou. 2025. Ada-KV: Optimizing KV cache eviction by adaptive budget allocation for efficient LLM inference. In The Thirty-ninth Annual Conference on Neural Information Pro-cessing Systems .Yuan Feng, Junlin Lv, Haoyu Guo, Yukun Cao, S. Kevin Zhou, and Xike Xie. 2026b. Criti-calKV: Optimizing KV cache eviction from an output perturbation perspective. In Forty-third International Conference on Machine Learning .Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ah-mad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, Amy Yang, An-gela Fan, Anirudh Goyal, Anthony Hartshorn, Aobo Yang, Archi Mitra, Archie Sravanku-mar, Artem Korenev, Arthur Hinsvark, Arun Rao, Aston Zhang, Aurelien Rodriguez, Austen Gregerson, Ava Spataru, Baptiste Roziere, Bethany Biron, Binh Tang, Bobbie Chern, Char-lotte Caucheteux, Chaya Nayak, Chloe Bi, Chris Marra, Chris McConnell, Christian Keller, Christophe Touret, Chunyang Wu, Corinne Wong, Cristian Canton Ferrer, Cyrus Niko-laidis, Damien Allonsius, Daniel Song, Danielle Pintz, Danny Livshits, Danny Wyatt, David Es-iobu, Dhruv Choudhary, Dhruv Mahajan, Diego Garcia-Olano, Diego Perino, Dieuwke Hup-kes, Egor Lakomkin, Ehab AlBadawy, Elina Lobanova, Emily Dinan, Eric Michael Smith, Filip Radenovic, Francisco Guzmán, Frank Zhang, Gabriel Synnaeve, Gabrielle Lee, Geor-gia Lewis Anderson, Govind Thattai, Graeme Nail, Gregoire Mialon, Guan Pang, Guillem Cu-curell, Hailey Nguyen, Hannah Korevaar, Hu Xu, Hugo Touvron, Iliyan Zarov, Imanol Arrieta Ibarra, Isabel Kloumann, Ishan Misra, Ivan Ev-timov, Jack Zhang, Jade Copet, Jaewon Lee, Jan Geffert, Jana Vranes, Jason Park, Jay Ma-hadeokar, Jeet Shah, Jelmer van der Linde, Jen-nifer Billock, Jenny Hong, Jenya Lee, Jeremy Fu, Jianfeng Chi, Jianyu Huang, Jiawen Liu, Jie Wang, Jiecao Yu, Joanna Bitton, Joe Spisak, Jongsoo Park, Joseph Rocca, Joshua Johnstun, Joshua Saxe, Junteng Jia, Kalyan Vasuden Al-wala, Karthik Prasad, Kartikeya Upasani, Kate Plawiak, Ke Li, Kenneth Heafield, Kevin Stone, Khalid El-Arini, Krithika Iyer, Kshitiz Malik, Kuenley Chiu, Kunal Bhalla, Kushal Lakhotia, Lauren Rantala-Yeary, Laurens van der Maaten, Lawrence Chen, Liang Tan, Liz Jenkins, Louis Martin, Lovish Madaan, Lubo Malo, Lukas Blecher, Lukas Landzaat, Luke de Oliveira, Madeline Muzzi, Mahesh Pasupuleti, Mannat Singh, Manohar Paluri, Marcin Kardas, Maria Tsimpoukelli, Mathew Oldham, Mathieu Rita, Maya Pavlova, Melanie Kambadur, Mike Lewis, Min Si, Mitesh Kumar Singh, Mona Hassan, Naman Goyal, Narjes Torabi, Nikolay Bash-lykov, Nikolay Bogoychev, Niladri Chatterji, Ning Zhang, Olivier Duchenne, Onur Çelebi, Patrick Alrassy, Pengchuan Zhang, Pengwei Li, Petar Vasic, Peter Weng, Prajjwal Bhargava, Pratik Dubal, Praveen Krishnan, Punit Singh Koura, Puxin Xu, Qing He, Qingxiao Dong, Ragavan Srinivasan, Raj Ganapathy, Ramon Calderer, Ricardo Silveira Cabral, Robert Sto-jnic, Roberta Raileanu, Rohan Maheswari, Rohit Girdhar, Rohit Patel, Romain Sauvestre, Ron-nie Polidoro, Roshan Sumbaly, Ross Taylor, Ruan Silva, Rui Hou, Rui Wang, Saghar Hos-seini, Sahana Chennabasappa, Sanjay Singh, Sean Bell, Seohyun Sonia Kim, Sergey Edunov, Shaoliang Nie, Sharan Narang, Sharath Ra-parthy, Sheng Shen, Shengye Wan, Shruti Bhosale, Shun Zhang, Simon Vandenhende, Soumya Batra, Spencer Whitman, Sten Sootla, Stephane Collot, Suchin Gururangan, Sydney Borodinsky, Tamar Herman, Tara Fowler, Tarek Sheasha, Thomas Georgiou, Thomas Scialom, Tobias Speckbacher, Todor Mihaylov, Tong Xiao, Ujjwal Karn, Vedanuj Goswami, Vibhor Gupta, Vignesh Ramanathan, Viktor Kerkez, Vincent Gonguet, Virginie Do, Vish Vogeti, Vítor Albiero, Vladan Petrovic, Weiwei Chu, Wenhan Xiong, Wenyin Fu, Whitney Meers, Xavier Martinet, Xiaodong Wang, Xiaofang Wang, Xiaoqing Ellen Tan, Xide Xia, Xinfeng Xie, Xuchao Jia, Xuewei Wang, Yaelle Gold-schlag, Yashesh Gaur, Yasmine Babaei, Yi Wen, Yiwen Song, Yuchen Zhang, Yue Li, Yuning Mao, Zacharie Delpierre Coudert, Zheng Yan, Zhengxing Chen, Zoe Papakipos, Aaditya Singh, Aayushi Srivastava, Abha Jain, Adam Kelsey, Adam Shajnfeld, Adithya Gangidi, Adolfo Vic-toria, Ahuva Goldstand, Ajay Menon, Ajay Sharma, Alex Boesenberg, Alexei Baevski, Allie Feinstein, Amanda Kallet, Amit Sangani, Amos Teo, Anam Yunus, Andrei Lupu, Andres Al-varado, Andrew Caples, Andrew Gu, Andrew Ho, Andrew Poulton, Andrew Ryan, Ankit Ram-chandani, Annie Dong, Annie Franco, Anuj Goyal, Aparajita Saraf, Arkabandhu Chowd-hury, Ashley Gabriel, Ashwin Bharambe, Assaf Eisenman, Azadeh Yazdan, Beau James, Ben Maurer, Benjamin Leonhardi, Bernie Huang, Beth Loyd, Beto De Paola, Bhargavi Paranjape, Bing Liu, Bo Wu, Boyu Ni, Braden Hancock, Bram Wasti, Brandon Spence, Brani Stojkovic, Brian Gamido, Britt Montalvo, Carl Parker, Carly Burton, Catalina Mejia, Ce Liu, Chang-han Wang, Changkyu Kim, Chao Zhou, Chester Hu, Ching-Hsiang Chu, Chris Cai, Chris Tin-dal, Christoph Feichtenhofer, Cynthia Gao, Da-mon Civin, Dana Beaty, Daniel Kreymer, Daniel Li, David Adkins, David Xu, Davide Testug-gine, Delia David, Devi Parikh, Diana Liskovich, Didem Foss, Dingkang Wang, Duc Le, Dustin Holland, Edward Dowling, Eissa Jamil, Elaine Montgomery, Eleonora Presani, Emily Hahn, Emily Wood, Eric-Tuan Le, Erik Brinkman, Esteban Arcaute, Evan Dunbar, Evan Smoth-ers, Fei Sun, Felix Kreuk, Feng Tian, Filippos Kokkinos, Firat Ozgenel, Francesco Caggioni, Frank Kanayet, Frank Seide, Gabriela Medina Florez, Gabriella Schwarz, Gada Badeer, Geor-gia Swee, Gil Halpern, Grant Herman, Grig-ory Sizov, Guangyi, Zhang, Guna Lakshmi-narayanan, Hakan Inan, Hamid Shojanazeri, Han Zou, Hannah Wang, Hanwen Zha, Haroun Habeeb, Harrison Rudolph, Helen Suk, Henry Aspegren, Hunter Goldman, Hongyuan Zhan, Ibrahim Damlaj, Igor Molybog, Igor Tufanov, Ilias Leontiadis, Irina-Elena Veliche, Itai Gat, Jake Weissman, James Geboski, James Kohli, Janice Lam, Japhet Asher, Jean-Baptiste Gaya, Jeff Marcus, Jeff Tang, Jennifer Chan, Jenny Zhen, Jeremy Reizenstein, Jeremy Teboul, Jes-sica Zhong, Jian Jin, Jingyi Yang, Joe Cum-mings, Jon Carvill, Jon Shepard, Jonathan Mc-Phie, Jonathan Torres, Josh Ginsburg, Jun-jie Wang, Kai Wu, Kam Hou U, Karan Sax-ena, Kartikay Khandelwal, Katayoun Zand, Kathy Matosich, Kaushik Veeraraghavan, Kelly Michelena, Keqian Li, Kiran Jagadeesh, Kun Huang, Kunal Chawla, Kyle Huang, Lailin Chen, Lakshya Garg, Lavender A, Leandro Silva, Lee Bell, Lei Zhang, Liangpeng Guo, Licheng Yu, Liron Moshkovich, Luca Wehrst-edt, Madian Khabsa, Manav Avalani, Man-ish Bhatt, Martynas Mankus, Matan Hasson, Matthew Lennie, Matthias Reso, Maxim Gro-shev, Maxim Naumov, Maya Lathi, Meghan Ke-neally, Miao Liu, Michael L. Seltzer, Michal Valko, Michelle Restrepo, Mihir Patel, Mik Vy-atskov, Mikayel Samvelyan, Mike Clark, Mike Macey, Mike Wang, Miquel Jubert Hermoso, Mo Metanat, Mohammad Rastegari, Munish Bansal, Nandhini Santhanam, Natascha Parks, Natasha White, Navyata Bawa, Nayan Singhal, Nick Egebo, Nicolas Usunier, Nikhil Mehta, Nikolay Pavlovich Laptev, Ning Dong, Norman Cheng, Oleg Chernoguz, Olivia Hart, Omkar Salpekar, Ozlem Kalinli, Parkin Kent, Parth Parekh, Paul Saab, Pavan Balaji, Pedro Rit-tner, Philip Bontrager, Pierre Roux, Piotr Dollar, Polina Zvyagina, Prashant Ratanchandani, Pri-tish Yuvraj, Qian Liang, Rachad Alao, Rachel Rodriguez, Rafi Ayub, Raghotham Murthy, Raghu Nayani, Rahul Mitra, Rangaprabhu Parthasarathy, Raymond Li, Rebekkah Hogan, Robin Battey, Rocky Wang, Russ Howes, Ruty Rinott, Sachin Mehta, Sachin Siby, Sai Jayesh Bondu, Samyak Datta, Sara Chugh, Sara Hunt, Sargun Dhillon, Sasha Sidorov, Satadru Pan, Saurabh Mahajan, Saurabh Verma, Seiji Ya-mamoto, Sharadh Ramaswamy, Shaun Lind-say, Shaun Lindsay, Sheng Feng, Shenghao Lin, Shengxin Cindy Zha, Shishir Patil, Shiva Shankar, Shuqiang Zhang, Shuqiang Zhang, Sinong Wang, Sneha Agarwal, Soji Sajuyigbe, Soumith Chintala, Stephanie Max, Stephen Chen, Steve Kehoe, Steve Satterfield, Sudar-shan Govindaprasad, Sumit Gupta, Summer Deng, Sungmin Cho, Sunny Virk, Suraj Sub-ramanian, Sy Choudhury, Sydney Goldman, Tal Remez, Tamar Glaser, Tamara Best, Thilo Koehler, Thomas Robinson, Tianhe Li, Tianjun Zhang, Tim Matthews, Timothy Chou, Tzook Shaked, Varun Vontimitta, Victoria Ajayi, Vic-toria Montanez, Vijai Mohan, Vinay Satish Ku-mar, Vishal Mangla, Vlad Ionescu, Vlad Poe-naru, Vlad Tiberiu Mihailescu, Vladimir Ivanov, Wei Li, Wenchen Wang, Wenwen Jiang, Wes Bouaziz, Will Constable, Xiaocheng Tang, Xiao-jian Wu, Xiaolan Wang, Xilun Wu, Xinbo Gao, Yaniv Kleinman, Yanjun Chen, Ye Hu, Ye Jia, Ye Qi, Yenda Li, Yilin Zhang, Ying Zhang, Yossi Adi, Youngjin Nam, Yu, Wang, Yu Zhao, Yuchen Hao, Yundi Qian, Yunlu Li, Yuzi He, Zach Rait, Zachary DeVito, Zef Rosnbrick, Zhaoduo Wen, Zhenyu Yang, Zhiwei Zhao, and Zhiyu Ma. 2024. The Llama 3 Herd of Models. arXiv preprint arXiv:2407.21783 .Wassily Hoeffding. 1956. On the distribution of the number of successes in independent trials. The Annals of Mathematical Statistics , 27(3):713– 721. Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, and Boris Ginsburg. 2024. RULER: What’s the real context size of your long-context language mod-els? In First Conference on Language Modeling .Metod Jazbec, Alexander Timans, Tin Hadži Veljkovi´ c, Kaspar Sakmann, Dan Zhang, Christian A. Naesseth, and Eric Nalis-nick. 2024. Fast yet safe: Early-exiting with risk control. In The Thirty-eighth Annual Conference on Neural Information Processing Systems .Albert Q. Jiang, Alexandre Sablayrolles, Arthur Mensch, Chris Bamford, Devendra Singh Chap-lot, Diego de las Casas, Florian Bressand, Gianna Lengyel, Guillaume Lample, Lucile Saulnier, Lélio Renard Lavaud, Marie-Anne Lachaux, Pierre Stock, Teven Le Scao, Thibaut Lavril, Thomas Wang, Timothée Lacroix, and William El Sayed. 2023. Mistral 7B. arXiv preprint arXiv:2310.06825 .Yuhong Li, Yingbing Huang, Bowen Yang, Bharat Venkitesh, Acyr Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. 2024. SnapKV: LLM knows what you are looking for before generation. In The Thirty-eighth Annual Conference on Neural Information Processing Systems .Xuanfan Ni, Liyan Xu, Chenyang Lyu, Longyue Wang, Mo Yu, Lemao Liu, Fandong Meng, Jie Zhou, and Piji Li. 2026. ReFreeKV: Towards threshold-free KV cache compression. In Find-ings of the Association for Computational Lin-guistics: ACL 2026 , pages 30827–30841, San Diego, California, United States. Association for Computational Linguistics. Tal Schuster, Adam Fisch, Jai Gupta, Mostafa De-hghani, Dara Bahri, Vinh Tran, Yi Tay, and Don-ald Metzler. 2022. Confident adaptive language modeling. In Advances in Neural Information Processing Systems .Jake Snell, Thomas P. Zollo, Zhun Deng, Toni-ann Pitassi, and Richard Zemel. 2023. Quantile risk control: A flexible framework for bounding the probability of high-loss predictions. In The Eleventh International Conference on Learning Representations .Xi Wang, Anushri Suresh, Alvin Zhang, Rishi More, William Jurayj, Benjamin Van Durme, Mehrdad Farajtabar, Daniel Khashabi, and Eric Nalisnick. 2026. Conformal thinking: Risk con-trol for reasoning on a compute budget. In 
+
+Forty-third International Conference on Ma-chine Learning .Fanzhe Wei, Li Liu, Ziyang Wang, and Chenyu Wang. 2026. WitCert: Sound runtime risk ob-servability and gating for KV-cache quantization. 
+
+arXiv preprint arXiv:2607.28699 . Version 2. Andrea Wynn, Metod Jazbec, Charith Peris, Ri-nat Khaziev, Anqi Liu, Daniel Khashabi, and Eric Nalisnick. 2026. Controlling the risk of cor-rupted contexts for language models via early-exiting. In Forty-third International Conference on Machine Learning .Peng Xie. 2026. Error certificates for KV-cache eviction via randomized design. arXiv preprint arXiv:2607.21475 .Ning Yang, Chengzhi Wang, Yibo Liu, Bao-liang Tian, and Haijun Zhang. 2026. Compil-erKV: Risk-adaptive KV compression via of-fline experience compilation. arXiv preprint arXiv:2602.08686 . Version 3. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-hitter oracle for efficient generative infer-ence of large language models. In Thirty-seventh Conference on Neural Information Processing Systems .Xiabin Zhou, Wenbin Wang, Minyan Zeng, Jiaxian Guo, Xuebo Liu, Li Shen, Min Zhang, and Liang Ding. 2025. DynamicKV: Task-aware adaptive KV cache compression for long context LLMs. In Findings of the Association for Computational Linguistics: EMNLP 2025 , pages 8042–8057, Suzhou, China. Association for Computational Linguistics.
