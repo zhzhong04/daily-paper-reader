@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-09-28</span>
+      <span class="dpr-home-dashboard-kicker">2026-09-29</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 14 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>7</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-09-29 00:07:46 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-09-29 23:00:40 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,10 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日共生成 8 篇推荐（精读 5 篇，速读 3 篇）</p>
-<p>精读：《The KV Cache Working Set: Online Capacity Planning for LLM Inference Systems》（8.0/10）, 《The KV Cache Is the New Memory Wall》（8.0/10）</p>
-<p>速读：《WeEnv: The Environment for Agentic Reinforcement Learning at WeChat》（7.0/10）, 《CacheReforge: Bounded Recovery for Stale KV Caches under Evolving Adapters》（7.0/10）, 《Marginally Correct Tool Caches Can Reverse Group-Normalized Policy Updates》（6.0/10）</p>
-<p>这些结果覆盖了当下较热的方向，建议先看精读区论文的关键问题与方法。</p>
+<p>2026-09-29 日报完成：14 篇论文中精读 7 篇、速读 7 篇，聚焦 LLM 智能体的通信与缓存效率。最值得关注的是两篇 9 分精读——面向接收方的潜在通信实现 94% 缓存复用，以及异构多智能体 LLM 的免预填充跨家族 KV 缓存迁移。普通读者可先读这两篇精读，再顺着速读中的 DynBranch 与 ActKV 了解智能体服务与缓存管理的落地思路。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -74,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="The KV Cache Working Set: Online Capacity Planning for LLM Inference Systems">The KV Cache Working Set: Online Capacity Planning for LLM Inference Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="The KV Cache Is the New Memory Wall">The KV Cache Is the New Memory Wall</span></li><li><span class="dpr-home-dashboard-paper-title" title="DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving">DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Receiver-Conditioned Latent Communication gives 94% CacheBack">Receiver-Conditioned Latent Communication gives 94% CacheBack</span></li><li><span class="dpr-home-dashboard-paper-title" title="Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs">Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="RR-Evict: Fine-Grained Prefix Cache Eviction beyond LRU for Agentic LLM Serving">RR-Evict: Fine-Grained Prefix Cache Eviction beyond LRU for Agentic LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>5</strong></span><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="WeEnv: The Environment for Agentic Reinforcement Learning at WeChat">WeEnv: The Environment for Agentic Reinforcement Learning at WeChat</span></li><li><span class="dpr-home-dashboard-paper-title" title="CacheReforge: Bounded Recovery for Stale KV Caches under Evolving Adapters">CacheReforge: Bounded Recovery for Stale KV Caches under Evolving Adapters</span></li><li><span class="dpr-home-dashboard-paper-title" title="Marginally Correct Tool Caches Can Reverse Group-Normalized Policy Updates">Marginally Correct Tool Caches Can Reverse Group-Normalized Policy Updates</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving">DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="ActKV: Efficient LLM Agents through Action-Guided KV Cache Management">ActKV: Efficient LLM Agents through Action-Guided KV Cache Management</span></li><li><span class="dpr-home-dashboard-paper-title" title="CUA-Sandbox: Efficient Environments for Computer-Use Agent Reinforcement Learning">CUA-Sandbox: Efficient Environments for Computer-Use Agent Reinforcement Learning</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 

@@ -1,0 +1,631 @@
+Title: PackServe: SLO-Aware Request Scheduling for Agentic LLM Serving at Scale
+
+URL Source: https://arxiv.org/pdf/2609.33224v1
+
+Published Time: Tue, 29 Sep 2026 01:46:08 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# PackServe: SLO-Aware Request Scheduling for Agentic LLM Serving at Scale 
+
+# Zhiyuan Tan ∗
+
+The Chinese University of Hong Kong, Shenzhen China zhiyuantan1@link.cuhk.edu.cn 
+
+# Dejiang Zhu ∗
+
+Ant Group China zhudejiang.pt@antgroup.com 
+
+# Jingzhe Jiang 
+
+The Chinese University of Hong Kong, Shenzhen China 226085102@link.cuhk.edu.cn 
+
+# Yihao Zheng 
+
+The Chinese University of Hong Kong, Shenzhen China 225040496@link.cuhk.edu.cn 
+
+# Yang Tian 
+
+Ant Group China lieyuan@antgroup.com 
+
+# Tao Wang †
+
+Ant Group China junchen.wt@antgroup.com 
+
+# Minchen Yu †
+
+The Chinese University of Hong Kong, Shenzhen China yuminchen@cuhk.edu.cn 
+
+## Abstract 
+
+Request scheduling is a key challenge in large-scale clusters serv-ing agentic large language model (LLM) workloads. An effective scheduler must preserve key–value cache (KVC) reuse across long, shared prefixes, meet token-level latency service-level objectives (SLOs), and minimize GPU resource footprint. Existing schedulers struggle to reconcile these requirements: request consolidation can sacrifice cache locality and increase prefill/decode interfer-ence, compromising both SLO attainment and resource efficiency. We present PackServe, a scheduler designed to reduce resource costs while meeting latency SLOs for agentic LLM serving. Pack-Serve uses compact white-box models to predict latency under prefill/decode interference. Guided by these predictions, it packs requests onto fewer serving instances while preserving KVC reuse and SLO constraints, trading available latency headroom for im-proved per-instance throughput. Evaluation on 64 NVIDIA H20 GPUs shows that PackServe uses up to 16.8% and 24.6% fewer GPU-hours than state-of-the-art schedulers under 30-ms and 50-ms TPOT targets, respectively, while meeting the target TPOT objec-tives. PackServe has also been deployed in our production cluster comprising over 1000 GPUs, where it reduces the resource footprint by 34.7% compared with the original production scheduler. 
+
+## 1 Introduction 
+
+Recent LLMs [4, 9, 11, 14, 24] demonstrate strong capabilities in agentic tasks involving coding and tool use. Agentic applications such as Codex [23], Claude Code [3], and OpenClaw [25] are there-fore becoming increasingly significant workloads for cloud-based large language model (LLM) serving. They execute user-specified 
+
+> ∗These authors contributed equally to this work.
+> †Corresponding authors.
+
+tasks (e.g., code generation) within sessions , which comprise multi-step workflows that interleave LLM requests with tool execution [30, 38–40, 46]. Within each session, tool results and execution history are incorporated into subsequent inputs, forming request chains with long, shared prefixes [5, 17, 48]. To serve agentic workloads at scale, cloud providers deploy clus-ters of GPU-backed inference instances, with gateways scheduling each incoming request to an instance [44] (see Fig. 5). Each request proceeds through two phases: prefill processes the input and pro-duces the first output token, while decode generates subsequent tokens autoregressively [2]. We focus on deployments that colocate both phases on the same GPUs, a configuration widely used in production serving systems [44]. In this setting, request schedul-ing determines cache locality and per-instance load, affecting both latency and the GPU resources required to serve the workload. As a large-scale agentic LLM service provider, we study these scheduling decisions through measurements of our production platform. We characterize our agentic LLM workloads and analyze resource usage and latency across serving clusters. This analysis identifies three requirements for efficient request scheduling. 
+
+Requirement #1: Preserving key–value cache reuse. Inference engines can retain previously computed attention keys and values in a key–value cache (KVC) for reuse by requests with matching prefixes [42, 46]. This reuse is particularly valuable for agentic workloads, whose successive requests share long input prefixes [13]. Our production trace shows a high input-to-output token ratio, with cached tokens accounting for approximately 80% of input tokens (Fig. 1(a)). Routing requests to instances that retain these prefixes avoids redundant prefill computation and saves GPU work [32]. Preserving this locality can also lower time-to-first-token (TTFT), the delay from request arrival to the first output token. 
+
+Requirement #2: Meeting workload-specific SLOs. Despite the high input-to-output token ratio, decode accounts for 78.4% of 
+
+> 1arXiv:2609.33224v1 [cs.DC] 27 Sep 2026 Tan et al.
+
+measured LLM request duration in our production trace (Fig. 2), making generation speed a key contributor to user-perceived la-tency. Generation speed is measured by time-per-output-token (TPOT), the average interval between successive output tokens. TPOT requirements vary across tasks: interactive coding may re-quire fast generation, whereas background automation can tolerate slower responses [49]. Scheduling must therefore meet the TPOT service-level objective (SLO) configured for the target workload. 
+
+Requirement #3: Reducing the GPU footprint. Our production trace shows low per-instance request concurrency with substantial latency headroom. Across five-minute samples, running concur-rency ranges from 0.39 to 1.69 requests per instance, while mean TPOT increases only modestly and remains well below the SLO target (Fig. 3). This suggests room for request packing : concentrat-ing requests on fewer instances to increase decode batch sizes and improve throughput per GPU [2]. Scheduling should therefore use available TPOT headroom to serve the same demand with a smaller active GPU footprint while preserving the benefits of KVC reuse. Existing schedulers generally adopt cache-aware or SLO-oriented approaches; however, jointly meeting the three requirements remains challenging (Table 1). First, cache-aware solutions combine prefix locality with instance load to avoid redundant prefill without creating hotspots [22, 44]. They do not explicitly exploit latency headroom to reduce the active GPU footprint. Second, SLO-oriented systems use performance predictions to guide admission and scheduling [6], with some also packing requests onto fewer instances [19, 49]. However, for long-context agentic requests, missing cache locality can introduce significant prefill work to offset the gains from larger decode batches. The resulting interference can also delay ongoing decoding and jeopardize SLO attainment. The key challenge is therefore to minimize the active GPU footprint under SLO constraints by 
+
+balancing the throughput gains from request consolidation against the prefill cost of lost cache reuse .In this paper, we present PackServe, a gateway-level request scheduler that jointly addresses KVC reuse, TPOT SLO attainment, and GPU resource efficiency for agentic LLM serving. We have de-ployed PackServe into our production clusters (see §8.4). PackServe combines two core designs. First, we develop a performance model for accurate, low-overhead latency prediction under prefill/decode interference. Our analysis shows that relaxing the TPOT target permits larger decode batches, but the higher per-instance request rate also increases prefill occupancy, limiting the resulting throughput gain (Fig. 4). To capture these effects, we derive compact white-box models through offline profiling of prefill and decode under each deployment configuration. During online scheduling, PackServe evaluates the calibrated models using request lengths, candidate-specific cached prefixes, and instance load to predict TTFT and TPOT. Second, PackServe uses the performance model to guide request packing under SLO constraints based on two insights. (1) KVC reuse should be prioritized over request packing. We observe that lost KVC reuse can cost more GPU time than larger decode batches save. Accordingly, PackServe enforces a normalized recomputation budget that bounds each candidate’s predicted excess prefill work relative to the minimum among capacity-eligible instances. This budget controls how much cache locality can be traded for place-ment flexibility. (2) Decode batch size is a key control variable for the throughput–latency tradeoff. For long-context agentic requests, each additional decoding request increases both the batch size and the aggregate KV state accessed per iteration. Our measurements show that higher decode concurrency improves throughput per GPU but also raises TPOT, limiting how far requests can be packed (Fig. 4). PackServe therefore regulates decode concurrency through request placement. Among cache-admissible instances predicted to meet the TPOT target, it favors those with more ongoing decoding requests, using cache locality and queue backlog to break ties. We implement PackServe and evaluate it on a cluster of 64 NVIDIA H20 GPUs using production-derived agentic workloads. Compared to LMetric and llm-d+, two state-of-the-art schedulers, PackServe uses 13.0–16.8% and 21.1–24.6% fewer active GPU-hours under 30-ms and 50-ms TPOT targets, respectively, while meeting the evaluated TPOT objectives. Across both settings, its KVC hit rate is 79.5–80.2%, close to LMetric’s 81.0% and higher than llm-d+’s 74.1–74.3%. We also compare two matched six-day windows (12 days total) on a production cluster comprising over 1000 GPUs. Compared with a cache-aware load-balancing policy used in our production environment, PackServe achieves 34.7% fewer serving instances and 36.8% higher per-instance request throughput. Our main contributions are summarized as follows: 
+
+• We characterize production agentic workloads and iden-tify three requirements for efficient scheduling: KVC reuse, TPOT SLO attainment, and GPU footprint reduction. 
+
+• We design and implement PackServe, a gateway-level sched-uler that combines low-overhead performance prediction with SLO-aware request packing and bounded recomputa-tion. 
+
+• We evaluate PackServe on a 64-GPU cluster, observing 13.0–24.6% fewer active GPU-hours than LMetric and llm-d+ while meeting the evaluated windowed TPOT objec-tives. The 12-day production comparison further shows 34.7% fewer serving instances and 36.8% higher per-instance throughput. 
+
+## 2 Background 
+
+LLM inference and P/D colocation. Prefill builds the KVC from the prompt, while autoregressive decode reuses and extends it to generate subsequent tokens [2]. In P/D-colocated serving, both stages share an instance’s GPUs, so prefill can lengthen mixed iterations or delay decode iterations, increasing token latency for ongoing requests [2]. 
+
+Cluster-level request scheduling. Cluster-level request schedul-ing routes each reques to a instance across serving clusters. Table 1 compares representative scheduling mechanisms. Load-based poli-cies such as JSQ [36] and vllm-dp [15] distribute requests according to instance load. LMetric [44] and Dynamo [22] additionally account for KVC reuse through multiplicative and weighted cache/load scores, respectively. SMetric [35] balances session-start requests and favors prefix reuse for subsequent requests. DualMap [43] uses a TTFT target to balance cache affinity against load, while llm-d [19] combines cache affinity with TTFT/TPOT predictions to favor in-stances with small positive SLO headroom. However, small TPOT 
+
+> 2PackServe: SLO-Aware Request Scheduling
+
+Table 1: Comparison with related work.                                                  
+
+> Work KVC reuse SLO-aware Request packing Performance model
+> vllm-dp [15] ✗✗✗–JSQ [36] ✗✗✗–LMetric [44] ✓✗✗–Dynamo [22] ✓✗✗–DualMap [43] ✓✓✗White-box SMetric [35] ✓✗✗–Llumnix [33] ✗✓✗–SLOs-Serve [6] ✗✓✗White-box PolyServe [49] ✗✓✓Black-box llm-d [19] ✓✓∗Black-box
+> PackServe ✓✓✓White-box
+> ✓and ✗indicate whether a capability is explicitly supported. White-box models predict performance with explicit modeling; black-box models use learned mappings or latency lookups. A dash (–) indicates that no latency predictor is used.
+> ∗Headroom-based packing in llm-d may not fully exploit the throughput benefits of larger decode batches (see §8).
+
+headroom can reflect prefill interference rather than larger decode batches (§3). 
+
+Instance-level request scheduling. Beyond selecting a destina-tion instance, request scheduling can exercise engine-level control over batch execution [31, 37, 41], token allocation [45], or the mi-gration of ongoing requests. For example, Llumnix [33] enables runtime rescheduling through live migration of requests and their KVC across instances. SLOs-Serve [6] combines model-based ad-mission and token allocation with request rerouting. PolyServe [49] coordinates dynamic chunking and deadline-aware scheduling with instance selection and autoscaling. To limit integration and main-tenance effort across inference engines in a model-as-a-service (MaaS) platform, we focus on gateway-level request scheduling us-ing load and KVC information, without changing engine scheduling or migrating ongoing requests. 
+
+## 3 Characterization of Agentic Workloads 
+
+We analyze a 14-day production trace of approximately 10.1 million requests across 14 models, alongside a separate day-long trace of instance concurrency and TPOT. These observations motivate the three scheduling requirements introduced in §1. Further analysis of these observations, together with controlled experiments, yields two key insights that guide PackServe’s design. 
+
+Characterizing KVC reuse. Fig. 1(a) summarizes the hourly input, cached-input, and output token volumes in the 14-day trace. Input volume is approximately 192 × output volume, and cached tokens account for 77.7% of input tokens. These requests are both input-heavy and rich in reusable context. Successive calls in an agent session repeatedly include accumulated execution history and tool results, allowing much of the input to reuse previously computed KVC. Recomputing these shared prefixes adds prefill work, which can delay the first token and interfere with ongoing decoding. For TTFT, we group hourly averages by KVC reuse. The median is 66.2% lower in the highest-reuse group than in the lowest-reuse group (Fig. 1(b)). We separately examine background TPOT, defined as the average whole-request TPOT of other requests inferred to be decoding on the same instance at a sampled arrival. For inputs of at least 128k tokens, the group with the most uncached tokens has 1 4 7 10 14 
+
+(a) Day     
+
+> 04812
+> Tokens/hour (B)
+> Input Cached Output
+> 70 80 90
+
+(b) KVC reuse (%)     
+
+> 0.0 0.5 1.0
+> Mean TTFT
+> Hourly bins Bin medians
+> 64 1k 16k 256k
+
+(c) Uncached tokens 
+
+> 0.0 0.5 1.0
+> Mean TPOT  Input length 32-64k 64-128k ≥ 128k
+
+Figure 1: KVC reuse and latency. (a) Hourly tokens (cached input included). (b) Reuse versus TTFT. (c) Uncached input (log) versus background TPOT ( 𝑘 = 1024 ). Latency axes are min–max normalized. 1 4 7 10 14 
+
+Day  
+
+> 050 100
+> Duration (%)  Decode Non-decode
+
+Figure 2: Request-duration composition over the 14-day trace. 
+
+about 2 .2× the median background TPOT of the group with the fewest (Fig. 1(c)). Together, these observations motivate preserving KVC reuse in request scheduling to limit prefill work and its impact on both TTFT and TPOT ( Requirement #1 ). 
+
+Characterizing decode demand. Although output tokens rep-resent only a small fraction of token volume, decode accounts for 78.4% of aggregate LLM request duration (Fig. 2), approxi-mately four times the remaining share. Here, request-level de-code duration includes waiting between tokens, rather than only GPU execution time. The remainder includes prefill computation, queueing, network delays, and other gateway-side overhead. This decode-dominated request duration motivates our focus on TPOT, as slower generation can delay subsequent calls in an agent’s re-quest chain. We therefore adopt the TPOT SLO configured for the target workload as the latency constraint for online scheduling (Requirement #2 ; §8.1). 
+
+Characterizing load distribution. To examine instance-level load and latency, we focus on a day-long production trace. Fig. 3(a) shows low average running concurrency, with a median of 0.76 requests per instance over the day. Between the lowest and high-est concurrency bins in Fig. 3(b), median concurrency more than doubles, from 0.58 to 1.42 requests per instance, while the cor-responding median of mean TPOT increases by only 25.6%. Low concurrency and this modest increase in TPOT suggest an oppor-tunity to pack more requests onto each instance within a TPOT        
+
+> 3Tan et al. 00.5 11.5
+> (a) Running reqs/inst.
+> 0.0 0.5 1.0
+> CDF
+> 00.5 11.5
+> (b) Running reqs/inst.
+> 00.5 1.0
+> Mean TPOT / SLO
+> SLO
+> 5-min bins Medians
+
+Figure 3: Mean running concurrency: (a) CDF and (b) TPOT relative to its SLO across five-minute samples. The dashed line marks the SLO. 
+
+budget. Such packing could improve resource utilization and reduce the GPU footprint ( Requirement #3 ). 
+
+Capacity under prefill/decode colocation. To explain the pack-ing opportunity and its limits, we consider a homogeneous steady load with arrival rate 𝜆 . Requests share input, cached-prefix, and output lengths 𝐿 in , 𝐿 cache , and 𝐿 out . The stage profiles in §5.3 pro-vide prefill time 𝑇 pre and interference-free decode-iteration time 
+
+𝑇 iter (𝑏 ) at mean decode batch size 𝑏 . With mean active context length approximated by ¯ ℓ = 𝐿 in + 𝐿 out /2, the engine’s batch limit 
+
+𝐵 max and KV capacity 𝑀 KV (in tokens) bound feasible concurrency by 𝑏 ≤ 𝑏 max = min {𝐵 max , ⌊𝑀 KV / ¯ℓ⌋} .Assuming prefill and decode occupy disjoint service time, approx-imately 𝜆𝑇 dec new prefills interrupt a request’s decode duration 𝑇 dec .Thus, 𝑇 dec = 𝐿 out 𝑇 iter (𝑏 ) + 𝜆𝑇 dec 𝑇 pre . For sufficiently long outputs and 𝜆𝑇 pre < 1, this gives TPOT real ≈ 𝑇 iter (𝑏 )
+
+1 − 𝜆𝑇 pre 
+
+. (1) Applying Little’s Law [16] to the decode phase gives 𝑏 ≈
+
+𝜆𝐿 out TPOT real , and hence 
+
+𝜆 = 𝑏 𝑏𝑇 pre + 𝐿 out 𝑇 iter (𝑏 ) . (2) The pure-decode and wall-time output throughputs are therefore 
+
+𝜇 dec = 𝑏 𝑇 iter (𝑏 ) , 𝜇 wall = 𝜆𝐿 out = (1 − 𝜆𝑇 pre )𝜇 dec . (3) For a TPOT target 𝜏 , we enumerate feasible 𝑏 and select the largest batch satisfying the modeled TPOT real (𝑏 ) ≤ 𝜏 . A larger batch can improve pure-decode throughput, but any accompanying increase in arrival rate also raises prefill occupancy, limiting the wall-time gain. Prefix reuse reduces 𝑇 pre and leaves more service time for decoding. This steady-state approximation explains the tradeoff; it is not a latency guarantee for heterogeneous, time-varying traffic. A single-instance microbenchmark exhibits this trend (Fig. 4). Between the measured points associated with the 30- and 50-ms reference targets, decode batch size roughly doubles, increasing pure-decode throughput by 40.4% but wall-time throughput by only 14.4%. The smaller wall-time gain is consistent with increased prefill occupancy. 
+
+Discussion and key insights. Together, the production observa-tions and capacity analysis yield two scheduling insights. First, KVC reuse should be prioritized over request packing. Cache-dependent prefill work affects both first-token latency and ongoing 1 3 6 9 12 16 030 50 90 120        
+
+> TPOT (ms)  30 ms: B=3 measured BS=3.09 50 ms: B=6 measured BS=6.16
+> (a) TPOT operating points
+> 1816 100 300 500
+> Output tokens/s  (b) Pure decode
+> 1816 50 90 130
+> (c) Wall time
+> Operating point (B / decode BS)
+> Capacity model Measured 30 ms 50 ms
+
+Figure 4: Decode batching under colocated prefill/decode. (a) TPOT, (b) pure-decode throughput, and (c) wall-time through-put. Lines compare the capacity model with measurements. 
+
+decoding (Fig. 1), reducing the throughput attainable under a TPOT constraint. Moving a request to an instance with a larger decode batch need not save GPU time if additional recomputation erases the decode gain. Scheduling should therefore limit recomputation cost before selecting among placements for packing. This does not require maximizing cache hits unconditionally; bounded locality loss can provide placement flexibility. Second, decode batch size is a key control variable for the throughput–latency tradeoff. Larger batches can improve through-put per GPU, but increase the aggregate KV state accessed per iteration and raise TPOT. Queued and prefilling requests do not contribute to the current decode batch, so total in-flight counts alone cannot guide consolidation. The gateway should favor instances with more ongoing decoding requests under recomputation and predicted TPOT constraints. 
+
+## 4 System Overview 
+
+Guided by the workload observations in §3, PackServe is a gateway-level scheduler designed to pack agentic LLM requests under a configured TPOT objective while preserving KVC reuse. As shown in Fig. 5, distributed gateways route requests from agent applica-tions to a shared pool of serving instances, with a Metadata service supplying instance state for scheduling. Each pool contains homo-geneous serving instances that use a common engine and configu-ration [15, 21, 46]. Engine-level scheduling and GPU provisioning remain outside the scheduler’s control. 
+
+Distributed gateways. Gateways carry critical inference traffic and scale horizontally to increase request-handling capacity and maintain service availability as the cluster grows. In a large produc-tion cluster, this can mean dozens of gateways. Request scheduling is therefore distributed: each gateway independently selects desti-nations for incoming requests from the shared serving pool. 
+
+Metadata service. These distributed decisions depend on timely per-instance load and cache information. Because each gateway observes only its own traffic while an instance serves requests from 
+
+> 4PackServe: SLO-Aware Request Scheduling
+
+System Overview (§4) Agentic Applications   
+
+> Codex Claude Code OpenClaw LLM requests
+
+PackServe Gateway Metadata Service   
+
+> node node sync updates view requests responses
+
+Serving Pool 
+
+Serving Instance 
+
+> vLLM / SGLang / TensorRT-LLM same engine + configuration
+
+Resource Manager (outside scope)  
+
+> resource metrics provision / release
+
+SLO-aware Request Scheduling (§6) 
+
+Instance State: shared + local 
+
+> capacity rejection
+
+Cache Filter 
+
+> recompute-work bound cache pool
+
+TPOT Filter  
+
+> predicted TPOT < target nonempty empty TPOT-fit pool
+
+Packing 
+
+> decode-BS-centric cache pool
+
+Fallback 
+
+> cache-aware LB request dispatch
+
+Performance Model (§5) 
+
+Offline Calibration Calibration Engine  
+
+> isolated; same configuration profiling requests measured timings
+
+Profile & Fit 
+
+> transformer-guided forms
+
+Online Prediction Runtime Inputs 
+
+> request / KVC / load
+
+Prefill Cost TPOT Estimate    
+
+> decode + prefill interference prefill / decode models traffic / decisions information flow resource management component detail
+
+Figure 5: PackServe Overview: distributed gateways independently schedule requests to a shared serving pool using shared metadata. 
+
+multiple gateways, stale state can cause load or reusable prefixes to be misjudged. To maintain a shared view, gateways track request concurrency, token usage, prefill load, and prefix-cache hits through interactions along request and response paths rather than periodi-cally polling each engine. A logically centralized Metadata service aggregates this per-instance state across gateways and makes it available for scheduling. Multiple Metadata nodes synchronize for high availability, so gateways share state while retaining indepen-dent scheduling decisions. 
+
+Scheduling policy. The scheduler within each gateway supports different scheduling policies, each using request attributes and instance state to select a destination. Within this framework, Pack-Serve implements SLO-aware request packing to improve resource efficiency while preserving KVC reuse. Its configuration-calibrated white-box prefill and decode models (§5) estimate recomputation cost and TPOT: the prefill model estimates computation cost from new and cached input tokens, while the TPOT estimate combines decode cost under estimated load with prefill interference. After capacity filtering, a recomputation budget bounds additional pre-dicted prefill work, TPOT filtering retains candidates predicted to meet the configured target, and a decode-batch-size-centric selector favors candidates with more ongoing decoding requests (§6). 
+
+## 5 Performance Modeling 
+
+We derive prefill and decode models from Transformer computation and calibrate them for each serving configuration (Fig. 5). These models estimate recomputation cost and TPOT for scheduling (§6). 
+
+## 5.1 Problem Definition 
+
+Modeling goals. For an arriving request 𝑟 and candidate instance 𝑖 ,we estimate prefill computation time and TPOT before scheduling, using only request attributes, scheduler-observable instance state, and configuration-specific profiles. 
+
+TTFT decomposition. We decompose TTFT as TTFT 𝑟,𝑖 = 𝑇 pf  
+
+> 𝑟,𝑖
+
++ 𝑇 queue  
+
+> 𝑟,𝑖
+
++ 𝑇 overhead  
+
+> 𝑟
+
+, (4) where 𝑇 pf is prefill computation time, 𝑇 queue is queueing delay, and 
+
+𝑇 overhead covers scheduling and other request-processing overheads. Queueing delay can be estimated from request state maintained by the scheduler, while scheduling overhead is negligible relative to prefill in our setting. We model cache-dependent 𝑇 pf to quantify candidate-specific recomputation cost and prefill interference. 
+
+TPOT decomposition. Under prefill/decode colocation, request-level TPOT comprises interference-free decoding and prefill-induced delay: TPOT 𝑟,𝑖 = 𝑇 dec  
+
+> 𝑟,𝑖
+
++ ΔPD  
+
+> 𝑟,𝑖
+
+, (5) where 𝑇 dec is interference-free decode time and ΔPD is additional prefill-induced delay, both averaged per output token. 
+
+## 5.2 Transformer-Guided Stage Models 
+
+Prefill. Transformer blocks [34] combine causal self-attention with token-wise projections and feed-forward or expert layers [10]. For query, key, and value matrices 𝑄, 𝐾, 𝑉 , attention computes Attention (𝑄, 𝐾, 𝑉 ) = softmax 
+
+ 𝑄𝐾 T
+
+√𝑑 ℎ
+
++ 𝑀 
+
+
+
+𝑉 , (6) where 𝑑 ℎ is the head dimension and 𝑀 masks future positions. With 𝐶 cached prefix tokens and 𝑁 new tokens, causal masking permits prefix K/V reuse, leaving token-wise computation only for the new tokens. Each new query attends to all cached keys and new keys up to and including its own position, yielding 𝑁𝐶 +𝑁 (𝑁 +1)/ 2query-key pairs per head. For a fixed configuration 𝜃 (model, hardware, and engine set-tings), these costs motivate 
+
+𝑇 pf (𝑁 , 𝐶 ; 𝜃 ) ≈ 𝛼 0 + 𝛼 1𝑁 + 𝛼 2𝑁𝐶 + 𝛼 3𝑁 2, (7) 
+
+> 5Tan et al.
+
+where the linear term primarily captures token-wise computation, while 𝑁𝐶 and 𝑁 2 capture attention interactions. Distinguishing new and cached tokens captures how a longer reusable prefix re-duces 𝑁 and recomputation at fixed input length. 
+
+Decode. Each standard autoregressive decode iteration generates one token for each of 𝐵 active requests with total context length 
+
+𝑆 = Í𝐵 𝑗 =1 ℓ𝑗 . Token-wise operations process 𝐵 new tokens, while attention accesses KVC proportional to 𝑆 , motivating the local approximation 
+
+𝑇 iter (𝐵, 𝑆 ; 𝜃 ) ≈ 𝛽 0 + 𝛽 1𝐵 + 𝛽 2𝑆, (8) where coefficients are calibrated per configuration. The model ex-cludes prefill interference. 
+
+## 5.3 Configuration-Calibrated Profiling 
+
+We profile each serving configuration on an otherwise idle instance, within its context-length, KVC-capacity, and concurrency limits. 
+
+Prefill profile. We add empirical 𝐶 and 𝐶 2 terms to capture cache-dependent runtime effects beyond the structural model. Sampling covers the cold-cache axis ( 𝐶 = 0), chunk-aligned cache-hit points (𝐶 = 𝑘𝐿 chunk , 0 < 𝑁 ≤ 𝐿 chunk ), and the maximum-input boundary (𝐶 + 𝑁 = 𝐿 max ), where 𝐿 chunk is the prefill chunk size, 𝑘 is a positive integer, and 𝐿 max is the maximum feasible input length. For cache-hit samples, we prewarm the prefix and verify the cached-token count reported by the engine. Each profiling request generates only one output token. 
+
+Decode profile. We vary request concurrency and output length to sample (𝐵, 𝑆 ). When available, we collect actual 𝐵 , 𝑆 , and execution time from engine-native forward-pass metrics (FPM), retaining only pure-decode batches. Otherwise, we estimate iteration intervals from streamed output timestamps. After outlier filtering, we fit separate linear models using CUDA graph capture batch sizes as segment boundaries. 
+
+Online calibration. Profiled decode latency can underestimate runtime cost at large batch sizes, potentially due to context-length skew [1, 8]. To reduce this bias, PackServe maintains a multiplica-tive exponential moving average (EMA) factor for each decode-BS segment. Feedback uses engine-native durations of consecutive pure-decode forwards and the base model’s predictions at the same measured batch size and total context length, excluding prefill in-terference from the correction. Each factor starts at 1 and tracks the measured-to-predicted ratio with update weight 0.02; ratios are clipped to [0.5, 2] and factors to [1, 2]. At scheduling time, the fac-tor for the projected batch size scales the decode term, while prefill interference is modeled separately. We evaluate the correction in §8.3.3. 
+
+## 6 SLO-Aware Request Scheduling 
+
+Using the performance models in §5, PackServe balances the throughput gains from request packing against the prefill cost of lost KVC reuse. Algorithm 1 implements three stages motivated by the insights in §3: KVC-first filtering, SLO-aware admission, and decode-batch-size-centric packing. 
+
+Algorithm 1 KVC-first, SLO-aware request packing.                                                                                    
+
+> Input: request 𝑟 , instance pool and state I, recomputation budget 𝜂 ≥0, and TPOT target 𝜏 TPOT .
+> Output: selected instance 𝑖 ∗, or Reject.
+> # Capacity guard
+> 1: A ← CapacityCandidates (𝑟, I )
+> 2: if A=∅then return Reject
+> # KVC-first recomputation filtering
+> 3: for each 𝑖 ∈ A do
+> 4: 𝑊 𝑟,𝑖 ←RecomputeCost (𝑟, 𝑖 )
+> 5: 𝑊 min ←min 𝑖 ∈A 𝑊 𝑟,𝑖
+> 6: 𝑍 𝑟 ←CacheBenefit (𝑟 )
+> 7: C ← { 𝑖 ∈ A | Normalize (𝑊 𝑟,𝑖 −𝑊 min , 𝑍 𝑟 ) ≤ 𝜂 }
+> # SLO-aware admission
+> 8: for each 𝑖 ∈ C do
+> 9: b𝑡 𝑖 ←PredictTPOT (𝑟, 𝑖 )
+> 10: T ← { 𝑖 ∈ C | b𝑡 𝑖 <𝜏 TPOT }
+> # Decode-Batch-Size-Centric packing or bounded fallback
+> 11: if T≠∅then
+> 12: for each 𝑖 ∈ T do
+> 13: 𝐾 𝑖 ←DecodeBatchSizeCentricKey (𝑟, 𝑖 )
+> 14: 𝑖 ∗←arg min lex
+> 𝑖 ∈T 𝐾 𝑖
+> 15: else
+> 16: 𝑖 ∗←CacheAwareLB (𝑟, C)
+> 17: return 𝑖 ∗
+
+## 6.1 KVC-First Recomputation Control 
+
+After capacity filtering (L1–2), PackServe prioritizes KVC reuse, as motivated by Insight #1 (§3). The same cache-hit ratio can entail dif-ferent recomputation costs depending on input length and serving configuration. Rather than applying a fixed cache-hit-ratio thresh-old, PackServe filters candidates using predicted recomputation cost, accounting for the request’s input length, candidate-specific prefix reuse, and configuration-calibrated prefill performance (L3–7). Specifically, let A denote the capacity-eligible instances. For request 𝑟 , 𝑊 𝑟,𝑖 is candidate 𝑖 ’s nonnegative predicted prefill-time penalty relative to a fully cached input, and 𝑊 min is its minimum over A. Let 𝑍 𝑟 denote the predicted prefill-time difference between fully uncached and fully cached inputs. The KVC-admissible set C
+
+retains candidates satisfying 
+
+𝜌 𝑟,𝑖 = 𝑊 𝑟,𝑖 − 𝑊 min 
+
+𝑍 𝑟 
+
+≤ 𝜂, 𝑍 𝑟 > 0, (9) where 𝜂 bounds additional recomputation relative to the best candi-date, expressed as a fraction of the request’s full cache benefit. For 
+
+𝑍 𝑟 > 0, 𝜂 = 0 retains only minimum-cost candidates, while larger values permit more flexibility for subsequent packing (§8.3.2). If 
+
+𝑍 𝑟 = 0, all capacity-eligible candidates remain. 
+
+## 6.2 Decode-Batch-Size-Centric Packing 
+
+Passing the recomputation filter does not ensure that a placement meets the TPOT target. An arriving request adds both decode load and cache-dependent prefill work to its destination. For each KVC-admissible instance 𝑖 ∈ C , PackServe therefore evaluates a placement-dependent TPOT estimate using the performance mod-els in §5 (L8–10): 
+
+TPOT 𝑟,𝑖 = b𝑇 iter (𝐵 + 
+
+> 𝑖
+
+, 𝑆 + 
+
+> 𝑟,𝑖
+
+) + 1[𝐴 𝑖 > 0] b𝑇 pf (𝑛 𝑟,𝑖 , 𝑐 𝑟,𝑖 )
+
+max (1, e𝐿 out ) . (10) 
+
+> 6PackServe: SLO-Aware Request Scheduling
+
+Here, 𝐴 𝑖 counts scheduler-tracked active requests, including queued requests, and 𝐵 + 
+
+> 𝑖
+
+= 𝐴 𝑖 + 1 estimates potential decode concurrency after admission rather than the currently executing batch size. 𝑆 +
+
+> 𝑟,𝑖
+
+estimates the corresponding total context length. The second term accounts for potential interference from the arriving request’s pre-fill, using its uncached and cached input lengths 𝑛 𝑟,𝑖 and 𝑐 𝑟,𝑖 . We amortize this cost over the recent median output length e𝐿 out and omit it when the instance has no active requests. The decode term includes the BS-specific online correction described in §5.3. Candi-dates whose estimated TPOT is below the pool’s configured target 
+
+𝜏 TPOT form the admissible set T .Within T , PackServe prioritizes instances with more scheduler-tracked decoding requests (L11–14). This preference encourages larger decode batches to improve throughput per GPU, as motivated by Insight #2 (§3). Selecting the smallest TPOT headroom would not necessarily identify such instances, because small headroom can also result from long contexts or prefill interference. We therefore use predicted TPOT to constrain placement and decode concurrency to guide packing. When decoding concurrency is equal, PackServe prefers more cached prefix tokens. This tie-break preserves addi-tional KVC reuse because the recomputation filter bounds cache loss without making all candidates equally cache-efficient. Remaining ties favor fewer queued requests to limit queueing delay. If T is empty, no KVC-admissible instance is predicted to meet the TPOT target. PackServe then switches from decode-batch-size-centric packing to cache-aware load balancing within C (L15–16). This fallback selects according to load and cache locality rather than prioritizing further decode consolidation. It retains the capacity and recomputation constraints but relaxes the TPOT SLO test. 
+
+## 7 Implementation 
+
+We build an experimental prototype of PackServe based on the scheduling architecture of our existing production inference gate-way to evaluate the proposed scheduling mechanisms under con-trolled conditions. Its lightweight scheduling and performance-model modules comprise approximately 1.4K LOC of Python, sup-ported by 2.6K LOC of shared scheduler infrastructure. Following the Metadata service design, the prototype maintains a local prefix tree to estimate KVC reuse and per-instance backend records for re-quest counts and load estimates. These structures are updated along request and response paths to support the performance models and scheduling policy. To keep the implementation simple and efficient, we use LMetric [44] for the cache-aware load-balancing fallback (§6.2). A separate profiler, implemented in approximately 2.8K LOC of Go, collects prefill and decode measurements to calibrate the models. In production, we integrate our PackServe scheduling pol-icy into the existing gateway infrastructure. Both implementations follow the same design principles (§4). 
+
+## 8 Evaluation 
+
+We evaluate PackServe on a 64-GPU testbed using a production-derived agentic workload. A separate 12-day production study ex-amines a scheduling policy sharing PackServe’s design principles. Our evaluation addresses three questions: 
+
+• End-to-end effectiveness: Can PackServe reduce active GPU-hours relative to existing scheduling policies while 
+
+Table 2: Replay workload characteristics, including warmup.             
+
+> Workload Value Mean length Tokens
+> Requests 7,258 Input 62.5K Sessions 1,704 Output 556 Mean qps 2.02 req/s Reusable prefix 52.1K
+> Reusable prefix: global, unbounded cache assumed.
+
+retaining KVC reuse and meeting windowed TPOT objec-tives? (§8.2) 
+
+• Design analysis: How do PackServe’s scheduling compo-nents affect resource use, latency, and KVC reuse, and how does online calibration change decode-model error? (§8.3) 
+
+• Production observations: What changes in serving-instance count, per-instance throughput, latency, and KVC reuse accompany SLO-aware scheduling in production? (§8.4) 
+
+## 8.1 Experimental Setup 
+
+Testbed. We use a Kubernetes cluster with 64 NVIDIA H20 GPUs (96 GB each) and intra-node NVLink connectivity. We deploy 16 homogeneous SGLang [46] serving instances, each using 4 GPUs within a single node with tensor parallelism of 4. The scheduler runs in a dedicated CPU-only pod. 
+
+Model and serving configuration. All instances serve 230B MiniMax-M2.5 [20] with colocated prefill and decode. We use 8192-token prefill chunks, a maximum batch size of 64, and FP8 KVC with approximately one million tokens of GPU-resident capacity per instance. HiCache adds a host-memory cache tier configured to 3 × the GPU-cache capacity. 
+
+Production-derived workload. We construct a one-hour work-load from anonymized production traffic served by a roughly 700B-parameter open-weight model. We sample complete sessions to obtain a steady load while preserving within-session request in-tervals. Table 2 summarizes the resulting workload. Each run uses the first 10 minutes to warm caches and scheduler history, and evaluates requests arriving during the remaining 50 minutes. 
+
+Baselines. We compare PackServe with three baselines from the design space in Table 1, adapting and reproducing their scheduling policies in our experimental prototype: 
+
+• vllm-dp [15] adapts vLLM v0.28.0’s default internal DP load balancer. It selects the instance with the lowest load score, combining active request count with a prefill-backlog term weighted by KVC occupancy above 50%. It does not consider request-specific KVC reuse or latency SLOs. 
+
+• LMetric [44] balances KVC reuse and load by selecting the instance that minimizes the product of pending uncached prefill tokens and active request count, both including the arriving request. We track pending prefill work at the gate-way until the first token returns. 
+
+• llm-d+ adapts llm-d v0.9.0 [19], which combines KVC affin-ity with latency-based request packing. It applies cache-affinity checks and prioritizes instances predicted to satisfy both TTFT and TPOT SLOs, then uses weighted random                           
+
+> 7Tan et al. 110 100 1k 1.3 43 274 489 1.4 33 1.4 38 050 100 81 41 74 80 030 60 2001 13 22 24 040 80 37 43 49 56 030 60 49 25 24 61 59 52 19 32 43 17 26 110 100 1k 1.3 43 263 466 1.5 37 1.6 38 050 100 81 37 74 80 030 60 2482 13 25 45 040 80 37 43 50 71 030 60 49 25 24 61 59 52 19 32 39 13 26
+> (a) TTFT (s) (b) KVC hit (%) (c) P90 mTPOT (ms) (d) Decode (tok/GPU-s) (e) Active time (GPU-h)
+> LMetric vllm-dp llm-d+ PackServe P50 P90 SLO Pure decode Pure prefill Other Overhead
+
+Figure 6: End-to-end performance under 30/50-ms TPOT SLOs (top/bottom). All policies except vllm-dp exceed 99.9% request success. Most values are rounded to integers for clarity. 
+
+selection to favor smaller positive latency headroom. We re-place its XGBoost predictors with our profile-based models and online calibration for better TPOT prediction accuracy (§8.3.3), denoting this adaptation as llm-d+. 
+
+Metrics. We evaluate request success, latency, KVC reuse, and GPU resource use using the following metrics. 
+
+• Request success rate. We report the fraction of all evaluation requests that complete successfully. A request is considered failed if no instance can admit it due to capacity limits or it receives no response within 10 minutes. 
+
+• TTFT. We report client-observed TTFT P50/P90. Rather than using a fixed workload-wide threshold [28, 47], we set each request’s TTFT SLO to the pure-prefill computation time for its full input, with no KVC reuse or interference from other requests. We estimate this time through offline profiling (§5.3) and impose a minimum budget of 2 s to leave slack for short inputs. We prioritize KVC reuse on the prefill side, using TTFT as a reference metric to assess increases in recomputation and queueing overhead. Our llm-d+ adaptation uses the same profile-based budget and 2-s minimum for scheduling. 
+
+• TPOT. We evaluate TPOT SLOs of 30 and 50 ms in sep-arate runs, motivated by the distinct decode-throughput operating points in our trace-derived homogeneous mi-crobenchmark (Fig. 4). Prefill interference under P/D colo-cation complicates request-tail control, so we focus on P50 TPOT to characterize typical performance. To capture tem-poral variation, we track minute-median TPOT (mTPOT) : the P50 TPOT of successfully completed requests issued within each non-overlapping one-minute window. We report the mTPOT time series and its P90 across valid windows. 
+
+• KVC hit. We report the token-weighted cache-hit rate, com-puted as the total cached input tokens divided by the total input tokens across successfully completed evaluation re-quests. 
+
+• GPU resource use. We report active GPU-hours, summing each instance’s time with at least one active request (in-cluding failed ones) weighted by its GPU count. We also report successful decode throughput as output tokens after the first token from successful requests per GPU-second of pure-decode service. 
+
+## 8.2 End-to-End Performance 
+
+Fig. 6 summarizes end-to-end performance. Figs. 7 and 8 show tem-poral behavior and decode-batch distributions. We use 𝜂 = 0.5 by default. All policies except vllm-dp complete over 99.9% of evalua-tion requests in both settings, while vllm-dp completes only 24% of requests. Its low success rate and high TTFT and mTPOT highlight the limits of load balancing without request-specific KVC aware-ness. We therefore focus on LMetric and llm-d+ in the analysis but retain vllm-dp in the figures unless otherwise noted. 
+
+Latency and SLO attainment. PackServe controls TPOT through explicit decode/interference prediction and SLO-based candidate filtering. Its P90 mTPOT remains below both SLOs, at 24.0 and 44.7 ms (Fig. 6(c)). Over time, mTPOT follows the configured latency scale and exceeds it in only one 50-ms minute by 0.3 ms (Fig. 7, top row). In contrast, LMetric stays at 10.5–15.6 ms, consistent with its cache-aware load balancing for latency minimization. llm-d+ also meets every minute-level target, but its P90 mTPOT of 22.2 and 24.6 ms leaves more margin unused at 50 ms. Despite sharing our predictors, its cache affinity and joint TTFT/TPOT scoring do not regulate TPOT toward the configured target. These results support explicit decode/interference modeling and TPOT filtering for minute-level latency control. Packing can increase recomputation and queueing, creating a TTFT tradeoff. Nevertheless, PackServe’s KVC-aware admission keeps median TTFT close to LMetric’s, at 1.4–1.6 versus 1.3 s, while achieving a lower P90 of 37.6–38.4 versus 42.8 s (Fig. 6(a)). llm-d+ has lower P90 TTFT at 30 ms (32.9 versus 38.4 s), with little differ-ence at 50 ms. This is consistent with its joint objective and default 0.8/0.2 weights for normalized TTFT/TPOT headroom. PackServe        
+
+> 8PackServe: SLO-Aware Request Scheduling 050 100
+> mTPOT (ms)  (a) 30 ms SLO
+> 06.5 s
+> 050 100
+> KVC hit (%)
+> 025 50 032 64
+> Active GPUs
+> (b) 50 ms SLO
+> 06.5 s
+> 025 50
+> Evaluation time (min)
+> LMetric vllm-dp llm-d+ PackServe
+
+Figure 7: PackServe preserves cache locality with fewer ac-tive GPUs. Insets show vllm-dp’s full mTPOT range; dashed lines mark SLOs. Red crosses mark all-failed vllm-dp arrival minutes. 1816 
+
+> 30 ms SLO Load rank
+
+(a) LMetric (b) llm-d+ (c) PackServe   
+
+> 025 50 1816
+> 50 ms SLO Load rank
+
+(d) LMetric   
+
+> 025 50
+
+(e) llm-d+   
+
+> 025 50
+
+(f) PackServe   
+
+> 018.7 37.4
+> Evaluation time (min) Mean decode BS
+
+Figure 8: Decode batch sizes across load-ranked instances. 
+
+instead prioritizes KVC reuse under its TPOT SLO, using TTFT as a reference metric to assess increases in recomputation and queueing overhead. 
+
+KVC reuse during consolidation. PackServe uses a recomputa-tion budget to limit the locality cost of concentrating requests. Its KVC hit rate remains within 1.5 percentage points (pp) of LMetric’s (Fig. 6(b)), and their curves stay close over time (Fig. 7, middle row), supporting cache-first admission during consolidation. PackServe outperforms llm-d+ by 5.3–6.1 pp overall and remains ahead in 96– 100% of replay minutes. llm-d+ uses fixed prefix-affinity thresholds of 0.99 (strict) and 0.80 (loose), relaxed according to TTFT. These may require workload-specific tuning because the same hit ratio can imply different recomputation costs. In contrast, PackServe’s profiled prefill model estimates request-specific cost for the serv-ing configuration, accounting for input and cached-prefix lengths without a fixed hit-rate threshold. G C T CT F050 100 Success Failed G C T CT F050 80 895 988 59.4 43.8 44.7 G C T CT F050 100 36.0 43.0 71.4 79.8 80.2 G C T CT F100 1k 10k 4.2k 4.2k 2.2k 313 276 P90 P99 
+
+(a) Req Success Rate (%) (b) P90 mTPOT (ms) (c) KVC hit (%) (d) Request TPOT (ms) 
+
+Figure 9: Admission and fallback ablation (50 ms SLO). Ar-rows in (b) mark off-scale values; (d) uses a log scale. Table 3: Configuration key for Fig. 9.                         
+
+> ID Configuration Cache TPOT Fallback
+> GCapacity guards only −−–CCache only +−–TTPOT only −+DCQ CT Cache + TPOT ++DCQ FFull ++Cache-aware LB
+> +/− : admission filters on/off. All retain capacity guards, prefix caching and normal DCQ selection. Fallback pools: capacity for T; cache for CT/F.
+
+GPU resource efficiency. PackServe reduces active GPU-hours by 13.0–21.1% relative to LMetric and 16.8–24.6% relative to llm-d+ (Fig. 6(e)). It also uses fewer active GPUs than either baseline in at least 96% of replay minutes, showing that the savings persist over time (Fig. 7, bottom row). Within the cache- and TPOT-admissible set, PackServe priori-tizes decode concurrency rather than smaller SLO headroom. Its decode throughput is 50.1–90.8% higher than LMetric’s, consistent with the batching trend in §3 (Fig. 6(d)). Both its pure-decode and pure-prefill GPU-hours are lower than llm-d+’s, with 18.4–21.1% less prefill time (Fig. 6(e)). Whereas llm-d+’s small-headroom objec-tive can favor prefill work over larger decode batches, PackServe improves batching within a recomputation budget. Fig. 8 shows the resulting distribution: LMetric spreads small de-code batches relatively evenly, llm-d+ remains broadly distributed, and PackServe concentrates larger batches on fewer instances. This is clearest at 50 ms, where high-load instances sustain large batches over time, supporting decode-batch-size-centric packing as a way to reduce active capacity-time rather than provisioned GPU allocation. 
+
+## 8.3 Ablation Study 
+
+We examine admission and fallback, the recomputation budget, TPOT prediction and calibration, and instance selection. 
+
+8.3.1 Layer-by-Layer Admission Ablation. We vary cache/TPOT admission and fallback under the 50 ms setup of §8.2, using the configurations in Table 3.           
+
+> 9Tan et al. 00.5 10816
+> (a) Candidates (Mean inst.)
+> 00.5 165 75 85
+> (b) KVC hit (%)
+> 00.5 1
+> η
+> 025 50
+> GPU-h (c) GPU time
+> 00.5 1050 60
+> (d) P90 mTPOT (ms)
+> −2 048
+> Δ GPU-h
+> Bars (left axis)
+> Decode Prefill
+> Lines (right axis)
+> Δ decode Δ prefill
+
+Figure 10: Impact of the recomputation budget. In (c), bars show GPU time (left axis); lines show changes from 𝜂 = 0
+
+(right axis). TPOT admission and overload control. TPOT admission makes predicted latency an explicit scheduling constraint (§6.2). Capacity guards alone (G) and cache-only admission (C) incur failure rates of 29.9–31.9%. TPOT-only admission (T) lowers the failure rate to 0.8% (Fig. 9(a)), and it also reduces P90 mTPOT from 895.0–987.7 ms to 59.4 ms (Fig. 9(b)). This remains above the 50 ms SLO. These results support model-based TPOT admission as the primary overload control, beyond capacity and cache bounds alone. 
+
+KVC reuse and prefill interference. PackServe’s cache-first de-sign complements TPOT admission by bounding additional prefill work. Compared with T, combined cache-and-TPOT admission (CT) improves the KVC hit rate by 8.4 pp (Fig. 9(c)) and reduces P90 mTPOT to 43.8 ms, below the SLO (Fig. 9(b)). Its request-level P99 TPOT is also 85.9% lower (Fig. 9(d)). The joint improvement in locality and latency is consistent with avoiding cache-destructive placements that introduce additional prefill interference (§6.1). 
+
+Fallback and tail latency. When no candidate passes TPOT ad-mission, PackServe uses a cache-aware load-balancing fallback over the cache-admissible pool, balancing queued and incoming prefill work against active concurrency (§6.2). Full (F) retains a P90 mT-POT of 44.7 ms, below the SLO (Fig. 9(b)). Compared with CT, its request-level P99 TPOT is 11.6% lower (Fig. 9(d)), while its request-level TPOT SLO attainment is 1.7 pp lower. The lower observed extreme tail is consistent with load-aware fallback, but does not establish uniform latency improvement. 
+
+8.3.2 Impact of the Recomputation Budget. We sweep 𝜂 from 0 to 1 in steps of 0.1 using the 50 ms replay setup of §8.2, with all other strategy parameters fixed. 
+
+Placement flexibility and cache locality. The normalized bud-get controls how much predicted recomputation PackServe accepts relative to the best current cache location. Increasing 𝜂 from 0 to 0.4 expands the mean cache-admissible set from 4.1 to 6.7 instances while maintaining a KVC hit rate of 80.4–81.2% (Fig. 10(a)–(b)). At 
+
+𝜂 = 1, the set reaches 15.9 instances, but the hit rate falls by 7.6 pp 0 50 100 150   
+
+> Absolute TPOT error (ms)
+> 00.5 1.0
+> CDF (a) P50 MAE 10.6 25.0 17.9 91.7
+> PackServe llm-d 050 100 150 1.90 132.88
+> (b) Mean overhead (ms)
+> PackServe llm-d
+
+Figure 11: PackServe has lower TPOT errors (a) and mean scheduling latency (b). 
+
+to 72.9%. Thus, a moderate budget exposes additional placements without materially reducing locality, whereas removing the bound admits substantially more recomputation. 
+
+Recomputation and GPU efficiency. From 𝜂 = 0 to 0.4, active GPU-hours decrease by 7.9%, from 41.9 to 38.5. Over the same range, pure-decode GPU time falls from 14.6 to 12.9 GPU-hours, while prefill-only GPU time falls from 27.1 to 25.5 GPU-hours (Fig. 10(c)). Further relaxation reverses this benefit. Compared with 𝜂 = 0.4, 
+
+𝜂 = 1 saves only 0.4 pure-decode GPU-hours but adds 9.6 prefill GPU-hours, increasing active GPU-hours by 23.7%. These results show that lost KVC reuse can erase the decode savings from greater placement flexibility, motivating an explicit recomputation bound. The tested budgets from 𝜂 = 0.2 to 0.5 use 38.5–39.0 active GPU-hours while keeping P90 mTPOT below the 50 ms SLO (Fig. 10(d)), providing a moderate operating range. 
+
+8.3.3 TPOT Predictor Comparison. We compare PackServe’s profile-based predictor (PackServe) with an XGBoost [7] variant under the 50 ms setup of §8.2, with all other strategy parameters re-maining fixed. Given PackServe’s higher observed accuracy, we also equip llm-d with PackServe (llm-d+) in the end-to-end evaluation (§8.2) for a fairer comparison of scheduling policies. 
+
+Prediction accuracy. For the black-box baseline, we instantiate llm-d’s prediction method using its framework and train the XG-Boost model on roughly 100k samples. Fig. 11(a) shows that Pack-Serve’s absolute-error CDF lies consistently to the left of llm-d’s, indicating smaller prediction errors across the displayed range. PackServe achieves a P50 absolute error of 10.6 ms, compared with 17.9 ms for llm-d. The median error is roughly one-fifth of the 50-ms SLO. Together with the observed minute-level SLO control (Fig. 6(c)), these results support PackServe’s practical use in online SLO-aware scheduling. Meanwhile, PackServe’s residual error can reflect prefill interference from later arrivals, which cannot be fully anticipated at scheduling time. In contrast, llm-d’s predictor shows larger errors, which may reflect insufficient training coverage of runtime workload states. 
+
+Scheduling overhead. For scheduling overhead, using Pack-Serve’s predictor yields a mean arrival-to-decision latency of 1.9 ms, compared with 132.9 ms using llm-d’s predictor (Fig. 11(b)). llm-d’s separately deployed prediction service can incur further communi-cation costs not measured here. PackServe’s compact arithmetic   
+
+> 10 PackServe: SLO-Aware Request Scheduling 123-4 5-8 9-12 13-16 17-24 25-32 33-40 41-48
+> Decode BS
+> 0246810
+> MAE (ms)
+> Base EMA Factor
+> 1.0 1.2 1.4
+> EMA factor
+
+Figure 12: Pure-decode MAE (bars, left) and EMA factors (median and P10–P90, right) by BS region. Table 4: Instance selector ablation.                                   
+
+> Selector GPU-h KVC hit (%) P90 mTPOT (ms) Req P90 (ms) Random 48.09 77.78 21.61 63.38
+> D39.97 78.88 49.80 89.56 D–Q 40.27 78.95 44.97 80.84 D–C 40.23 79.25 47.42 83.57 D–Q–C 39.82 79.60 47.30 85.32 H–C–Q 45.73 76.86 42.82 129.19 D–C–Q 38.86 80.17 44.66 80.25 Random: uniform. Scheduler-side priorities: D, decoding requests ↑; C, predicted cached tokens ↑; Q, queued requests ↓; H, predicted TPOT headroom ↓. Bold: best GPU-h/KVC/Req P90; underline: Req P90 runner-up; boxes: P90 mTPOT ≤50 ms; shading: adopted selector.
+
+therefore offers a practical advantage for latency-sensitive online scheduling. 
+
+Effect of online calibration. BS-specific EMA correction ad-dresses the profiled model’s systematic underestimation at high concurrency (§5.3). To evaluate EMA calibration, we compare pre-dicted and measured pure-decode iteration times in the 50 ms run. Unlike request-level TPOT, these measurements exclude delays caused by prefill interference. Across BS ≥ 17, the base predictor’s mean signed error is −5.96 ms, matching its mean absolute error (MAE) in magnitude. Applying the logged EMA factors reduces MAE from 5.96 to 0.85 ms (Fig. 12). The weighted absolute percent-age error, defined as total absolute error divided by total measured duration, falls from 17.5% to 2.5%. These results support BS-specific calibration to reduce optimistic decode estimates on packed in-stances. 
+
+8.3.4 Impact of Instance Selector. We compare selection prior-ities within PackServe’s TPOT-admissible set under the 50 ms setup of §8.2, while holding the remaining strategy parameters constant. 
+
+Headroom-first versus decode-BS-first selection. PackServe prioritizes the instance with the most scheduler-tracked decod-ing requests (D), while H prioritizes the smallest predicted TPOT headroom which is used in llm-d. With P90 mTPOT below 50 ms in both runs, D–C–Q uses 15.0% fewer active GPU-hours and has 37.9% lower request-level P90 TPOT than H–C–Q (Table 4). Small headroom can reflect long contexts or prefill interference as well as high concurrency. (model in §6.2) D directly concentrates decoding 0.0 0.5 1.0 (a) Insts. & QPM (min-max) Insts. QPM 0.0 0.5 1.0 SLO = 1              
+
+> (c) TPOT / SLO Mean P50 123Sat 4Sun
+> 56789Sat 10 Sun
+> 11 12 0246(d) Normalized TTFT Mean P50 P90 024LB: shaded; PackServe: unshaded
+> (b) Normalized running reqs per inst. Observed day
+
+Figure 13: Resource usage and latency over 12 matched days. Breaks omit one day. 
+
+requests within the candidate set, favoring larger decode batches after checking the latency constraint. 
+
+Cache-aware tie-breaking. C favors prefix reuse among instances with equal decode counts. Moving C before Q reduces active GPU-hours by 2.4% and improves KVC hit by 0.6 pp, giving D–C–Q the lowest observed footprint and highest KVC hit rate among the tested selectors (Table 4). These results support C before Q in our D–C–Q ordering (§6.2). 
+
+## 8.4 Deployment in Production 
+
+Our production deployment serves an approximately 700B-parameter model on a cluster with over 1,000 GPUs. We compare production cache-aware load balancing (LB) with PackServe using two six-day windows (12 days total), one week apart and matched by weekday and time of day (Fig. 13). For confidentiality, metrics are normalized or shown without absolute scales. Request packing leads to a smaller serving footprint and higher per-instance concurrency. Fig. 13(a) shows that the mean instance count is 34.7% lower than under LB, while QPM follows similar pat-terns under both policies. Meanwhile, running requests per instance rise to 2 .3× the LB mean and remain elevated through most of the PackServe period (Fig. 13(b)). The footprint reduction is larger on weekends than on weekdays (54.2% versus 26.7%), demonstrating the effectiveness of PackServe under lighter workloads. This foot-print reduction is achieved while keeping P50 TPOT below the SLO. Although higher than under LB, the P50 TPOT curve peaks at 79.8% of the target during the PackServe period (Fig. 13(c)). These gains do not come for free, however, as mean TTFT increases by 66.4% relative to LB (Fig. 13(d)). Overall, this tradeoff is acceptable in our production deployment, supporting PackServe’s effectiveness in reducing the serving footprint. 
+
+> 11
+
+Tan et al. 
+
+## 9 Related Work and Discussion 
+
+PackServe targets colocated prefill/decode and instance-local KVC reuse. Global KV pools and P/D disaggregation relax these assump-tions while complementing its cost-based admission and request packing. 
+
+Global KV Pool. Growing session histories, tool outputs, and external documents make long-prefix recomputation increasingly costly. Mooncake [28], MemServe [12], and LMCache [18] extend cross-instance KVC reuse beyond GPU memory to CPU memory, SSDs, and remote storage, while Tutti [29] optimizes SSD-backed retrieval. When retrieval is cheaper than recomputation, it can lower TTFT and reduce prefill interference with colocated decoding. PackServe could incorporate location- and tier-dependent lookup and transfer costs, together with remaining computation, into an effective prefill-cost model while retaining its SLO-admission and instance-consolidation structure. 
+
+P/D Disaggregation. DistServe [47], Splitwise [26], and Moon-cake [28] separate prefill and decode to avoid direct execution interference and provision resources for TTFT and TPOT indepen-dently. Prefill-as-a-Service (PrfaaS) [27] further explores selectively offloading long-context prefill across datacenters and returning the resulting KVC to local decode pools. Fully separated execution would remove the direct P/D interference term from our TPOT model, reducing one source of prediction uncertainty and poten-tially simplifying SLO-based isolation. Extending PackServe would still require modeling KVC transfer, network variability, and queues on both sides, as well as jointly selecting prefill and decode desti-nations. We leave these extensions to future work. 
+
+## 10 Conclusion 
+
+This paper presents PackServe, a gateway-level request scheduler designed to preserve KVC reuse, meet workload-specific TPOT SLOs, and reduce the GPU footprint of agentic LLM serving. Moti-vated by our characterization of production workloads, PackServe balances the throughput gains from request packing against the pre-fill cost of lost cache reuse. We develop compact white-box models for accurate, low-overhead latency prediction under prefill/decode interference. Guided by these models, PackServe prioritizes KVC reuse by bounding additional prefill recomputation, then favors instances with higher decode concurrency among those predicted to meet the TPOT target. Experiments on 64 NVIDIA H20 GPUs show that PackServe uses 13.0–24.6% fewer active GPU-hours than LMetric and llm-d+ while meeting the evaluated windowed TPOT objectives. A 12-day study across a production cluster with over 1k GPUs further shows 34.7% fewer serving instances and 36.8% higher per-instance request throughput relative to the production cache-aware load-balancing policy. 
+
+## References 
+
+[1] Amey Agrawal, Nitin Kedia, Jayashree Mohan, Ashish Panwar, Nipun Kwatra, Bhargav S. Gulavani, Ramachandran Ramjee, and Alexey Tu-manov. 2024. Vidur: A Large-Scale Simulation Framework for LLM Inference. In Proceedings of Machine Learning and Systems (MLSys) ,Vol. 6. https://proceedings.mlsys.org/paper_files/paper/2024/hash/ b74a8de47d2b3c928360e0a011f48351-Abstract-Conference.html [2] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Inference with Sarathi-Serve. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, Santa Clara, CA, 117–134. https://www.usenix.org/ conference/osdi24/presentation/agrawal [3] Anthropic. 2025. Claude Code. https://github.com/anthropics/claude-code. https://github.com/anthropics/claude-code Official GitHub repository. Accessed September 16, 2026. [4] Anthropic. 2026. System Card: Claude Fable 5 & Claude Mythos 5. Technical report. https://www.anthropic.com/claude-fable-5-mythos-5-system-card [5] Chaokun Chang, Yukun Zhou, Kaihua Fu, Dakai An, Tianyu Feng, Hanfeng Lu, Sheng Yao, Pu Guo, Yinghao Yu, Yizhou Shan, Bo Li, Binhang Yuan, and Wei Wang. 2026. From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems. arXiv preprint arXiv:2608.15127. https: //arxiv.org/abs/2608.15127 [6] Siyuan Chen, Zhipeng Jia, Samira Khan, Arvind Krishnamurthy, and Phillip B. Gibbons. 2025. SLOs-Serve: Optimized Serving of Multi-SLO LLMs. arXiv preprint arXiv:2504.08784. https://arxiv.org/abs/2504.08784 [7] Tianqi Chen and Carlos Guestrin. 2016. XGBoost: A Scalable Tree Boosting System. In Proceedings of the 22nd ACM SIGKDD International Conference on Knowledge Discovery and Data Mining (KDD ’16) . doi:10.1145/2939672.2939785 [8] Jaehong Cho, Hyunmin Choi, and Jongse Park. 2025. LLMServingSim2.0: A Unified Simulator for Heterogeneous Hardware and Serving Techniques in LLM Infrastructure. arXiv preprint arXiv:2511.07229. doi:10.48550/arXiv.2511.07229 [9] DeepSeek-AI. 2026. DeepSeek-V4.1-Flash: Pushing the Limits of KV Cache Compression. Technical report. https://huggingface.co/deepseek-ai/DeepSeek-V4.1-Flash/blob/main/DeepSeek_V41_Tech_Report.pdf [10] William Fedus, Barret Zoph, and Noam Shazeer. 2022. Switch Transformers: Scaling to Trillion Parameter Models with Simple and Efficient Sparsity. Journal of Machine Learning Research 23, 120 (2022), 1–39. https://jmlr.org/papers/v23/21-0998.html [11] GLM-5 Team. 2026. GLM-5: from Vibe Coding to Agentic Engineering. arXiv preprint arXiv:2602.15763. https://arxiv.org/abs/2602.15763 [12] Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu, Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang, Yungang Bao, Ninghui Sun, and Yizhou Shan. 2024. Mem-Serve: Context Caching for Disaggregated LLM Serving with Elastic Memory Pool. arXiv preprint arXiv:2406.17565. https://arxiv.org/abs/2406.17565 [13] Hao Kang, Ziyang Li, Weili Xu, Xinyu Yang, Yinfang Chen, Junxiong Wang, Beidi Chen, Tushar Krishna, Chenfeng Xu, and Simran Arora. 2026. ThunderAgent: A Simple, Fast and Program-Aware Agentic Inference System. arXiv preprint arXiv:2602.13692. doi:10.48550/arXiv.2602.13692 [14] Kimi Team. 2026. Kimi K3: Open Frontier Intelligence. arXiv preprint arXiv:2607.24653. https://arxiv.org/abs/2607.24653 [15] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAtten-tion. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles (SOSP ’23) . doi:10.1145/3600006.3613165 [16] John D. C. Little. 1961. A Proof for the Queuing Formula: 𝐿 = 𝜆𝑊 . Operations Research 9, 3 (1961), 383–387. doi:10.1287/opre.9.3.383 [17] Banruo Liu, Haoran Qiu, Íñigo Goiri, Rodrigo Fonseca, Ricardo Bianchini, and Esha Choukse. 2026. Agentic Coding in the Wild: Characterizing GitHub Copilot Traces at Production Scale. arXiv preprint arXiv:2608.00101. https://arxiv.org/ abs/2608.00101 [18] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665. doi:10.48550/arXiv.2510.09665 [19] llm-d Project. 2026. llm-d Inference Scheduler. Official GitHub repository. https://github.com/llm-d/llm-d-inference-scheduler Version 0.9.0; predicted-latency policy description. Accessed September 16, 2026. [20] MiniMax. 2026. The MiniMax-M2 Series: Mini Activations Unleashing Max Real-World Intelligence. arXiv preprint arXiv:2605.26494. doi:10.48550/arXiv. 2605.26494 [21] NVIDIA. 2023. TensorRT-LLM. https://github.com/NVIDIA/TensorRT-LLM. https://github.com/NVIDIA/TensorRT-LLM GitHub repository. Accessed Sep-tember 2026. [22] NVIDIA. 2026. Dynamo. https://github.com/ai-dynamo/dynamo. https://github. com/ai-dynamo/dynamo Version 1.4.0; router design. Accessed September 16, 2026. [23] OpenAI. 2025. Codex. https://github.com/openai/codex. https://github.com/ openai/codex Official GitHub repository. Accessed September 16, 2026. [24] OpenAI. 2026. GPT-6 Astra System Card. Technical report. https:// deploymentsafety.openai.com/gpt-6-astra [25] OpenClaw Project. 2026. OpenClaw. https://github.com/openclaw/openclaw. https://github.com/openclaw/openclaw GitHub repository. Accessed September 11, 2026. 12 PackServe: SLO-Aware Request Scheduling 
+
+[26] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM Infer-ence Using Phase Splitting. In 2024 ACM/IEEE 51st Annual International Sympo-sium on Computer Architecture (ISCA) . doi:10.1109/ISCA59077.2024.00019 [27] Ruoyu Qin, Weiran He, Yaoyu Wang, Zheming Li, Xinran Xu, Yongwei Wu, Weimin Zheng, and Mingxing Zhang. 2026. Prefill-as-a-Service: KVCache of Next-Generation Models Could Go Cross-Datacenter. arXiv preprint arXiv:2604.15039. doi:10.48550/arXiv.2604.15039 [28] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: Trading More Storage for Less Computation—A KVCache-Centric Architecture for Serving LLM Chatbot. In 23rd USENIX Conference on File and Storage Technologies (FAST 25) . USENIX Association, Santa Clara, CA, 155–170. https://www.usenix.org/ conference/fast25/presentation/qin [29] Shi Qiu, Yifan Hu, Xintao Wang, Wenhao Zhu, Jianqin Yan, Hao Chen, Kaiqiang Xu, Kai Chen, and Yiming Zhang. 2026. Tutti: Making SSD-Backed KV Cache Practical for Long-Context LLM Serving. arXiv preprint arXiv:2605.03375. doi:10. 48550/arXiv.2605.03375 [30] Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Eric Hambro, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. 2023. Toolformer: Language Models Can Teach Themselves to Use Tools. In Advances in Neural Information Processing Systems (NeurIPS 2023) , Vol. 36. https://proceedings.neurips.cc/paper/2023/hash/ d842425e4bf79ba039352da0f658a906-Abstract-Conference.html [31] Ying Sheng, Shiyi Cao, Dacheng Li, Banghua Zhu, Zhuohan Li, Danyang Zhuo, Joseph E. Gonzalez, and Ion Stoica. 2024. Fairness in Serving Large Language Models. In 18th USENIX Symposium on Operating Systems Design and Imple-mentation (OSDI 24) . USENIX Association, 965–988. https://www.usenix.org/ conference/osdi24/presentation/sheng [32] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, and Yiying Zhang. 2025. Preble: Efficient Distributed Prompt Scheduling for LLM Serving. In International Conference on Learning Representa-tions (ICLR) . https://proceedings.iclr.cc/paper_files/paper/2025/hash/ 5bc342f48de8264779952fac378f96dc-Abstract-Conference.html [33] Biao Sun, Ziming Huang, Hanyu Zhao, Wencong Xiao, Xinyi Zhang, Yong Li, and Wei Lin. 2024. Llumnix: Dynamic Scheduling for Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Association, Santa Clara, CA, 173–191. https://www.usenix. org/conference/osdi24/presentation/sun-biao [34] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. Attention Is All You Need. In Advances in Neural Information Processing Systems (NIPS 2017) , Vol. 30. 5998–6008. https://papers.nips.cc/paper_files/paper/2017/hash/ 3f5ee243547dee91fbd053c1c4a845aa-Abstract.html [35] Jiahao Wang, Kaizhan Lin, Kaixi Zhang, Jinbo Han, Xingda Wei, Sijie Shen, Chenguang Fang, Wenyuan Yu, Rong Chen, and Haibo Chen. 2026. SMetric: Rethink LLM Scheduling for Serving Agents with Balanced Session-Centric Scheduling. arXiv preprint arXiv:2607.08565v1. https://arxiv.org/abs/2607. 08565v1 Original session-centric policy, version 1. [36] Wayne Winston. 1977. Optimality of the Shortest Line Discipline. Journal of Applied Probability 14, 1 (1977), 181–189. doi:10.2307/3213271 [37] Bingyang Wu, Yinmin Zhong, Zili Zhang, Shengyu Liu, Fangyue Liu, Yuanhang Sun, Gang Huang, Xuanzhe Liu, and Xin Jin. 2026. FastServe: Iteration-Level Preemptive Scheduling for Large Language Model Inference. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . USENIX Association, 57–74. https://www.usenix.org/conference/nsdi26/presentation/ wu-bingyang [38] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Awadal-lah, Ryen W. White, Doug Burger, and Chi Wang. 2024. AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Conversations. In 
+
+Conference on Language Modeling (COLM) . https://openreview.net/pdf/ db83d7ffc58f8ea86ddd2bcc9314d43c2bdaa911.pdf [39] John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. 2024. SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering. In 
+
+Advances in Neural Information Processing Systems (NeurIPS 2024) ,Vol. 37. https://proceedings.neurips.cc/paper_files/paper/2024/hash/ 5a7c947568c1b1328ccc5230172e1e7c-Abstract-Conference.html [40] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2023. ReAct: Synergizing Reasoning and Acting in Language Models. In International Conference on Learning Representations (ICLR) . https: //arxiv.org/abs/2210.03629 [41] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In 16th USENIX Symposium on Operating Systems Design and Implementation (OSDI 22) . USENIX Association, Carlsbad, CA, 521–538. https://www.usenix.org/conference/osdi22/presentation/yu [42] Lingfan Yu, Jinkun Lin, and Jinyang Li. 2025. Stateful Large Language Model Serving with Pensieve. In Proceedings of the Twentieth European Conference on Computer Systems (EuroSys ’25) . doi:10.1145/3689031.3696086 [43] Ying Yuan, Pengfei Zuo, Bo Wang, Zhangyu Chen, Zhipeng Tan, and Zhou Yu. 2026. DualMap: Enabling Both Cache Affinity and Load Balancing for Distributed LLM Serving. arXiv preprint arXiv:2602.06502. https://arxiv.org/abs/2602.06502 [44] Dingyan Zhang, Jinbo Han, Kaixi Zhang, Xingda Wei, Sijie Shen, Chenguang Fang, Wenyuan Yu, Jingren Zhou, and Rong Chen. 2026. Simple Is Better: Mul-tiplication May Be All You Need for LLM Request Scheduling. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI 26) . USENIX Association, Seattle, WA, 55–73. https://www.usenix.org/conference/osdi26/ presentation/zhang-dingyan [45] Wei Zhang, Zhiyu Wu, Yi Mu, Rui Ning, Banruo Liu, Nikhil Sarda, Myungjin Lee, and Fan Lai. 2026. JITServe: SLO-aware LLM Serving with Imprecise Request Information. In 23rd USENIX Symposium on Networked Systems De-sign and Implementation (NSDI 26) . USENIX Association, 825–848. https: //www.usenix.org/conference/nsdi26/presentation/zhang-wei [46] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. In Advances in Neural Information Processing Systems (NeurIPS 2024) , Vol. 37. doi:10.52202/079017-2000 [47] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-Optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . USENIX Associa-tion, Santa Clara, CA, 193–210. https://www.usenix.org/conference/osdi24/ presentation/zhong-yinmin [48] Kan Zhu, Mathew Jacob, Chenxi Ma, Yi Pan, Stephanie Wang, Arvind Krish-namurthy, and Baris Kasikci. 2026. TraceLab: Characterizing Coding Agent Workloads for LLM Serving. arXiv preprint arXiv:2606.30560. https://arxiv.org/ abs/2606.30560 [49] Kan Zhu, Haiyang Shi, Le Xu, Jiaxin Shan, Arvind Krishnamurthy, Baris Kasikci, and Liguang Xie. 2025. PolyServe: Efficient Multi-SLO Serving at Scale. arXiv preprint arXiv:2507.17769. https://arxiv.org/abs/2507.17769 13

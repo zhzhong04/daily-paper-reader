@@ -1,0 +1,594 @@
+Title: CacheReforge: Bounded Recovery for Stale KV Caches under Evolving Adapters
+
+URL Source: https://arxiv.org/pdf/2609.30884v1
+
+Published Time: Mon, 28 Sep 2026 00:51:24 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# CacheReforge: 
+
+# Bounded Recovery for Stale KV Caches under Evolving Adapters 
+
+## Yuhang Cao † Yanzhou Mu † 
+
+> caoyuhang@smail.nju.edu.cn 602022320006@smail.nju.edu.cn
+
+## Chunrong Fang * Zhenyu Chen * 
+
+> fangchunrong@nju.edu.cn zychen@nju.edu.cn
+
+## Nanjing University  
+
+> †Equal contribution *Corresponding authors
+
+# Abstract 
+
+Large language models rely on KV caching to reduce repeated prefill computation in long context and interactive applications. As lightweight adapters evolve, cached states reflect earlier versions, so stale reuse distorts current model outputs, while complete affected suffix recomputation restores fidelity at substantial cost. We seek minimal recomputation that recovers current adapter behavior. Existing systems track token, context, or stable adapter identity, but neither represent caches from earlier adapter versions nor distinguish update propagation from the recomputation required for behavioral recovery. To address these gaps, we introduce CacheReforge, which represents stale KV caches as layerwise mixed-version objects. It combines per-layer adapter anchors, calibrated sen-sitivity, accumulated drift, and executable restart boundaries to select direct reuse, bounded recomputation, or complete affected-suffix recovery. We distinguish dependency depth from the functional recomputation horizon and use cumu-lative tail influence to characterize when bounded recovery preserves current-model behavior. We evaluate CacheRe-forge on Qwen2.5-1.5B and Qwen2.5-7B with continual LoRA updates, including 16K HotpotQA and 2WikiMQA workloads. CacheReforge reduces mean KL divergence by 92 .4% relative to stale reuse, while recomputing only 5 .44% of layers and reducing cache-maintenance time by 93 .2% rela-tive to fresh full prefill. These results show that version-aware recovery preserves model fidelity and most KV caching gains. 
+
+# Introduction 
+
+Large language models (LLMs) are increasingly deployed in real-world applications, such as knowledge-intensive question answering and code generation 4;14;16 . These applications expose models to evolving knowledge, user preferences, and interaction patterns, creating a growing need for continual adaptation after deployment. Parameter-efficient methods such as LoRA make this process practical by freezing the base model and updating a lightweight adapter 9. In LLM test-time training and related online adaptation settings, incoming data can trigger successive updates to the same adapter 20 . We call this process adapter evolution .However, continual adaptation conflicts with efficient long-context inference. KV caching reduces repeated prefix com-putation by reusing stored key and value states 13;17;21 , and systems such as Prompt Cache and SGLang build on this mechanism 6;28 . These systems assume consistent model pa-rameters across cache creation and reuse, but adapter evolution breaks this assumption. An earlier adapter version may pro-duce a stale KV cache that no longer matches current-model inference, even for the same prefix. Direct reuse preserves computation but may distort outputs, while recomputing the complete affected suffix restores fidelity but reduces caching gains. The resulting challenge is to recover current adapter be-havior with minimal recomputation despite condition-specific invalidation and downstream dependencies. Solving this cache recovery problem requires version-aware validity tracking and fine-grained recomputation, yet existing research leaves two key gaps. Version-blind validity. Cur-rent KV caching and adapter-serving systems judge cache validity from token and context identity or stable adapter identities 6;26;28 . They cannot represent a cache produced by an earlier version of the same evolving adapter, even when the token prefix remains unchanged. Coarse recovery. Existing policies either reuse the stale cache or recompute the complete affected suffix. They therefore cannot distinguish how far an update propagates from how far recomputation must proceed to restore current-model behavior. To close these gaps, we introduce CacheReforge, a version-aware recovery framework for continually evolving adapters. It represents a partially refreshed KV cache as a layerwise mixed-version object and records the producing adapter state for each layer, enabling precise validity tracking across suc-cessive updates. After each update, CacheReforge locates the earliest executable restart layer, combines calibrated layer sensitivity with accumulated adapter drift, and selects direct reuse, bounded recomputation, or complete affected-suffix recovery. It refreshes only the required contiguous range, updates the corresponding layer anchors, and preserves the 1arXiv:2609.30884v1 [cs.LG] 25 Sep 2026 historical identities of unrecomputed states. We further distin-guish dependency depth from the functional recomputation horizon and use cumulative tail influence to derive KL and top-1 guarantees and guide the runtime risk proxy. This de-sign jointly provides version-aware cache representation and adaptive recovery granularity. We evaluate CacheReforge through controlled and real-istic experiments on Qwen2.5-1.5B and Qwen2.5-7B. We freeze the base model, continually update a rank-8 LoRA adapter, and use 4K and 16K controlled workloads together with 16K HotpotQA and 2WikiMQA evaluations. 
+
+• RQ1: Does adapter evolution make stale KV caches unsafe? We compare stale reuse with fresh recomputation across adapter versions, update targets, and layer positions. Output divergence and losses in task quality generally increase with the version gap, and stale reuse can erase most gains from adaptation. These results establish stale-cache recovery as a necessary systems problem. 
+
+• RQ2: How much recomputation does recovery require? 
+
+We evaluate candidate recovery windows across 72 update profiles and identify the first window that satisfies distribu-tional, prediction, and task-level quality criteria. Direct reuse succeeds in 37 profiles, bounded recovery succeeds in 18, and 17 require the complete affected suffix. Recovery therefore de-pends on the update condition, and additional recomputation does not always improve fidelity. 
+
+• RQ3: What determines the recovery boundary? We analyze how update-induced errors propagate and compare cumulative stale-suffix signals with boundary-only measure-ments. Cumulative suffix error correlates more strongly with window KL, reaching Spearman correlations of 0 .873 overall and 0 .690 within conditions. This result supports cumulative tail influence as the basis for layerwise recovery risk. 
+
+• RQ4: Does drift-sensitive recovery improve efficiency and fidelity? We evaluate consecutive adapter updates over 96 held-out trajectories and compare CacheReforge with fresh full recomputation, exact affected-suffix recovery, stale reuse, and two policy ablations. CacheReforge reduces mean KL by 92 .4% relative to stale reuse while recomput-ing 5 .44% of layers and reducing cache-maintenance time by 93 .2% relative to fresh full prefill. These results show that layerwise drift sensitivity and adaptive range selection recover most current-model fidelity at substantially lower cost. Overall, our work makes three main contributions: 
+
+• Problem Formulation and Theory. We formulate stale KV cache recovery under evolving adapters and represent partially refreshed caches as layerwise mixed-version states. We distinguish dependency depth from the func-tional recomputation horizon, define cumulative tail influence, and derive sufficient conditions for next-token KL and top-1 consistency. 
+
+• Version-Aware Recovery. We develop CacheReforge, which combines module-aware restart points, per-layer adapter anchors, calibrated sensitivity, and accumulated 
+
+Figure 1: Overview of Cache Recovery under Adapter Evolution. drift to select direct reuse, bounded recomputation, or complete affected-suffix recovery. 
+
+• Empirical Evaluation. We evaluate Qwen2.5 models across update conditions and continual adapter trajecto-ries. The results reveal three recovery outcomes, validate cumulative suffix influence as a stronger predictor than boundary error, and show that CacheReforge preserves model fidelity with substantially lower recomputation and maintenance cost. 
+
+# Background and Problem Formulation 
+
+In this section, we first introduce KV caching under adapter evolution, explaining why a KV cache for an unchanged prefix becomes version-dependent when the same inference-time adapter evolves: although the tokens remain fixed, the stored states were produced by an earlier model. We then formalize the cache recovery problem, defining recovery as finding the shortest executable layer range that restores behavior relative to fresh prefill under the current adapter. This formulation distinguishes full-prefill, exact affected-suffix, and bounded recomputation, and exposes the central question of whether the complete affected suffix is functionally necessary. Figure 1 previews KV caching under adapter evolution and the cache recovery problem. 
+
+## KV Caching under Adapter Evolution 
+
+KV caching stores the key and value states produced by Trans-former self-attention during prefix processing and reuses them during subsequent decoding, avoiding repeated prefill com-putation 13;17;21 . This mechanism is particularly valuable for long contexts and repeated prefixes, including shared system prompts, multi-turn conversations, and repeated generation from the same context. Prompt Cache organizes reusable prefix states into modular components, while SGLang reuses shared prefixes across structured generation calls 6;28 .2Under adapter evolution, a system may retain a long-prefix KV cache across successive adapter updates to avoid pro-cessing the same prefix again. However, the retained cache was generated by an earlier adapter version, whereas current inference uses the updated adapter. The cache is therefore no longer guaranteed to represent the current model state. 
+
+## Cache Recovery Problem 
+
+The preceding setting leaves the retained cache tied to an earlier adapter version. We now formalize when such a cache becomes stale and what its recovery must achieve. Consider a prefix 𝑥 1: 𝑛 . Prefill by a Transformer with 𝑁 layers indexed 0, . . . , 𝑁 − 1 under adapter version 𝑣 𝑡 produces the layerwise KV cache 
+
+C (𝑡 ) (𝑥 1: 𝑛 ) =
+
+n
+
+𝐾 (𝑡 ) 
+
+> ℓ
+
+, 𝑉 (𝑡 )
+
+> ℓ
+
+o𝑁 −1 
+
+> ℓ=0
+
+. (1) The superscript emphasizes that cache validity depends on both the token prefix and the adapter version that produced it. If the current adapter has advanced to 𝑣 𝑡 +Δ while the stored cache remains C (𝑡 ) , we call it a stale KV cache with version gap Δ. Reusing this cache avoids prefill computation, but the resulting inference may deviate from fresh recomputation under 𝑣 𝑡 +Δ, which serves as our reference behavior. Directly correcting historical K/V states from the adapter update is generally insufficient because downstream states also depend on update-altered hidden representations. Accurately reconstructing these effects would largely repeat the affected forward computation and erase the intended computational advantage, so we focus on recomputation-based recovery. The cache-recovery problem is therefore to determine the minimum executable recomputation needed to recover current-model behavior. Throughout, fresh full-prefill recomputation reruns all 𝑁 
+
+layers, exact affected-suffix recomputation reruns from the executable restart layer through layer 𝑁 − 1, and bounded recovery stops before that endpoint. The remaining question is whether recovering fresh-model behavior always requires the complete affected suffix or can be achieved with a shorter executable range. 
+
+# Theoretical Analysis 
+
+This section asks how much of an affected cache must be recomputed after an adapter update. Exact dependency alone cannot answer this question: an update may reach every downstream state even when the remaining stale suffix has lit-tle output effect. We therefore define tail influence to measure this residual effect and separate dependency depth from the recomputation horizon. We then derive KL and top-1 guaran-tees from the same quantity. These offline guarantees establish when bounded recovery can preserve fresh-model behavior and motivate the empirical runtime policy developed next. 
+
+## Tail Influence 
+
+We estimate tail influence through an offline sequence of hybrid executions. Let 𝑧 ★ be the first-step next-token logits from fresh recomputation under the current adapter. For a boundary 𝑏 , let 𝑧 (𝑏 ) use refreshed cache states before layer 
+
+𝑏 and historical states at layers 𝑏, . . . , 𝑁 − 1. The endpoint 
+
+𝑧 ( 𝑁 ) = 𝑧 ★ replaces the entire stale suffix. Moving the boundary from ℓ to ℓ + 1 isolates the out-put change caused by refreshing one additional cache layer. We denote this incremental influence by 𝑣 ℓ and define the cumulative tail influence after boundary 𝑏 as 
+
+𝑣 ℓ = 𝑧 (ℓ ) − 𝑧 (ℓ+1) , 𝑇 𝑏 = 
+
+> 𝑁 −1
+
+∑︁ 
+
+> ℓ=𝑏
+
+∥𝑣 ℓ ∥2. (2) 
+
+𝑇 𝑏 measures the total unresolved influence of the cache states that remain stale. It is intentionally cumulative: a small error at the restart boundary does not guarantee that later stale layers are harmless, while several individually visible effects may partially cancel at the output. Because 𝑇 𝑏 sums influence magnitudes, it forms a monotone conservative envelope: it does not itself identify local reversals, which depend on the directions of the underlying 𝑣 ℓ . The quantity also does not assume that perturbations shrink monotonically through the network. It only asks whether the remaining stale suffix has enough aggregate output influence to matter. This view separates two notions that are otherwise easy to conflate. The dependency depth describes how far an update can propagate in the exact computation graph. The recompu-tation horizon describes how far recomputation must proceed before the unresolved tail becomes functionally negligible. For condition 𝑐 with restart 𝑟 (𝑐 ), let 𝑝 𝑐,ℎ and 𝑝 ★𝑐 denote the distributions after recomputing ℎ layers and under fresh recomputation. For discrepancy D and tolerance 𝜖 , define 
+
+𝐻 𝜖 (𝑐 ) = min     
+
+> 0≤ℎ≤𝑁 −𝑟 (𝑐 )
+
+{ℎ : E𝑥 [D ( 𝑝 ★𝑐 , 𝑝 𝑐,ℎ )] ≤ 𝜖 }. (3) This first-hit definition does not assume that recovery error decreases monotonically with ℎ; a larger window may still exhibit a local reversal. Thus 𝐻 𝜖 (𝑐 ) may be zero, bounded before the suffix endpoint, or equal to the complete executable suffix. Dependency depth may cover the complete downstream network even when this horizon is much shorter. 
+
+## Functional Guarantees 
+
+We next translate tail influence into sufficient conditions for distributional and prediction consistency. Let 𝑝 (𝑏 ) =
+
+softmax (𝑧 (𝑏 ) ) and 𝑝 ★ = softmax (𝑧 ★) be the corresponding next-token distributions. The hybrid logits admit a telescoping decomposition, and the smoothness of log-sum-exp converts the remaining logit influence into a conservative distributional guarantee: 
+
+𝐷 KL 
+
+
+
+𝑝 ★∥ 𝑝 (𝑏 ) 
+
+≤ 14𝑇 2 
+
+> 𝑏
+
+. (4) The bound directly characterizes the recomputation horizon. For a KL tolerance 𝜖 , any executable recovery boundary with 3𝑇 𝑏 ≤ 2√𝜖 guarantees next-token KL within that tolerance. This sufficient condition does not imply monotonic observed KL, because layerwise effects may reinforce or cancel. Distributional similarity does not by itself state whether the next-token prediction is unchanged. Let 𝛾 ★ be the margin between the largest and second-largest fresh logits. The fresh top-1 prediction is preserved whenever the remaining tail is smaller than half of this margin: 
+
+𝑇 𝑏 < 𝛾 ★
+
+2 =⇒ arg max  
+
+> 𝑖
+
+𝑧 (𝑏 ) 
+
+> 𝑖
+
+= arg max  
+
+> 𝑖
+
+𝑧 ★𝑖 . (5) A large fresh margin can therefore tolerate more residual cache influence, whereas a low-margin decision may require a longer recovery window even under the same adapter update. This helps explain why recovery behavior depends not only on the updated module, layer, magnitude, and version gap, but also on the input and the model’s current decision geometry. Together, these conditions characterize when direct reuse or bounded recovery is sufficient, and when complete affected-suffix recomputation remains necessary. Exact 𝑇 𝑏 requires counterfactual hybrid executions and is therefore an offline analysis quantity rather than a deployable runtime certificate. The next section introduces the empirical runtime policy derived from this analysis. Detailed dependency derivations and proofs appear in the supplementary material. 
+
+# Methodology 
+
+CacheReforge recovers stale KV caches as the same adapter evolves. Given an adapter update, it locates the first exe-cutable restart layer, estimates layerwise cache risk, and selects a contiguous recovery range. Each cached layer stores a per-layer adapter anchor, making its validity depend on the model state that produced it rather than on token and context identity alone. Independently updating these anchors tracks the mixed-version cache created by repeated partial recovery. Offline-calibrated layer sensitivities then combine with runtime adapter drift to distinguish direct reuse, bounded recovery, and full affected-suffix recomputation. The selected range is executed from the restart layer using retained bound-ary states, after which its K/V states and adapter anchors are refreshed. Figure 2 summarizes this workflow. 
+
+## Layerwise Risk 
+
+Offline calibration. For each fixed deployment configuration, a disjoint calibration split provides trajectories. For condition 
+
+𝑖 with restart layer 𝑟 𝑖 , we evaluate H𝑖 = {min (ℎ, 𝑁 − 𝑟 𝑖 ) :
+
+ℎ ∈ { 0, 1, 2, 4, 8, 16 }} ∪ { 𝑁 − 𝑟 𝑖 }. Here, ℎ = 0 denotes direct reuse, positive ℎ recomputes that many contiguous layers from 𝑟 𝑖 , and 𝑁 − 𝑟 𝑖 is the complete affected suffix. Relative to fresh full-prefill recomputation under the current adapter, a candidate is safe when first-step next-token KL is at most 0 .05, top-1 agreement is at least 0 .99, and full-answer task-score drop is at most 0 .01. The first safe window, 
+
+ℎ★𝑖 = min {ℎ ∈ H 𝑖 : 𝑆 𝑖 (ℎ) = 1}, is an empirical calibration target; larger evaluated windows need not remain safe. The selected window induces the per-layer binary calibra-tion label 
+
+𝑦 𝑖,ℓ = I[𝑟 𝑖 ≤ ℓ < 𝑟 𝑖 + ℎ★𝑖 ], (6) which indicates whether layer ℓ lies in the empirically selected range under the observed adapter displacement. Let 𝑑 𝑖 be the measured ℓ2 distance between the active adapter and the adapter state associated with the stale calibration cache. For each layer, form D+ 
+
+> ℓ
+
+= {𝑑 𝑖 : 𝑦 𝑖,ℓ = 1} of size 𝑛 ℓ , and let 
+
+𝑑 ℓ, (𝑘 ) denote its 𝑘 th order statistic. For 𝑛 ℓ > 0, the frozen code sets 𝛿 ℓ = max {𝑑 ℓ, ( ⌊ 0.05 𝑛 ℓ ⌋+ 1) , 10 −12 }, the first value after the allowed 5% lower tail. The sensitivity is 
+
+𝑠 ℓ =
+
+(
+
+1/𝛿 ℓ , D+ 
+
+> ℓ
+
+≠ ∅,
+
+0, D+ 
+
+> ℓ
+
+= ∅. (7) Thus, layers included in selected ranges after small parameter changes receive larger sensitivities. Indexed by model, update target, adapter configuration, context regime, and workload, the resulting profile is frozen before held-out evaluation. 
+
+Runtime risk and range selection. A cache may mix layers refreshed at different adapter versions, so CacheReforge maintains a separate adapter anchor 𝜃 anchor  
+
+> ℓ
+
+for each cached layer. After the adapter changes to 𝜃 𝑡 , layer ℓ has displacement and calibrated risk 
+
+𝑑 ℓ (𝑡 ) = 𝜃 𝑡 − 𝜃 anchor   
+
+> ℓ2
+
+, 𝑞 ℓ (𝑡 ) = 𝑠 ℓ 𝑑 ℓ (𝑡 ). (8) A layer is triggered when 𝑞 ℓ (𝑡 ) ≥ 1. Unlike version age, this risk uses the actual parameter displacement from the state that produced the layer’s current cache; consecutive updates can therefore accumulate risk at different rates, while partial cancellation can reduce it. If no layer is triggered, CacheReforge directly reuses the cache; otherwise, it chooses 
+
+𝑏 𝑡 = 1 + max {ℓ : 𝑞 ℓ (𝑡 ) ≥ 1} (9) and recomputes the minimal executable contiguous range 
+
+[𝑟, 𝑏 𝑡 ). For an update at layer 𝑠 , key or value updates can directly invalidate layer 𝑠 ; query, output, and MLP updates first affect the cache at 𝑠 + 1, although recovery still restarts from 𝑠 whenever downstream states are affected. The furthest layer whose calibrated drift risk crosses the threshold sets the endpoint: 𝑏 𝑡 = 𝑁 is an exact affected-suffix restart; otherwise, recovery is bounded. 
+
+## Bounded Recovery 
+
+Executable restart. During the original prefill, CacheRe-forge retains the hidden state at supported restart boundaries in addition to the KV cache. To execute a recovery window, it supplies the stored boundary state before layer 𝑟 to the de-coder under the current adapter, processes the complete prefix through layers 𝑟 to 𝑏 𝑡 − 1, and overwrites the K/V entries produced by those layers. Layers before 𝑟 are unaffected by the update and remain unchanged; layers from 𝑏 𝑡 onward retain their historical cache states. The normalized recomputation fraction is therefore (𝑏 𝑡 − 𝑟 )/ 𝑁 .4Figure 2: Overview of CacheReforge workflow. 
+
+Cache and anchor updates. After refreshing [𝑟, 𝑏 𝑡 ), the system sets 𝜃 anchor  
+
+> ℓ
+
+← 𝜃 𝑡 only for layers inside that range. Each layer’s anchor changes only when that layer is recomputed, so the runtime risk vector evolves with the mixed-version cache itself. Unrecomputed layers retain their older anchors and continue to accumulate displacement relative to the adapter state that generated their cached K/V tensors. The cache preserves per-layer version and anchor metadata, so bounded recovery is not relabeled as fully current while its unrecomputed tail remains historical. All refreshed states are produced by ordinary decoder execution under the active adapter; the method performs no post-hoc tensor correction or access to fresh-reference states. This makes the runtime decision inexpensive while retaining the layerwise structure revealed by the recomputation-horizon analysis. 
+
+# Experiments 
+
+We conduct this study by investigating the following research questions. RQ1: Does adapter evolution make stale KV caches unsafe? We first establish whether previously com-puted KV states become meaningfully inconsistent with the current model. RQ2: What recovery outcomes arise, and how much recomputation do they require? We then measure the empirical recomputation horizon across update conditions, distinguishing safe direct reuse, bounded recomputation, and full affected-suffix recomputation. RQ3: What determines the recovery boundary? Because the required range varies across updates, we test whether cumulative unresolved-suffix proxies motivated by tail influence predict this variation. 
+
+RQ4: Does drift-sensitive recovery improve the quality– cost trade-off? Finally, we use the resulting signal to guide recovery over consecutive updates and evaluate its end-to-end practical value. 
+
+## Experimental Setup 
+
+Models. We use Qwen2.5-1.5B-Instruct for dense mecha-nism analysis and Qwen2.5-7B-Instruct for realistic valida-tion 18 . Qwen2.5 is a widely used decoder-only Transformer with standard KV caching, making it a practical testbed for controlled stale-cache analysis. 
+
+Datasets. Our controlled studies use 4K multi-hop tracing and 16K variable-tracking workloads. Realistic evaluation uses the HotpotQA 25 and 2WikiMQA 8 subsets of Long-Bench 1 at 16K context. 
+
+Implementation. We freeze the base model and evolve a rank-8 LoRA adapter through answer-supervised updates, us-ing bfloat16 arithmetic throughout. Fresh full-prefill recompu-tation under the active adapter defines reference behavior. We 5provide the implementation, experiment configurations, and complete result artifacts in the accompanying reproducibility package. 
+
+## RQ1: Adapter Evolution Makes Stale KV Caches Unsafe 
+
+Design. To quantify whether adapter evolution makes cached states unsafe, we compare stale reuse with fresh recompu-tation on Qwen2.5-7B at version gaps {0, 1, 2, 4, 8, 16 , 32 }
+
+over three paired seeds. Controlled runs use normalized up-date magnitude 10 −3, vary the updated projection and layer position, and contain 64 samples per seed. HotpotQA and 2WikiMQA use value-projection updates at magnitude 10 −2
+
+and 32 samples per seed. We measure first-step next-token KL and full-answer task score. 
+
+Results. Figure 3 compares stale reuse with fresh recom-putation. On the controlled workload, mean KL rises from 0.0198 after one update to 0 .0749 at version gap 32. The lower panel reports task-score changes from each pre-update base-line. At gap 32, fresh recomputation improves the controlled score from 53 .84% to 58 .79%, whereas stale reuse reaches only 54 .75%, erasing 4 .04 of the 4 .95-point adaptation gain. Despite small-gap fluctuations, the long-gap separation is clear. Sensitivity also depends strongly on the updated module: averaged over all tested gaps, value and joint query–value updates produce the largest KL divergences (0 .0754 and 0.0672) and task-score losses (3 .39 and 2 .86 points), respec-tively. Updates near or outside the cache-sensitive path can have negligible cache-induced error, confirming that version mismatch alone does not determine severity. The realistic QA tasks exhibit the same failure more sharply. KL remains below 0 .007 through gap 4 but rises to 3 .753 on HotpotQA and 5 .401 on 2WikiMQA at gap 32. At that gap, fresh recomputation improves token-F1 from 7 .07% to 16 .36% and from 9 .07% to 12 .80%, whereas stale reuse yields only 7 .01% and 8 .67%, respectively. 
+
+Finding 1. Adapter evolution can invalidate historical KV states, and direct stale reuse can erase most adaptation gains, especially as the version gap grows. 
+
+## RQ2: Recovery Has Three Distinct Outcomes 
+
+Design. We measure empirical recomputation horizons on Qwen2.5-1.5B across eight target–position combinations, version gaps {1, 4, 16 }, three seeds, and windows of 1, 2, 4, 8, 16, and the complete affected suffix, yielding 72 profiles of 16 paired samples. After testing ℎ = 0, we select the smallest positive executable window with aggregate KL ≤ 0.05, top-1 agreement ≥ 0.99, task-score drop ≤ 0.01, and no paired sample violating any threshold. This first-hit statistic does not assume monotonic safety. Complete suffixes contain 28, 14, and 1 layer for early, middle, and late updates, respectively. 
+
+Results. Figure 4 shows three outcomes. Direct reuse is safe for 37 of 72 profiles (51 .4%). Among the 35 stale-unsafe profiles, 18 (51 .4%) recover before the affected-suffix end and 0 1 2 4 8 16 32 0.0 1.0 2.0 3.0 4.0 5.0 0.00 0.02 0.04 0.06 0.08 0 1 2 4 8 16 32 0246810 
+
+> HotpotQA 2WikiMQA Controlled
+> Fresh · HotpotQA Fresh · 2WikiMQA Fresh · Controlled Stale · HotpotQA Stale · 2WikiMQA Stale · Controlled
+> Adapter-version gap Adapter-version gap KL from fresh (real QA) Controlled KL Task-score change (pp)
+> (a) Output divergence (b) Task performance
+
+Figure 3: Adapter evolution and stale-KV mismatch on Qwen2.5-7B. Top: KL divergence between stale reuse and fresh recomputation. Bottom: task-score change from each workload’s pre-update baseline. 0 1 4 8 16 28 0% 20% 40% 60% 80% 100% 
+
+> Minimum safe executed window (layers) Profiles with horizon ≤ h
+> 51.4%
+> h = 0
+> 75.0%
+> ≤ 8 layers
+> 83.3%
+> ≤ 16 layers
+> 35 stale-unsafe
+> 18 bounded · 17 full suffix
+
+Figure 4: Empirical recomputation horizons. 17 (48 .6%) require the full suffix: twelve 28-layer early, three 14-layer middle, and two one-layer late-key profiles. Positive bounded horizons span 1–16 executed layers. These results also confirm the module-dependent invali-dation onset detailed in the supplement. For query and MLP updates, one-layer execution repairs no affected KV state and exactly matches stale reuse across all 288 query and 432 MLP rows; positive one-layer recovery occurs only for key or value updates. Outcomes remain condition-dependent: six of nine early-key profiles admit bounded positive recovery, five of nine early-MLP profiles require the full suffix, and middle-query profiles split into one no-recovery, six bounded, and two full-suffix cases. Full-suffix recovery occurs in eight of 24 profiles at gap 16, versus five at gap 1 and four at gap 4. Moreover, 50 of 72 profiles contain a local KL reversal as the window grows. 
+
+Finding 2. Recovery has three condition-dependent em-pirical outcomes: direct reuse, a bounded first acceptable window, or the full affected suffix; larger windows do not guarantee improvement. 60 4 8 12 16 20 24 27 0.000 0.005 0.010 0.015 0.020 0.025 0.030 K early · H 50 = 1 V early · H 50 = 4 MLP early · H 50 = 28 
+
+> Downstream layer distance Hidden-state relative error  Late amplification
+
+Figure 5: Hidden-state propagation after early-layer updates. 
+
+## RQ3: Tail-Influence Proxies Predict Recovery 
+
+Design. To identify what determines the recovery boundary, we compare window KL with layerwise drift, cumulative stale-suffix error, boundary error, and final suffix-attention input error across the 72 RQ2 profiles. 
+
+Results. The propagation measurements do not support a universal attenuation law. Across the 72 frozen profiles, hidden-state drift often remains small through much of the network and reaches its maximum near the final layers; the automatic profile analysis classifies every condition as late amplification. Figure 5 shows mean trajectories for three early-layer update targets, averaged over three seeds and three version gaps; 𝐻 50 denotes the median safe horizon. Early value updates produce the largest peak drift, whereas early key updates remain lower despite sharing the same dependency depth. Propagation proxies motivated by the tail-influence view are more predictive than a single boundary measurement. For every positive window, we join its remaining stale suffix with the W2 layerwise propagation trace. The sum of hidden-state errors over that suffix has Spearman correlation 0 .873 with window KL overall and 0 .690 after rank-centering within each seed–target–gap condition. The corresponding single boundary error reaches only 0 .666 overall and 0 .320 within condition. Key- and value-tail sums show the same within-condition correlation of 0 .690. W3 provides an independent check closer to the output path. The final unrepaired suffix-attention input error, an internal-state proxy rather than the output-space 𝑇 𝑏 in Equation 2, correlates with KL at 0 .892 overall and 0 .620 within condition. A log–log model with seed, update target, and version gap removed as fixed effects gives 
+
+𝐷 KL ∝ 𝐸 2.14 tail , 𝑅 2within = 0.115 . (10) The near-quadratic exponent is qualitatively aligned with the bound’s quadratic dependence, but it does not directly verify Equation 4 because 𝐸 tail is a proxy rather than 𝑇 𝑏 . The offline proxy is not a runtime certificate. 
+
+Finding 3. Cumulative unresolved-suffix influence proxies predict recovery better than a boundary measurement, motivating a layerwise risk proxy. 
+
+## RQ4: Drift-Sensitive Recovery Improves the Quality–Cost Trade-off 
+
+Design. To assess the practical quality–cost trade-off, we eval-uate recovery over 32 consecutive middle value-projection updates of magnitude 10 −2 on Qwen2.5-7B. Two calibration seeds use eight samples per task, and three disjoint evaluation seeds use 16, totaling 96 trajectories and 3,072 cache decisions per method. We compare fresh full, exact affected suffix, stale reuse, CacheReforge, and two policy ablations on HotpotQA and 2WikiMQA. Drift-only removes layerwise sensitivity and applies one calibration-frozen drift threshold to all affected layers. Fixed-window refreshes the same two-layer window after every update, giving a slightly larger average recompu-tation budget than CacheReforge. All methods observe the same updates and held-out requests. CacheReforge updates only the layer anchors covered by each recovery action; no policy accesses fresh logits or hidden states at runtime. 
+
+Results. Table 1 shows that exact affected-suffix recom-putation matches fresh behavior at 50 .00% recomputation. CacheReforge uses 89 .1% less recomputation than this ex-act baseline, reduces mean KL by 92 .4% relative to stale reuse, raises top-1 agreement from 84 .47% to 94 .04% at 5.44% recomputation, and cuts cache-maintenance time by 93 .2% relative to full prefill. Within the shared held-out runs, these prefill-side savings reduce mean total request time from 4.16 s per update for fresh full recomputation to 2 .30 s for CacheReforge, a 44 .7% reduction. Table 2 isolates the two recovery-policy components. Re-moving layerwise sensitivity reduces fidelity, whereas the fixed window is less faithful despite its larger budget. Task-specific recomputation is 6 .25% on HotpotQA and 4 .63% on 2WikiMQA. 
+
+Finding 4. CacheReforge remains approximate, but ap-proaches fresh quality with 5 .44% mean recomputation; both layerwise sensitivity and adaptive range selection improve fidelity. 
+
+# Related Work 
+
+KV cache management and reuse. Existing systems re-duce KV cache costs through efficient allocation, reuse, move-ment, and compression. PagedAttention virtualizes cache storage; Prompt Cache and SGLang reuse prefix states across requests; LMCache extends reuse across engines and stor-age tiers; and KIVI applies low-bit quantization 5;6;13;15;28 .CacheBlend selectively refreshes cached states when sep-arately processed context chunks are composed 26 . These methods generally assume fixed model parameters and do not address invalidation caused by adapter evolution. 
+
+Adapter-aware serving. Punica and SLoRA batch requests across LoRA variants and manage adapter and cache mem-ory 3;19 . Activated LoRA preserves a base-model prefix cache by restricting adaptation to later tokens, while LRAgent and ForkKV share or copy KV states across distinct LoRA 7Method HotpotQA (%) ↑ 2WikiMQA (%) ↑ KL ↓ Recomp. (%) ↓ Maint. (s) ↓                    
+
+> Fresh full 9.41 9.40 0.0000 100.00 50.26 Exact affected suffix 9.41 9.40 0.0000 50.00 28.75 CacheReforge 9.13 9.16 0.0335 5.44 3.42 Stale reuse 7.95 9.03 0.4385 0.00 0.31
+
+Table 1: Held-out 32-version quality–maintenance-cost comparison on HotpotQA and 2WikiMQA.                
+
+> Method KL ↓Top-1 (%) ↑Recomp. (%) ↓
+> CacheReforge 0.0335 94.04 5.44 Drift-only 0.0581 92.22 3.82 Fixed-window 0.2198 88.05 7.14
+
+Table 2: Recovery-policy ablations on the frozen RQ4 trajec-tories. agents 7;11;24 . These approaches serve stable adapter identities or preserve a stable shared cache component, rather than recover caches after repeated updates to the same adapter. 
+
+Test-time adaptation and online learning. Dynamic eval-uation, test-time training, Tent, and CoTTA adapt model pa-rameters from recent or unlabeled test inputs 12;20;22;23 . Recent LLM methods use lightweight LoRA updates or problem-specific reinforcement learning during generation 10;27 . Most closely related, qTTT updates only query projections after a single prefill so that the existing KV cache remains valid 2;it therefore avoids the cache-recovery problem created by updates to cache-producing modules. 
+
+Novelty of Our Study. Overall, prior work either reuses caches under fixed parameters, serves multiple stable adapters, or adapts models without recovering KV states affected by the update. Our study connects these previously separate concerns by treating cache validity as jointly determined by the token prefix and the evolving adapter version. It introduces a layer-wise mixed-version cache representation, distinguishes global dependency depth from the functional recomputation horizon, and characterizes recovery through cumulative tail influence. Building on this formulation, CacheReforge performs drift-sensitive bounded recomputation with an exact-suffix fallback, while our controlled and realistic evaluations establish when recovery is necessary, when it can remain bounded, and how much computation it saves relative to fresh execution. 
+
+# Conclusion 
+
+We study stale KV cache recovery under evolving parameter efficient adapters. CacheReforge combines module aware restart boundaries, calibrated sensitivity, and adapter drift to select direct reuse, bounded recomputation, or complete affected suffix recovery. Controlled and long context evaluations show that it reduces output divergence while preserving most cached computation. Its effectiveness depends on model architecture, task, update rule, tolerance, generation regime, and restart state support. 
+
+# References 
+
+[1] Yushi Bai, Xin Lv, Jiajie Zhang, Hongchang Lyu, Jiankai Tang, Zhidian Huang, Zhengxiao Du, Xiao Liu, Aohan Zeng, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. LongBench: A bilingual, multitask bench-mark for long context understanding. arXiv preprint arXiv:2308.14508 , 2024. [2] Rachit Bansal, Aston Zhang, Rishabh Tiwari, Lovish Madaan, Venkata Sai Surya Subramanyam Duvvuri, Devvrit Khatri, David Brandfonbrener, David Alvarez-Melis, Prajjwal Bhargava, Mihir Kale, and Samy Jelassi. Let’s (not) just put things in context: Test-time training for long-context LLMs. In International Conference on Learning Representations , 2026. [3] Lequn Chen, Zihao Ye, Yongji Wu, Danyang Zhuo, Luis Ceze, and Arvind Krishnamurthy. Punica: Multi-tenant LoRA serving. In Proceedings of Machine Learning and Systems , volume 6, 2024. [4] Mark Chen, Jerry Tworek, Heewoo Jun, Qiming Yuan, Henrique Ponde de Oliveira Pinto, Jared Kaplan, Harri Edwards, Yuri Burda, Nicholas Joseph, Greg Brockman, et al. Evaluating large language models trained on code. 
+
+arXiv preprint arXiv:2107.03374 , 2021. [5] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang. LMCache: An efficient KV cache layer for enterprise-scale LLM inference, 2025. [6] In Gim, Guojun Chen, Seung-seob Lee, Nikhil Sarda, Anurag Khandelwal, and Lin Zhong. Prompt cache: Modular attention reuse for low-latency inference. In 
+
+Proceedings of Machine Learning and Systems , vol-ume 6, 2024. [7] Kristjan Greenewald, Luis Lastras, Thomas Parnell, Vraj Shah, Lucian Popa, Giulio Zizzo, Chulaka Gunasekara, Ambrish Rawat, and David Cox. Activated LoRA: Fine-tuned LLMs for intrinsics. In Advances in Neural Information Processing Systems , volume 38, 2025. 8[8] Xanh Ho, Anh-Khoa Duong Nguyen, Saku Sugawara, and Akiko Aizawa. Constructing a multi-hop QA dataset for comprehensive evaluation of reasoning steps. In 
+
+Proceedings of the 28th International Conference on Computational Linguistics , pages 6609–6625, 2020. doi: 10.18653/v1/2020.coling-main.580. [9] Edward J. Hu, Yelong Shen, Phillip Wallis, Zeyuan Allen-Zhu, Yuanzhi Li, Shean Wang, Lu Wang, and Weizhu Chen. LoRA: Low-rank adaptation of large lan-guage models. In International Conference on Learning Representations , 2022. [10] Jinwu Hu, Zitian Zhang, Guohao Chen, Xutao Wen, Chao Shuai, Wei Luo, Bin Xiao, Yuanqing Li, and Mingkui Tan. Test-time learning for large language mod-els. In Proceedings of the 42nd International Conference on Machine Learning , volume 267 of Proceedings of Machine Learning Research , pages 24823–24849, 2025. [11] Hyesung Jeon, Hyeongju Ha, and Jae-Joon Kim. LRA-gent: Efficient KV cache sharing for multi-LoRA LLM agents, 2026. [12] Ben Krause, Emmanuel Kahembwe, Iain Murray, and Steve Renals. Dynamic evaluation of neural sequence models. In Proceedings of the 35th International Confer-ence on Machine Learning , volume 80 of Proceedings of Machine Learning Research , pages 2766–2775, 2018. [13] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gon-zalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles , pages 611–626, 2023. doi: 10.1145/3600006.3613165. [14] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, Se-bastian Riedel, and Douwe Kiela. Retrieval-augmented generation for knowledge-intensive NLP tasks. In Ad-vances in Neural Information Processing Systems , vol-ume 33, pages 9459–9474, 2020. [15] Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for KV cache. In Proceedings of the 41st Interna-tional Conference on Machine Learning , volume 235 of Proceedings of Machine Learning Research , pages 32332–32344, 2024. [16] Long Ouyang, Jeffrey Wu, Xu Jiang, Diogo Almeida, Carroll L. Wainwright, Pamela Mishkin, Chong Zhang, Sandhini Agarwal, Katarina Slama, Alex Ray, et al. Training language models to follow instructions with human feedback. In Advances in Neural Information Processing Systems , volume 35, pages 27730–27744, 2022. [17] Reiner Pope, Sholto Douglas, Aakanksha Chowdhery, Jacob Devlin, James Bradbury, Jonathan Heek, Kefan Xiao, Shivani Agrawal, and Jeff Dean. Efficiently scal-ing transformer inference. In Proceedings of Machine Learning and Systems , volume 5, 2023. [18] Qwen Team. Qwen2.5 technical report. arXiv preprint arXiv:2412.15115 , 2024. [19] Ying Sheng, Shiyi Cao, Dacheng Li, Coleman Hooper, Nicholas Lee, Shuo Yang, Christopher Chou, Banghua Zhu, Lianmin Zheng, Kurt Keutzer, Joseph E. Gonzalez, and Ion Stoica. SLoRA: Scalable serving of thousands of LoRA adapters. In Proceedings of Machine Learning and Systems , volume 6, 2024. [20] Yu Sun, Xiaolong Wang, Zhuang Liu, John Miller, Alexei A. Efros, and Moritz Hardt. Test-time training with self-supervision for generalization under distribu-tion shifts. In Proceedings of the 37th International Conference on Machine Learning , volume 119 of Pro-ceedings of Machine Learning Research , pages 9229– 9248, 2020. [21] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N. Gomez, Lukasz Kaiser, and Illia Polosukhin. Attention is all you need. In 
+
+Advances in Neural Information Processing Systems ,volume 30, 2017. [22] Dequan Wang, Evan Shelhamer, Shaoteng Liu, Bruno Olshausen, and Trevor Darrell. Tent: Fully test-time adaptation by entropy minimization. In International Conference on Learning Representations , 2021. [23] Qin Wang, Olga Fink, Luc Van Gool, and Dengxin Dai. Continual test-time domain adaptation. In Proceedings of the IEEE/CVF Conference on Computer Vision and Pattern Recognition , pages 7201–7211, 2022. [24] Shao Wang, Rui Ren, and Lin Gui. ForkKV: Scaling multi-LoRA agent serving via copy-on-write disaggre-gated KV cache, 2026. [25] Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William Cohen, Ruslan Salakhutdinov, and Christo-pher D. Manning. HotpotQA: A dataset for diverse, explainable multi-hop question answering. In Proceed-ings of the 2018 Conference on Empirical Methods in Natural Language Processing , pages 2369–2380, 2018. doi: 10.18653/v1/D18-1259. [26] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yi-hua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. CacheBlend: Fast large language model serving for RAG with cached knowledge fu-sion. In Proceedings of the Twentieth European Confer-ence on Computer Systems , pages 94–109, 2025. doi: 10.1145/3689031.3696098. 9[27] Mert Yuksekgonul, Daniel Koceja, Xinhao Li, Federico Bianchi, Jed McCaleb, Xiaolong Wang, Jan Kautz, Yejin Choi, James Zou, Carlos Guestrin, and Yu Sun. Learning to discover at test time. arXiv preprint arXiv:2601.16175 ,2026. [28] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Bar-rett, and Ying Sheng. SGLang: Efficient execution of structured language model programs. In Advances in Neural Information Processing Systems , volume 37, pages 62557–62583, 2024. doi: 10.52202/079017-2000. 
+
+# Supplementary Material S1 Detailed Recovery Analysis 
+
+This section gives the formal recovery definition and the proofs underlying the theoretical analysis in the main paper. To avoid ambiguity between a layer index and the number of layers, let the Transformer contain 𝑁 layers indexed 0 , . . . , 𝑁 − 1throughout this section. 
+
+## S1.1 Invalidation and Functional Recovery 
+
+Module-dependent onset. Let 𝐻 (𝑣 ) 
+
+> ℓ
+
+denote the prefix hid-den states after Transformer layer ℓ under adapter version 
+
+𝑣 , and let 𝐶 (𝑣 ) 
+
+> ℓ
+
+= (𝐾 (𝑣 ) 
+
+> ℓ
+
+, 𝑉 (𝑣 ) 
+
+> ℓ
+
+) be the cache written by that layer. We use 𝐻 (𝑣 )−1 for the embedding/input state before layer 0. Abstractly, 
+
+𝐻 (𝑣 ) 
+
+> ℓ
+
+= 𝐹 ℓ
+
+
+
+𝐻 (𝑣 ) 
+
+> ℓ−1
+
+; 𝜃 (𝑣 )
+
+> ℓ
+
+
+
+, 𝐶 (𝑣 ) 
+
+> ℓ
+
+= 𝐺 ℓ
+
+
+
+𝐻 (𝑣 ) 
+
+> ℓ−1
+
+; 𝜃 (𝑣 )
+
+> ℓ
+
+
+
+.
+
+(S1) If an update changes layer 𝑠 , it may perturb 𝐻 𝑠 and every later layer. A first-order expansion gives 
+
+𝛿𝐻 ℓ ≈ 𝐽 ℓ 𝐽 ℓ −1 · · · 𝐽 𝑠 +1𝛿𝐻 𝑠 , ℓ > 𝑠, (S2) where 𝐽 𝑖 is the local Jacobian of layer 𝑖 . Since this product is generally nonzero, exact consistency conservatively requires executing the complete downstream dependency closure. For a standard decoder block, let ¯ 𝐻 𝑠 −1 denote the normal-ized input to self-attention. Suppressing positional rotation and bias terms, which do not affect the dependency argument, 
+
+𝑄 𝑠 = ¯𝐻 𝑠 −1𝑊 𝑄 𝑠 ,𝐾 𝑠 = ¯𝐻 𝑠 −1𝑊 𝐾 𝑠 , 𝑉 𝑠 = ¯𝐻 𝑠 −1𝑊 𝑉 𝑠 . (S3) A key- or value-projection update can directly change the cache written at layer 𝑠 . A query, attention-output, or MLP update changes the layer output while leaving the keys and values already computed at that same layer unchanged. Hence the earliest cache layer that can change is 
+
+𝑟 KV (𝑚, 𝑠 ) =
+
+(
+
+𝑠, 𝑚 ∈ { 𝐾, 𝑉 },
+
+min {𝑠 + 1, 𝑁 }, 𝑚 ∈ { 𝑄, 𝑂, MLP }. (S4) Here 𝑁 is an end-boundary sentinel indicating that no cached layer is invalidated. This occurs, for example, after a query, output, or MLP update in the final Transformer layer. For query, output, and MLP updates, an executable restart must nevertheless begin at layer 𝑠 whenever a later cache layer can be affected. Executing only that layer replaces no affected KV state, so a one-layer operation is equivalent to stale reuse with respect to the cache subsequently consumed during decoding. 
+
+Functional recovery and recomputation horizon. Let 𝑐 
+
+denote an update condition and 𝑟 (𝑐 ) its earliest executable restart layer. Define R𝑟 ,ℎ as an operation that executes the half-open range [𝑟, 𝑟 + ℎ) under the current adapter, writes the resulting KV states, and retains historical states outside that range. The case ℎ = 0 is direct stale reuse; ℎ = 𝑁 − 𝑟 
+
+executes the complete executable suffix. For input 𝑥 at a fixed decoding step, let 𝑝 𝑐,ℎ (· | 𝑥 ) be the resulting next-token distribution and 𝑝 ★𝑐 (· | 𝑥 ) the fresh-recomputation reference. For discrepancy D, define 
+
+E𝑐 (ℎ) = E𝑥 ∼X 𝑐 
+
+D  𝑝 ★𝑐 (· | 𝑥 ), 𝑝 𝑐,ℎ (· | 𝑥 ) . (S5) The recomputation horizon at tolerance 𝜖 is 
+
+𝐻 𝜖 (𝑐 ) = min {ℎ ∈ { 0, . . . , 𝑁 − 𝑟 (𝑐 )} : E𝑐 (ℎ) ≤ 𝜖 } . (S6) A condition may therefore require no recovery, bounded positive recovery, or the complete executable suffix. Equation S6 defines a population discrepancy horizon. The RQ2 tables report an empirical operational horizon over the tested candidate windows: the smallest candidate whose aggregate KL, top-1 agreement, and task-score drop satisfy the thresholds and for which no paired sample violates any threshold. This is a first-hit statistic and does not imply that the finite-sample criterion is monotone across larger candidates. The two quantities express the same recovery concept but use different safety predicates and should not be identified numerically. 
+
+## S1.2 Tail-Influence Certificates 
+
+Decomposition. Fix an input 𝑥 and omit it from the notation below. Let 𝑧 ★ be the fresh next-token logits at a fixed decoding step; the reported measurements use the first generated-token step. For the offline hybrid sequence, let 𝑧 (𝑏 ) use refreshed cache states before boundary 𝑏 and historical states from 𝑏 
+
+through layer 𝑁 − 1, with 𝑧 ( 𝑁 ) = 𝑧 ★. Define 
+
+𝑣 ℓ = 𝑧 (ℓ ) − 𝑧 (ℓ+1) , 𝑇 𝑏 = 
+
+> 𝑁 −1
+
+∑︁ 
+
+> ℓ=𝑏
+
+∥𝑣 ℓ ∥2. (S7) The difference from fresh recomputation telescopes exactly: 
+
+𝑧 (𝑏 ) − 𝑧 ★ = 𝑧 (𝑏 ) − 𝑧 ( 𝑁 ) (S8) 
+
+= 
+
+> 𝑁 −1
+
+∑︁ 
+
+> ℓ=𝑏
+
+
+
+𝑧 (ℓ ) − 𝑧 (ℓ+1) 
+
+= 
+
+> 𝑁 −1
+
+∑︁ 
+
+> ℓ=𝑏
+
+𝑣 ℓ . (S9) 10 Term or symbol Meaning Adapter evolution Successive updates to the same lightweight adapter while the base model remains frozen. Stale KV cache C (𝑡 ) is generated under 𝑣 𝑡 but retained under 𝑣 𝑡 +Δ; the prefix is unchanged, but the cache and current model state are mismatched. Recovery modes Direct reuse executes ℎ = 0 layers; bounded recovery has 0 < ℎ < 𝑁 − 𝑟 (𝑐 ); exact affected-suffix recomputation executes the complete executable suffix, ℎ = 𝑁 − 𝑟 (𝑐 ); fresh full recomputation reruns all 
+
+𝑁 layers and defines the reference. Dependency depth vs. horizon Dependency depth is the exact downstream propagation extent. 𝐻 𝜖 (𝑐 ) is the minimum executable recovery length meeting population tolerance 𝜖 ; the RQ2 empirical horizon is the first tested candidate passing both aggregate and per-sample criteria. 
+
+𝑁, ℓ, 𝑠, Δ Number of layers, generic layer index, updated layer, and adapter version gap. 
+
+𝑟 KV (𝑚, 𝑠 ), 𝑟 (𝑐 ) Earliest cached layer that can change after updating module 𝑚 at layer 𝑠 , and earliest executable restart layer. They can differ for query, output, and MLP updates. 
+
+ℎ, 𝑏 Executed recovery length and exclusive layer boundary. In the hybrid analysis, layers [𝑏, 𝑁 ) remain historical. 
+
+𝑝 ★𝑐 , 𝑝 𝑐,ℎ Fresh-reference distribution and distribution after executing ℎ recovery layers for condition 𝑐 .
+
+𝑧 ★, 𝑧 (𝑏 ) Fresh-reference logits and hybrid logits with refreshed states before 𝑏 and historical states from 𝑏 onward. 
+
+𝑣 ℓ , 𝑇 𝑏 Incremental logit influence of refreshing layer ℓ and cumulative influence magnitude of the unresolved suffix beginning at 𝑏 .
+
+𝜃 𝑡 , 𝜃 anchor  
+
+> ℓ
+
+Current adapter state and the adapter state that produced the cache currently stored at layer ℓ.
+
+𝑠 ℓ , 𝑑 ℓ (𝑡 ), 𝑞 ℓ (𝑡 ) Calibrated sensitivity, displacement from the layer anchor, and runtime risk 𝑞 ℓ (𝑡 ) = 𝑠 ℓ 𝑑 ℓ (𝑡 ).
+
+T𝑡 , 𝑏 𝑡 Triggered layer set and, when nonempty, exclusive runtime recovery end 𝑏 𝑡 = 1 + max T𝑡 .
+
+Table S1: Reference terminology and notation. All layer ranges are half-open. The triangle inequality then gives 
+
+∥𝑧 (𝑏 ) − 𝑧 ★∥2 ≤ 
+
+> 𝑁 −1
+
+∑︁ 
+
+> ℓ=𝑏
+
+∥𝑣 ℓ ∥2 = 𝑇 𝑏 . (S10) This bound does not assume layerwise contraction. It remains valid when individual influences amplify or cancel. 
+
+KL certificate. Let 𝐴 (𝑧 ) = log Í𝑖 𝑒 𝑧 𝑖 . Its gradient is the softmax, and 
+
+∇2 𝐴 (𝑧 ) = diag ( 𝑝 ) − 𝑝 𝑝 ⊤, 𝑝 = softmax (𝑧 ). (S11) For any unit vector 𝑢 , the quadratic form 𝑢 ⊤ (diag ( 𝑝 ) − 𝑝 𝑝 ⊤)𝑢 
+
+is the variance of a categorical random variable taking value 
+
+𝑢 𝑖 . Popoviciu’s inequality bounds this variance by one quarter of the squared range, and max 𝑖 𝑢 𝑖 − min 𝑖 𝑢 𝑖 ≤ √2∥𝑢 ∥2 = √2. Therefore ∥∇ 2 𝐴 (𝑧 )∥ 2 ≤ 1/2, so 𝐴 is 1 /2-smooth in the Euclidean norm. Write Δ𝑏 = 𝑧 (𝑏 ) − 𝑧 ★. The softmax KL divergence is the Bregman divergence of 𝐴 :
+
+𝐷 KL 
+
+
+
+𝑝 ★∥ 𝑝 (𝑏 ) 
+
+= 𝐴 (𝑧 (𝑏 ) ) − 𝐴 (𝑧 ★) − ⟨∇ 𝐴 (𝑧 ★), Δ𝑏 ⟩ (S12) 
+
+≤ 14 ∥Δ𝑏 ∥22 (S13) 
+
+≤ 14𝑇 2 
+
+> 𝑏
+
+. (S14) The first inequality follows from 1 /2-smoothness, and the second from Equation S10. Restoring the input dependence, write 𝑇 𝑏 (𝑥 ) for the cor-responding tail influence. When D in Equation S5 is the forward KL used in the experiments, the pointwise certificate implies 
+
+E𝑐 (ℎ) ≤ 14 E𝑥 ∼X 𝑐 
+
+𝑇 𝑟 (𝑐 )+ ℎ (𝑥 )2 . (S15) Thus E𝑥 [𝑇 𝑟 (𝑐 )+ ℎ (𝑥 )2] ≤ 4𝜖 is sufficient for the population KL horizon in Equation S6; the stronger pointwise condition 
+
+𝑇 𝑟 (𝑐 )+ ℎ (𝑥 ) ≤ 2√𝜖 gives the same guarantee for every covered input. 
+
+Top-1 certificate. Let 𝑦 ★ = arg max 𝑖 𝑧 ★𝑖 and define the fresh margin 
+
+𝛾 ★ = 𝑧 ★𝑦 ★ − max  
+
+> 𝑗 ≠𝑦 ★
+
+𝑧 ★𝑗 . (S16) Write 𝛿 = 𝑧 (𝑏 ) − 𝑧 ★. For any 𝑗 ≠ 𝑦 ★,
+
+𝑧 (𝑏 ) 
+
+> 𝑦 ★
+
+− 𝑧 (𝑏 ) 
+
+> 𝑗
+
+= (𝑧 ★𝑦 ★ − 𝑧 ★𝑗 ) + ( 𝛿 𝑦 ★ − 𝛿 𝑗 ) (S17) 
+
+≥ 𝛾 ★ − 2∥𝛿 ∥∞ ≥ 𝛾 ★ − 2∥𝛿 ∥2 ≥ 𝛾 ★ − 2𝑇 𝑏 .
+
+(S18) Consequently, 𝑇 𝑏 < 𝛾 ★/2 makes every pairwise margin posi-tive and preserves the fresh top-1 prediction. The condition is sufficient rather than necessary and is intentionally conserva-tive. 
+
+## S1.3 Non-Monotonicity and Condition Depen-dence 
+
+Although 𝑇 𝑏 decreases as terms are removed, the actual logit error need not be monotonic. Let 𝑅 𝑏 = 𝑧 (𝑏 ) − 𝑧 ★ = 𝑣 𝑏 + 𝑅 𝑏 +1.Refreshing layer 𝑏 changes the squared error by 
+
+∥𝑅 𝑏 +1 ∥22 − ∥ 𝑅 𝑏 ∥22 = −∥ 𝑣 𝑏 ∥22 − 2⟨𝑣 𝑏 , 𝑅 𝑏 +1⟩. (S19) 11 The error can temporarily increase when 𝑣 𝑏 previously can-celled part of the residual influence of later stale layers. An update condition can be summarized as 
+
+𝑐 = (𝑚, 𝑠, Δ, 𝜌, 𝜉 ), (S20) where 𝑚 is the updated module, 𝑠 its layer position, Δ the adapter version gap, 𝜌 the update magnitude, and 𝜉 collects model- and workload-level factors, such as the distributions of attention patterns and output margins under X𝑐 . These variables alter both the injected perturbation and the alignment among the influence vectors. A single global recomputation window can therefore over-compute low-risk conditions while under-repairing persistent ones. 
+
+# S2 Additional Experimental Details 
+
+## S2.1 Protocol 
+
+RQ1 uses Qwen2.5-7B-Instruct with version gaps 
+
+{0, 1, 2, 4, 8, 16 , 32 } and three paired seeds. The con-trolled workload uses 64 samples per seed; HotpotQA and 2WikiMQA use 32 samples per seed. RQ2–RQ3 use Qwen2.5-1.5B-Instruct over eight update-condition families, three gaps, and three seeds, yielding 72 profiles with 16 paired samples each. Candidate recovery windows are direct reuse, 1, 2, 4, 8, and 16 layers, and the complete executable suffix. The frozen condition set is a structured mechanism sweep rather than a complete Cartesian product: it covers early key, value, query, and MLP updates; middle query and MLP updates; and late key and MLP updates. RQ4 applies 32 consecutive middle value-projection updates to Qwen2.5-7B-Instruct. Calibration uses two seeds, while held-out evaluation uses three disjoint seeds, producing 96 held-out trajectories and 3,072 held-out cache decisions per method. KL is 𝐷 KL ( 𝑝 ★∥ 𝑝 ) at the first generated-token step; top-1 agreement uses the same distributions, and task score evaluates the full answer. For RQ2, a candidate window is acceptable when KL is at most 0 .05, top-1 agreement is at least 0 .99, and task-score drop from fresh is at most 0 .01; the aggregate metrics must satisfy the same thresholds, with no paired sample violating any threshold. For RQ4, task score, KL, top-1 agreement, and recomputation fraction are averaged over the 32 versions within each trajectory and then across trajectories. Cache-maintenance and total-request times are instead summed over the 32 versions within each trajectory and then averaged across trajectories; the main-paper maintenance-time column and request-time comparison therefore report cumulative time per complete trajectory. All RQ1 trajectories and sample-level outputs are included in the released artifact; the main-paper figure reports their complete trends. 
+
+## S2.2 Recomputation-Horizon Breakdown 
+
+Table S2 decomposes the 72 profiles by update target and position. “Direct” denotes horizon zero, “bounded” a positive window shorter than the complete executable suffix, and “full”                                                         
+
+> Condition Suffix depth D/B/F Observed horizons Key–early 28 2/6/1 {0,1,8,16 ,28 }
+> Key–late 17/0/2 {0,1}
+> Value–early 28 3/2/4 {0,1,4,28 }
+> Query–early 28 6/1/2 {0,16 ,28 }
+> Query–middle 14 1/6/2 {0,2,4,8,14 }
+> MLP–early 28 3/1/5 {0,16 ,28 }
+> MLP–middle 14 6/2/1 {0,2,8,14 }
+> MLP–late 19/0/0 {0}
+> All profiles –37/18/17 {0,1,2,4,8,14 ,16 ,28 }
+
+Table S2: Recovery outcomes by updated module and position. D/B/F denotes direct, bounded, and full-suffix outcomes.               
+
+> Metric Overall 𝜌 Within 𝜌
+> Hidden tail sum 0.873 0.690 Hidden boundary 0.666 0.320 Key tail sum 0.853 0.690 Value tail sum 0.853 0.690 Final suffix-attention input 0.892 0.620
+
+Table S3: Spearman correlation between candidate-window KL and representative propagation metrics. the complete suffix. Each row contains nine profiles from three seeds and three version gaps. At gaps 1, 4, and 16, the direct/bounded/full splits are respectively 14 /5/5, 13 /7/4, and 10 /6/8. Both zero and full-suffix outcomes occur at the same gap, confirming that version age alone is insufficient for recovery planning. For query and MLP updates, a one-layer candidate restarts execution but replaces no affected KV state; it is therefore equivalent to stale reuse. This equality holds for all corresponding rows in the frozen sample-level analysis. 
+
+## S2.3 Propagation-Proxy Correlations 
+
+Table S3 reports representative propagation proxies associated with the unresolved suffix. These quantities are distinct from the output-space tail influence 𝑇 𝑏 used by the theoretical certificate. Within-condition correlations rank-center each seed–target–gap group, removing between-condition scale effects. Cumulative suffix measurements preserve more signal than a single boundary measurement. A fixed-effect log–log regression estimates an exponent of 2.14 between KL and final unrepaired suffix-attention input error, with within-condition 𝑅 2 = 0.115. Because suffix-attention input error is a propagation proxy rather than the output-space 𝑇 𝑏 , the near-quadratic exponent is qualitatively aligned with, but does not directly verify, the quadratic KL certificate. Substantial request-level variation remains unex-plained. 12 Method Score KL Top-1 Recomp.                                                 
+
+> HotpotQA
+> Fresh full 9.41 0.0000 100.00 100.00 Exact affected suffix 9.41 0.0000 100.00 50.00 Stale reuse 7.95 0.3923 76.56 0.00 CacheReforge 9.13 0.0197 93.75 6.25 Drift-only 9.41 0.0595 89.19 3.12 Fixed-window (2) 9.99 0.1967 83.46 7.14
+> 2WikiMQA
+> Fresh full 9.40 0.0000 100.00 100.00 Exact affected suffix 9.40 0.0000 100.00 50.00 Stale reuse 9.03 0.4847 92.38 0.00 CacheReforge 9.16 0.0473 94.34 4.63 Drift-only 8.99 0.0567 95.25 4.52 Fixed-window (2) 8.66 0.2430 92.64 7.14
+
+Table S4: Taskwise held-out RQ4 results (all values except KL are percentages). Each task contains 48 complete 32-version trajectories. 
+
+## S2.4 Taskwise RQ4 Results 
+
+Table S4 gives taskwise results for the four main methods and two ablations. Fixed-window recovery can obtain a slightly higher mean task score than fresh execution on HotpotQA, but its KL and top-1 agreement show that this does not represent closer reproduction of the fresh model. Exact affected-suffix recomputation matches fresh task and model-output behavior. Its quality and maintenance statis-tics are measured from 96 direct 32-version held-out tra-jectories (16 samples, three seeds, and two tasks), covering 3,072 exact-suffix decisions. These runs confirm zero KL, 100% top-1 agreement, and 50% recomputation. Across a 32-version trajectory, CacheReforge averages 26.56 reuse, 2.94 bounded-recovery, and 2.50 exact-suffix actions. Both bounded and exact suffix actions use the same executable partial-recomputation path; their end layers distinguish the two cases. 
+
+# S3 Reproducibility 
+
+The reproducibility package is archived on Zenodo at doi:10.5281/zenodo.22951118. It contains four RQ-specific packages with executable source, configurations, raw out-puts, regenerated analyses, paper aggregates, and SHA-256 manifests. RQ4 additionally includes calibration runs, frozen risk profiles, held-out trajectories, ablations, and per-sample provenance. Machine-generated timestamps may remain in metadata. The recorded environment is Linux on AArch64 with Python 3.12.13, PyTorch 2.7.1, torch-npu 2.7.1.post2, and Transformers 5.13.0, using bfloat16 on Ascend NPUs. The 7B isolated-gap runs use model sharding, whereas RQ4 uses single-device deterministic execution. Public configurations name the Qwen2.5 checkpoints and use relative data and output paths. Development considered LoRA ranks {4, 8, 16 }, update magnitudes from 10 −5 to 5 × 10 −2, and direct reuse, 1-, 2-, 4-, 8-, and 16-layer windows plus the complete executable suffix. Reported runs use rank 8; mechanism studies use magnitude 10 −3 and realistic QA/RQ4 use 10 −2. RQ4 uses a middle-layer value projection, yielding a 16-layer executable suffix and allowing repeated partial recovery to be evaluated under a cache-producing update. RQ4 profiles were frozen on calibration seeds 53 and 61; seeds 7, 17, and 29 were held out. 13
