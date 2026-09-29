@@ -1,0 +1,1113 @@
+Title: DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving
+
+URL Source: https://arxiv.org/pdf/2609.31047v1
+
+Published Time: Mon, 28 Sep 2026 01:05:39 GMT
+
+Number of Pages: 19
+
+Markdown Content:
+# DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving 
+
+## Junyi Shen 
+
+National University of Singapore Singapore 
+
+j1shen@comp.nus.edu.sg 
+
+## Noppanat Wadlom 
+
+National University of Singapore Singapore 
+
+noppanat@comp.nus.edu.sg 
+
+## Zhengyuan Su 
+
+National University of Singapore Singapore 
+
+suzhengy@comp.nus.edu.sg 
+
+## Yao Lu 
+
+National University of Singapore Singapore 
+
+luyao@comp.nus.edu.sg 
+
+## Abstract 
+
+Agentic LLM workflows decide their execution paths at run-time. Downstream computation may be predictable, or may have run before, yet it cannot begin until the model or the user resolves the branch. We call this serialization the branch-resolution barrier . Caching alone does not hide it: the key that identifies a reusable result is not known until then. In this paper, we propose DynBranch, which makes an unresolved branch addressable before it resolves. Its stable 
+
+coordinate lets candidate subgraphs run during resolution and completed subgraph results be reused across later re-quests. A two-level controller admits this work when its expected benefit exceeds the load price. DynBranch sits at the model-API boundary and requires no changes to agent harnesses or model execution engines. Across four agentic workloads with Qwen3-32B on 4 ×
+
+H200 GPUs, DynBranch reduces mean latency by up to 32% over each workload’s strongest prior system and by 46–66% against a no-reuse floor, while preserving workflow results. The benefit persists across backbone families and on a com-modity Qwen3-8B/RTX 4090 deployment. 
+
+## 1 Introduction 
+
+LLM applications are moving from workflows whose model and tool calls are fixed before execution [38, 52] to agentic ones that decide each next step as they run, by the model or by the user [101, 104, 108]. Measured agent workloads show tens to hundreds of model and tool calls per task [55, 120], so these decision windows repeatedly enter the critical path. Downstream work waits on a choice the model has yet to decode: the handler a request needs, the sub-task a sub-agent runs, the entity a retrieval fetches. Each is typically followed by model inference. For example, a ReAct agent answering multi-hop questions decodes the entity it will search next [108], and coding agents such as Claude Code and Codex show both: they decode the next tool call, and at interactive decision points they wait for the user to pick from a short list of suggested actions [5, 63]. 
+
+(a) human-wait window — indep. top-𝐾 
+
+offer 
+
+𝐴 /𝐵 /𝐶 
+
+user deliberates (≈2.7 s, idle) 
+
+𝐵 𝐴 
+
+𝐵 𝐵 
+
+𝐵 𝐶 
+
+used now reusable discarded click 
+
+= 𝐴 
+
+(b) model-decode window — exclusive 
+
+request LLM decodes (≈4.6 s) 
+
+𝐵 ℎ1
+
+𝐵 ℎ2
+
+commit cancel emit 
+
+ℎ1
+
+Figure 1. Predicted subgraphs fill during the shaded reso-lution window; each candidate’s status is printed beside it. (a) independent top-𝐾 . (b) exclusive route. We call this serialization the branch-resolution barrier :downstream computation that may be predictable, or may have run before, waits for the model output or user choice that determines the branch. In measured coding, research, and scientific agents, 45–57% of end-to-end latency is down-stream time serialized after model output [88]. This creates two opportunities. Starting likely downstream computation before resolution can hide part of its latency on the first occurrence (Figure 1). Reusing a validated result can avoid that computation on later occurrences. Existing systems provide result caching [9, 94] and agent-level speculation [28, 34, 109] as separate mechanisms. Caches retain completed responses and operator results, while speculative agents consume or discard predicted work within the current request. Prefix caches reuse KV state [116], and dataflow schedulers overlap work once its inputs are known [38, 52, 89, 102]. These systems do not jointly support reusing a subgraph result across later re-quests, starting a branch before it resolves, and pricing that work against serving load. Each is hard in a different way. 
+
+C1, shared-subgraph reuse : the unit that recurs is a sub-DAG rather than a whole request, and moving the boundary there must not weaken exact matching or freshness. C2, early 
+
+> 1arXiv:2609.31047v1 [cs.DC] 25 Sep 2026
+
+fill during resolution : the name that authorizes reuse does not exist until the branch resolves, yet the work must start before it does. C3, load-priced admission : speculative work draws on the same slots and KV as the request it accelerates, so what helps at low load hurts at high load. In this paper, we propose DynBranch, which makes an unresolved branch addressable before it resolves (§3). For C1, it records a completed branch subgraph together with the input that produced it and the external reads it made. A later request consumes the entry only when its input matches exactly and those reads are still fresh; a write to any of them invalidates it. For C2, the workflow template provides a coordinate : the identity of a decision point in the template, such as the router stage of a routing workflow, known before the branch resolves in our target workloads (§5.6). Predicted candidate subgraphs run as fills during the resolution window; completed results can also serve later requests. Fills remain invisible until branch selection and an exact, fresh canonical (non-speculative) demand authorize their use, so wrong predictions cannot change workflow results. For C3, a two-level controller decides whether to generate candidates and whether to execute each fill, admitting either when expected benefit exceeds the load price over the fill’s execution horizon. That price reads the engine’s current decode and KV occupancy, so it rises as speculative and canonical work accumulate. We implement DynBranch at the model-API bound-ary between agent harnesses and unmodified SGLang or vLLM engines [39, 116], an interface that covers both framework-driven workflows [25, 41, 101] and text-based coding agents [5, 21, 63]. With Qwen3-32B on 4 × H200 GPUs, DynBranch reduces mean latency by up to 32% over each workload’s strongest prior system on the same GPUs and by 46–66% against a no-reuse floor, while preserving workflow results. With reuse disabled, early fill alone re-duces mean latency by 8 .5–34 .4% on model-driven paths and user-turn latency by 46 .6–47 .7% on HCI (§5.4). The ben-efit persists across backbone families and on a commodity Qwen3-8B/RTX 4090 deployment. We make three contributions: 
+
+• We identify the branch-resolution barrier and quantify its cost on production traces and four agentic work-loads (§2). 
+
+• We propose a branch-state abstraction connecting speculative execution with cross-request subgraph reuse, promoted on exact match and invalidated by writes (§3.2–§3.3). 
+
+• We design a two-level online controller that prices candidate generation and fill execution against benefit and load, learning from delayed feedback (§3.4, §5.4– §5.5). 
+
+Agent work F1–F3 Serial C2 Fillable C1 Reuse 
+
+82–318 steps/task [111, 120] 50 paths / 52 requests 
+
+45–57% serial time [88] 26 –43% overlap 
+
+59–94% coverage [67] 
+
+top-1 prior 29 /30 turns 
+
+54–62% prefix hits [95] 26% sub-tasks recur 
+
+C3 Spare capacity, Priced by load 
+
+≈81% SM idle [26] 
+
+>50% unused compute [73] 
+
+Figure 2. Opportunities for early execution (C2) and cross-request reuse (C1), subject to available serving capacity (C3). Upright figures are from prior work; italic figures are our own measurements with speculation disabled. 
+
+## 2 Background and Motivation 
+
+An agentic workflow interleaves model calls, tool calls, and user turns, and at many steps the next one depends on the current step’s output: the model names the tool or sub-task to run, or the user picks among offered actions. We call each model or tool call, executed on its rendered input (the prompt or tool arguments after upstream outputs are substituted), a stage , and the stages downstream of a decision point its 
+
+subgraph . Figure 2 narrows from all agent work to the part serialized behind such decisions, then to the part that can start before a decision resolves (C2) and the part a later request can reuse (C1), all drawn from capacity that canonical requests also need (C3). 
+
+C1: shared-subgraph reuse. GPTCache and agentic plan caching match whole responses or plans [9, 74, 112], while SGLang, Pythia, PBKV, and KVFlow retain prefix-KV state but still execute the decode [64, 110, 115, 116]. Both anchor at the request boundary, at the whole request or its first token, so neither can name a sub-DAG that recurs inside requests differing elsewhere. Its retrieval and tool results also depend on external reads, so exact matching is not enough: writes to recorded dependencies must invalidate them (§3.2). 
+
+C2: early fill during resolution. KVFlow, Pythia, and PBKV prefetch or retain prefix state for a declared or pre-dicted next stage [64, 110, 115], but the stage itself still runs only after resolution. Speculative Actions executes a pre-dicted API call early, SPAgent a search action [34, 109], DSP a chain of planning steps [28], and Speculative Interaction Agents dependent tool calls alongside model reasoning [32]. PASTE, the closest, isolates a predicted tool result until a matching authoritative invocation commits it [88]. All five, however, can use a speculative result only in the request that produced it: the result is checked against that request’s next step and used or discarded there, so even a correct result is lost when the request ends. Early fill therefore needs results 
+
+> 2
+
+Routing 
+
+router decodes 
+
+ℎ1
+
+ℎ2
+
+ℎ3
+
+exec decode · bounded-𝐾 
+
+exclusive · chain reuse 
+
+ReAct 
+
+think retrieve 
+
+entity? read decode · open-vocab 
+
+exclusive · per-hop loop 
+
+Sub-Agent 
+
+plan 
+
+𝑆 1
+
+𝑆 2
+
+ret →read synth decode · bounded-𝐾 
+
+exclusive · cross-request 
+
+HCI 
+
+offer user waits 
+
+𝐵 𝐴 
+
+𝐵 𝐵 
+
+𝐵 𝐶 
+
+wait · bounded-𝐾 
+
+indep. top-𝐾 · cross-turn 
+
+Figure 3. Four representative workloads. Shaded boxes are resolution windows; dashed boxes are candidate work; the heavy-outlined box is a subgraph that recurs across requests. Italic labels differ from Routing .that stay isolated until a demand selects them, yet outlive the request that produced them, which requires naming them before the branch resolves (§3.3). 
+
+C3: load-priced admission. Fills run on the same GPUs as the requests they accelerate, so each unused fill delays canonical traffic (Figure 5b), more so at high load [4]. PASTE, SPAgent, TurboSpec, and Nightjar limit speculative work under load [34, 48, 54, 88], but each scores a unit once, before it runs. A branch incurs two costs, running the predictor and then executing the admitted candidates, and whether either paid off is known only when the branch resolves, often seconds later. Admission therefore needs a cost that tracks current load and a benefit estimate corrected by these delayed outcomes (§3.4). 
+
+What a workload must supply. First, the work needs an identity independent of runtime content, since conven-tional memoization names a result only once its inputs are known [9, 112]; a workflow template supplies one by nam-ing each decision point, though the model still produces the selection or tool arguments (§5.6). Second, the stage must be safe to run twice: no external side effects, same result for the same input and dependency versions. Greedy inference with batch-invariant kernels [31] over an immutable model and read-only retrieval over a versioned snapshot qualify; stages that sample or mutate external state run only after resolution (§3.3). §2.1 describes four workloads that meet both, and §2.2 measures what each challenge is worth on them. 
+
+2.1 Dynamic Agentic Workloads 
+
+Agentic workflows determine downstream steps at run-time [5, 101, 108], and the decisions are frequent and di-verse [56, 120]: agent sessions and tasks run 82–318 model steps [111, 120], and we measure 50 distinct paths in 52 requests, so every run opens tens to hundreds of resolution windows in which to speculate. 
+
+A workload taxonomy. Dynamic branches vary along four dimensions that set the benefit of early execution and the life of its results: the resolution window (model decode or human wait), the candidate space (bounded or open vocabulary), the 
+
+promotion semantics (one selected winner or multiple valid results), and the reuse horizon (within a chain, across turns, or across requests). Figure 3 places four workloads on them. 
+
+Routing is a tool-use workflow over BFCL function calls [66], 
+
+ReAct [108] a multi-hop question-answering agent [90, 106], 
+
+Sub-Agent [101] an orchestrator that dispatches tasks to sub-agents, and HCI an assistant that offers actions and waits for the user to pick one [14, 22]. 
+
+2.2 The Branch-Resolution Barrier Most task latency is serialized. In coding, research, and scientific agents, downstream execution takes 45–57% of task latency on the serial model–tool path [88]. At branch 
+
+𝑘 , work of duration 𝑇 exec  
+
+> 𝑘
+
+waits for a resolution window 
+
+𝑇 gen  
+
+> 𝑘
+
+, which for HCI is the user’s sampled think time [14, 22]. Early execution can overlap at most min (𝑇 gen  
+
+> 𝑘
+
+,𝑇 exec  
+
+> 𝑘
+
+);summed along the critical path and normalized by wall-clock, this gives the workload’s overlap share , the most C2 can hide. Figure 4 shows three observations. F1, substantial latency can be overlapped : the decode-window workloads can over-lap 26–43% of wall-clock, and HCI ’s post-click execution fits entirely within the modeled think window. F2, the window cannot easily be shortened : on Routing , the resolution decode and the downstream prefill carry similar token volumes (270 vs. 263 at p50), yet only the former is emitted autoregres-sively [3, 39], and bounding that decode can change the answer [42, 60]. F3, window duration limits the overlap : at p50, outside HCI , the resolution window is 0 .36–0 .77 × as long as the downstream execution. 
+
+Predictability determines coverage cost. Early execution saves time only if the admitted set contains the branch even-tually selected, and predictability differs by class. A bounded space is enumerable from the template, and a skewed mix lets a few candidates cover most traffic: bounded API selection reaches 91–94% with an oracle retriever and 59–84% with a deployed one [67]; Figure 2 spans both. A user’s next action follows a frequency prior over those offered before [20, 23]; in HCI the top candidate matches the selection in 29 of 30 turns. An open vocabulary has neither [81], so candidates come from context already read: our ReAct predictor ranks entities named in the previous hop’s passage, placing the next in its top three 61% of the time. More candidates improve coverage [36] at proportionate cost. 
+
+> 3
+
+0 5 10 15 20 
+
+Routing Sub-Agent ReAct HCI 
+
+overlap 0 .26 overlap 0 .43 overlap ≈1.00 †
+
+overlap 0 .32 seconds (p50, whiskers p25–p75) 
+
+𝑇 gen (window) 𝑇 exec (downstream) 
+
+Figure 4. Resolution windows and downstream execution times; bars show p50, whiskers p25–p75. †Normalized by post-click execution, not wall-clock. 
+
+Recurrence concentrates in content sub-tasks. What a fill cannot hide, reuse removes outright when the same work is asked for twice. With speculation disabled, 12% of ReAct 
+
+retrievals in a run and 26% of Sub-Agent sub-tasks across runs have byte-identical inputs, and recurrence increases as more requests arrive (Figure 5a): repeated MuSiQue [90] sub-topic mentions rise from 19% at 100 questions to 61% at 5 ,000. It appears outside our workloads too: our analysis of released SWE-agent and SWE-rebench trajectories [7, 104] finds 42– 45% of commands recurring verbatim within a repository. A production prefix-cache study reports 54–62% ideal hits [95]; that unit requires a shared prefix, while the retrievals and sub-tasks above recur in requests that differ elsewhere: the unit C1 must name. 
+
+Speculation’s cost depends on load. A fill’s engine time pays off only if its result is used. Serving leaves capacity for it [65, 99]: over a day, GPUs leave ≈81% of streaming-multiprocessor (SM) time idle [26], decode leaves >50% of compute unused [73], and human thinking is 64% of coding-session wall-clock with idle gaps capped at an hour [120]. Fills still compete with canonical requests for decode slots and memory bandwidth; Figure 5b measures p50 latency for a fixed-shape 32B request as fills grow in number and context. At a fixed context length, 1–3 co-resident fills raise it by 4–6% and 48 by 53%; holding the count at 24 and growing each context from none to 4 ,500 words raises it from 11% to 145%, as the fills grow from 3% to 24% of the KV pool. Resident KV rises with both, which is why C3’s admission reads it as the measure of speculation in flight (§3.4). 
+
+## 3 DynBranch Design 
+
+3.1 System Overview 
+
+DynBranch is a serving layer between agentic harnesses and model-serving engines, built from one interface and three parts. The candidate interface takes a branch coordinate and returns a ranked candidate list; which predictor sits behind it is a deployment choice (§3.3). A two-level gate prices whether to open a branch, and which of its candidates to fill, against 100 1k 5k 00.51stream length recurrence fraction (a) recurrence 1 3 12 24 48 310 30 100 co-resident fills canonical stretch (%) (b) interference 0 1.5k 4.5k questions with a repeat repeated mentions slots context (words) 
+
+Figure 5. (a) Share of MuSiQue questions that repeat an earlier sub-topic, and of sub-topic mentions that are repeats, as the stream grows. (b) Slowdown of a canonical request as fills grow in number and context. current load. The Completed-Subgraph Library (CSL) holds finished subgraph results for later reuse, and a reverse index from the external records they read invalidates them. A per-branch record follows each open branch until it resolves and returns what it cost and what it saved to the gate. 
+
+Life of a request. Figure 6 follows a model-decided branch: its resolution window lets predicted downstream work run before the next stage is named. The predictor uses the branch 
+
+coordinate , the stable identity of that decision in the work-flow template, to propose downstream candidates ( 1 ). The gate prices each candidate and admits those whose expected benefit exceeds its load price ( 2 ); the admitted fills then run on the same engines as canonical traffic ( 3 ), concurrently with the branch-resolution decode. A completed fill remains an invisible shadow , a speculative result that serving paths cannot read ( 4 ). Branch resolution eliminates losers but does not authorize the survivor: only a subsequent canonical demand with the same exact reuse name can promote and consume it ( 5 ). This separation takes the serialized work off the critical path without exposing unchosen work. The confirmed entry then serves later exact matches ( 6 ) until a dependency write invalidates it ( 7 ). DynBranch treats reuse, overlap, and execution as separate decisions. C1: what may be reused? A subgraph, identified by its exact realized input and fresh dependencies (§3.2). 
+
+C2: how can work run before resolution? A stable coordinate starts fills during the window; a matching canonical demand authorizes use (§3.3). C3: when should that work run? When its expected latency benefit exceeds its load-priced resource cost (§3.4). 
+
+3.2 Shared-Subgraph Reuse (C1) 
+
+C1 must capture reuse that exists below the whole-request boundary or across requests that differ elsewhere, without serving a hit it cannot replay. Replay safety asks more than 
+
+> 4
+
+Agent DynBranch Engines Stores (a) one request: fill early, consume at the demand (b) later demands and writes 
+
+request propose 1 , price 2
+
+canonical decode ( 𝑇 gen )fill ℎ1 3
+
+ℎ2 ✗ discarded shadow 4
+
+stage request resolution window authorize 5
+
+promote ℎ1
+
+response saved serialized work later demand hit 6
+
+no engine work write: invalidate 7
+
+evict KV 
+
+C1 §3.2 exact reuse: 6 7 C2 §3.3 early fill: 3 4 5 C3 §3.4 admission: 1 2 3
+
+Figure 6. Lifecycle of a speculative branch result. Lanes are components, time runs left to right; ✗ marks the discarded loser. a semantic cache’s approximate match [74]: every result-determining input must match, every external dependency must remain fresh, and a multi-node result must come from one execution, not fragments of several. 
+
+Subgraph reuse names. Exact reuse follows the depen-dency closure captured by a rendered input, not a node’s graph position. A whole-response key needs the whole work-flow to repeat [9] and a prefix-region key an unchanged prefix [64, 116]. DynBranch instead makes the unit a self-contained subgraph, depending only on the upstream values entering its own rendered inputs, so it stays valid beyond an unrelated change. It records that subgraph with the real-ized input, output, external read-set, and provenance of one execution. Its reuse name combines a subgraph fingerprint with a hash of the realized input, covering the request fields that determine the output. C2 addresses work before reso-lution through the branch coordinate, which identifies an unresolved decision and therefore cannot authorize reuse. Freshness is maintained by a reverse index from external records to cached entries. A write invalidates direct depen-dents and any cached or engine-resident state that loses a valid producer; incomplete provenance conservatively ex-tends the cascade. Reads synchronize with invalidation, so concurrent or uncertain cases fall back to a miss. Writes may reduce reuse but cannot expose stale state; the cas-cade follows view-maintenance and lineage work [1, 11, 27]. Together, these checks make a hit replay one recorded exe-cution [61]. 
+
+Benefit of reuse. Let 𝑇 sub  
+
+> 𝑗
+
+be the execution the subgraph rooted at decision point 𝑗 adds beyond its nested subgraphs, and 𝑃 hit  
+
+> 𝑗
+
+the probability that a later request is served it from cache while its recorded reads stay fresh. In expectation, reuse removes 
+
+E[Δ𝑇 reuse ] =∑︁ 
+
+> 𝑗
+
+𝑃 hit  
+
+> 𝑗
+
+𝑇 sub  
+
+> 𝑗
+
+(1) from that request’s critical path. The boundary sets 𝑃 hit :under one realized change (Figure 7), the whole-response, prefix-region, and subgraph boundaries serve 0, 2, and 4 of six taken nodes at the same exactness and freshness. A cache 
+
+whole response 
+
+𝑣 1
+
+𝑣 2
+
+𝑣 3
+
+✗
+
+𝑣 4
+
+𝑢 𝑥 1
+
+𝑥 2
+
+0/6
+
+served 
+
+prefix region 
+
+𝑣 1
+
+𝑣 2
+
+𝑣 3
+
+✗
+
+𝑣 4
+
+𝑢 𝑥 1
+
+𝑥 2
+
+2/6
+
+unchanged prefix 
+
++ subgraph splice 
+
+𝑣 1
+
+𝑣 2
+
+𝑣 3
+
+✗
+
+𝑣 4
+
+𝑢 𝑥 1
+
+𝑥 2
+
+4/6
+
++ self-contained 
+
+< <
+
+Figure 7. One realized change (red ✗) under three exact serving boundaries. Green: served from cache; dashed ar-rows reach control-only descendants; dotted 𝑢 is an untaken branch. Footers: nodes served of six taken. that does not model what the stage computes cannot match more often than this and stay exact, so promotion refuses nothing a safe rule could admit (Corollary A.4). C3 values only the execution Equation (1) leaves. On a canonical demand, C1 derives the reuse name and probes the CSL’s confirmed entries under the freshness guard. A hit returns the recorded result; a miss executes normally and may refill the CSL, which is bounded and evicts by re-cency, frequency, and cost per byte. 
+
+3.3 Early Fill During Resolution (C2) 
+
+C2 must avoid two failures. The first is serial: downstream work that could have run inside the resolution window waits for it instead, and the obvious repair (publishing a result as soon as it completes) serves work no demand se-lected [82]. The second is cross-request: speculative decod-ing, speculative agents, and speculative tool systems bind validation and consumption to the request that authorized the work [28, 32, 43, 88, 109], so a result that survives its branch still dies with its request. C2 therefore decouples computation, selection, and authorization. 
+
+Where candidates come from. Any predictor can sit be-hind the interface: a next-stage model over the coordinate’s 
+
+> 5
+
+history, a retrieval ranker, or a small draft LM sampled 𝑁 
+
+times and ranked by how often it names a candidate (§5.3). Only its ordering is used, since its scores are uncalibrated; a per-rank consumption rate, learned online, replaces them. 
+
+Speculative results and promotion. C2 speculates only on speculable stages, those the template declares safe to run twice (§2); unannotated, sampling, or externally mutating stages run only after resolution. Admission turns a candidate into a fill . Once the fill’s input renders, C1 derives the reuse name, and completion records that name, the result, and its read-set as a persistent shadow, visible to the gate’s per-branch record but unreadable by serving paths. A canonical demand resolves this lifecycle in two steps. First, selection settles the branch. For an exclusive branch, the resolved choice retains the matching candidate and aborts the losers’ in-flight fills in the engine, releasing their slots and KV and discarding their results; independent offers remain eligible, their shadows unreadable until an exact demand authorizes them or they expire. An ambiguous branch or choice promotes nothing. Second, authorization applies C1’s guards: the canonical reuse name must match the shadow’s, and its recorded read-set must remain fresh. Only then is the shadow atomically promoted and consumed: selection eliminates work, content and freshness serve it. If the matching fill is still running, the canonical demand waits a bounded interval and otherwise executes normally. Multi-stage fills are promoted stage by stage as canonical demands pass the same guards. 
+
+Speculative–canonical equivalence. Let 𝐹 (𝑞, 𝜃, 𝐷 ) be a speculable stage run with rendered request 𝑞 , model and execution parameters 𝜃 , and dependency versions 𝐷 , and write 𝑠 and 𝑐 for its speculative and canonical executions. Promotion requires a reuse-name match under the freshness guard. The name covers the stage fingerprint, the complete rendered input, and both parameter sets, so a match gives 
+
+(𝑞 𝑠 , 𝜃 𝑠 ) = (𝑞 𝑐 , 𝜃 𝑐 ), and the guard gives 𝐷 𝑠 = 𝐷 𝑐 . Determinism then yields 
+
+𝑦 𝑠 = 𝐹 (𝑞 𝑠 , 𝜃 𝑠 , 𝐷 𝑠 ) = 𝐹 (𝑞 𝑐 , 𝜃 𝑐 , 𝐷 𝑐 ) = 𝑦 𝑐 ,
+
+and a promoted stage 𝑖 renders to stage 𝑖 + 1 the input its canonical execution would have rendered, re-establishing the hypothesis along a multi-stage fill. Two properties follow. 
+
+Value equivalence : a promoted subgraph returns exactly what canonical execution would. Non-interference : unpromoted work is never observed—no external effect, no readable state— and exclusive losers do not outlive their branch. A failed precondition is a miss, so speculation changes only latency. 
+
+Benefit of early fill. At branch 𝑘 , let 𝑇 gen  
+
+> 𝑘
+
+be the generation window that resolves the branch, 𝑇 exec  
+
+> 𝑘
+
+the selected down-stream work, and 𝑃 cov  
+
+> 𝑘
+
+the probability that the admitted set contains the selected candidate. Ignoring contention, early fill at branch 𝑘 hides at most min (𝑇 gen  
+
+> 𝑘
+
+,𝑇 exec  
+
+> 𝑘
+
+) if the admitted set covers the selection and nothing otherwise (Figure 4). With the durations fixed, in expectation over coverage: 
+
+E[Δ𝑇 gross ] ≤ ∑︁ 
+
+> 𝑘
+
+𝑃 cov  
+
+> 𝑘
+
+min  𝑇 gen  
+
+> 𝑘
+
+,𝑇 exec 
+
+> 𝑘
+
+. (2) Equation (2) is a gross bound (Lemma A.6): C3 prices con-tention explicitly [4, 86, 93], and C2 admits fills only while a positive overlap window remains. The opportunity grows with branch predictability, downstream cost, and window length. For a user-wait window, the same expression sub-stitutes think time for generation time and measures the reduction in post-click latency [12, 22]. 
+
+3.4 Load-Priced Admission (C3) 
+
+DynBranch admits speculative work in two steps (Algo-rithm 1). For each branch, the generation gate (Action 0) decides whether running the predictor and expanding candi-dates is worth its fixed cost. If it opens, the fill gate (Action 1) admits a candidate only if the expected time it saves exceeds the expected delay it imposes on canonical requests at cur-rent load, re-pricing after each admission. The two are not one decision: generation itself costs time that no fill thresh-old can recover, and a cheap generation step can still reveal fills that are individually too costly. Predicting more actions raises the chance of covering the realized branch, but also creates work that may never be used [34, 58, 105, 109]. Admission must therefore protect canonical demand from those fills. Paying for an alternative before knowing whether it is needed is classical optimal search [97]; here the alternative is produced, not fetched, so its price moves with contention. 
+
+Causal load price. At time 𝑡 , C3 observes a load view 𝑉 𝑡 com-prising normalized fill occupancy 𝑜 fill , reservation-budget occupancy 𝑜 KV , and canonical-demand pressure 𝜌 𝑡 . Admis-sion is the only point at which contention can be refused: a running fill holds its slots until it completes or its branch cancels it, so an instantaneous idle reading would underprice a multi-second fill. C3 prices against the causal envelope [84] ¯𝜌 𝐻 (𝑡 ) = max 
+
+
+
+𝜌 𝑡 , 1
+
+𝐻 
+
+∫ 𝑡 𝑡 −𝐻 
+
+𝜌 𝜏 𝑑𝜏 
+
+
+
+. (3) Here 𝐻 matches the window used to estimate speculative co-residency. Rising load takes effect immediately; falling load relaxes the price gradually over a full execution window. A periodic probe updates this history even while the generation gate is closed. Candidate 𝑠 carries footprint ˆ R𝑠 = ( ˆ𝑅 slot ,𝑠 , ˆ𝑅 KV ,𝑠 ), covering decode time and KV residency weighted by its budget share. Monotone price curves 𝜷 (𝑉 𝐻 ) = (𝛽 slot , 𝛽 KV ), in milliseconds of canonical delay per unit of each resource, convert the foot-print into a delay cost, 𝐶 𝑠 (𝑉 𝐻 ) = 𝜷 (𝑉 𝐻 )⊤ ˆR𝑠 , where 𝑉 𝐻 is the load view 𝑉 𝑡 with ¯ 𝜌 𝐻 in place of 𝜌 𝑡 . The slot price scales with ¯𝜌 𝐻 and the KV price with budget occupancy; both are ini-tialized from Figure 5b and steepen near capacity. Measured 
+
+> 6
+
+prices govern value; fill-count and atomic KV reservations remain hard feasibility constraints. 
+
+Generation gate (Action 0). A branch’s payoff is known only after it settles, so C3 learns one full-path return per branch entry: ˆ𝑦 𝑏 =∑︁   
+
+> 𝑠 ∈consume (𝑏 )
+
+ˆ𝐺 Δ 
+
+> 𝑠
+
+− 𝑇 setup ,𝑏 − ˆ𝐾 𝑏 − ˆ𝑊 𝑏 . (4) Here consume (𝑏 ) is the set of fills branch 𝑏 consumed and ˆ𝐺 Δ 
+
+> 𝑠
+
+is the execution a consumed fill saves after C1 lookup, so the first term credits only the residual C1 left. The remain-ing terms charge measured prediction and expansion time 
+
+𝑇 setup ,𝑏 , the cost ˆ 𝐾 𝑏 of the fills this branch enabled, and ˆ 𝑊 𝑏 for expired or uncovered waits. Using one aggregate target is es-sential: summing separate optimism bonuses over mutually exclusive candidates would overvalue a branch. A branch class 𝑐 groups the branches that share a co-ordinate, so repeat visits to one decision point pool their statistics. For each class, context 𝑥 summarizes horizon pres-sure, whether a low reading is transient, recent fill consump-tion, and queue backlog. A contextual ridge model maintains 
+
+𝐴 𝑐 = 𝐼 + Í𝑏 ∈𝑐 𝑥 𝑏 𝑥 ⊤ 
+
+> 𝑏
+
+and 𝑞 𝑐 = 𝑤 0,𝑐 + Í𝑏 ∈𝑐 𝑥 𝑏 ˆ𝑦 𝑏 from a class prior 𝑤 0,𝑐 . Following linear UCB [46], the gate opens when ˆ𝑈 0 (𝑐, 𝑥 ) = 𝑥 ⊤𝐴 −1 
+
+> 𝑐
+
+𝑞 𝑐 + ˆ𝜎 𝑐 √︁ 𝑥 ⊤𝐴 −1 
+
+> 𝑐
+
+𝑥 > 0, (5) where ˆ 𝜎 𝑐 scales exploration by the observed target RMS. C3 allows 𝑛 0 cold trials per class, counted by 𝑛 𝑐 , before applying it, and registers each trial in the branch’s record before ex-pansion, so feedback arriving during setup is not lost (App. A, generation gate). A predictor too expensive to run inline is time-boxed off the dispatch path and yields an empty set at its deadline, which bounds 𝑇 setup ,𝑏 . The time it spent is charged either way, so a branch class whose predictor repeatedly pays setup and returns nothing consumable drives ˆ 𝑦 𝑏 negative and closes its own gate. 
+
+Fill gate (Action 1). For candidate 𝑠 , the optimistic prob-ability of useful service factors as ˜ 𝑝 𝑠 = ˜𝜋 sel  
+
+> 𝑠
+
+¯𝜋 use  
+
+> 𝑠
+
+: a rank-conditioned Beta upper quantile [37] times the posterior mean of timely usability conditional on selection. It clears the priced rule when 
+
+𝑈 𝑠 (𝑉 𝐻 ) = ˜𝑝 𝑠 ˆ𝐺 Δ 
+
+> 𝑠
+
+− ( 1 − ˜𝑝 𝑠 )𝐶 𝑠 (𝑉 𝐻 ) > 0. (6) Both terms are measured in milliseconds. If ˆ 𝐺 Δ 
+
+> 𝑠
+
++𝐶 𝑠 (𝑉 𝐻 ) > 0, the rule is equivalent to ˜𝑝 𝑠 > 𝑝 ∗ (𝑠, 𝑉 𝐻 ) = 𝐶 𝑠 (𝑉 𝐻 )
+
+ˆ𝐺 Δ 
+
+> 𝑠
+
++ 𝐶 𝑠 (𝑉 𝐻 ) . (7) The threshold is exact at the current projected load, so the same candidate can pass under headroom and fail under contention. On the exploitation path, Action 1 admits the highest-utility candidate that passes feasibility and atomic reservation, projects its pressure, and reprices the rest [68]. It stops when no remaining candidate has positive utility 
+
+Algorithm 1 Load-priced admission with delayed feedback. 
+
+Require: load history, posteriors, branch-class models 
+
+Action 0: generation gate for branch 𝑏  
+
+> 1:
+
+𝑐 ← BranchClass (𝑏 ); (𝑥, 𝑉 𝐻 ) ← HorizonContext  
+
+> 2:
+
+if 𝑛 𝑐 < 𝑛 0 ≤ 𝑛 𝑐 + 𝑛 pending  
+
+> 𝑐
+
+then return ⊲ cold trials in flight  
+
+> 3:
+
+if 𝑛 𝑐 ≥ 𝑛 0 ∧ ˆ𝑈 0 (𝑐, 𝑥 ) ≤ 0 ∧ ¬ Audit(b,0) then return  
+
+> 4:
+
+𝜏 ← BeginTrial (𝑏, 𝑐, 𝑥 ) 
+
+> 5:
+
+A ← EligibleCandidates (𝑏 ); S ← ∅ ; 𝑉 ′ ← 𝑉 𝐻 
+
+Action 1: fill gate at projected load  
+
+> 6:
+
+while A ≠ ∅ do  
+
+> 7:
+
+𝑠 ← arg max 𝑎 ∈ A 𝑈 𝑎 (𝑉 ′); A ← A \ { 𝑠 }; 𝑝𝑟𝑜𝑏𝑒 ← 0 
+
+> 8:
+
+if 𝑈 𝑠 (𝑉 ′) ≤ 0 then  
+
+> 9:
+
+if ¬Audit(b,1) then break ; 𝑝𝑟𝑜𝑏𝑒 ← 1 
+
+> 10:
+
+end if  
+
+> 11:
+
+if HardFeasible (𝑉 ′, 𝑠 ) ∧ Reserve (𝑏, 𝑠 ) then  
+
+> 12:
+
+record (1 − ˜𝑝 𝑠 )𝐶 𝑠 (𝑉 ′) and the producer identity  
+
+> 13:
+
+S ← S ∪ { 𝑠 }; 𝑉 ′ ← ProjectLoad (𝑉 ′, 𝑠 ) 
+
+> 14:
+
+end if  
+
+> 15:
+
+if 𝑝𝑟𝑜𝑏𝑒 = 1 then break  
+
+> 16:
+
+end while  
+
+> 17:
+
+SubmitFills( 𝑏, S); ChargeSetup( 𝜏,𝑇 setup ,𝑏 )
+
+Feedback: event 𝑒 for trial 𝜏  
+
+> 18:
+
+update selection, usability, gain, cost from 𝑒  
+
+> 19:
+
+ReviseTrial( 𝜏, Δ𝑒 ˆ𝑦 𝑏 ); ReleaseSettledResources( 𝑒 )(Proposition A.8). Seeded audits occasionally admit refused work, so closed gates keep learning [91]. When the branch resolves, C3 updates selection for every predicted candidate, admitted or not; it updates usability only for admitted, selected fills, so one that misses its deadline for use after resolution lowers usability without becoming a pre-diction error. Delayed events revise the originating branch’s target rather than adding samples. Credit requires the con-sumed entry to name the speculative producer recorded at admission (§5.4). Pricing classes separate single- and multi-stage fills, so a chain’s cost is compared with its full saving. The three contracts now form one lifecycle: C3 admits fills, C2 runs them during resolution while hiding their results, and exact, fresh C1 demands promote and reuse them. A C1 hit then suppresses the execution it answers and the speculation below it, unless an external wait follows the stage. 
+
+## 4 Implementation 
+
+Agentic harness integration. Framework-driven harnesses such as AutoGen [101], LangGraph [41], and AgentScope [25] attach to DynBranch through an HTTP interceptor that tags each model request with workflow_type_id , workflow_id ,and agent_id . Text-based coding-agent harnesses such as Claude Code [5], Codex [63], and DeepSeek Harness [21] normalize into the same arrival representation from their own wire protocols, so DynBranch depends on neither the agent loop nor the protocol. 
+
+> 7
+
+Serving integration. DynBranch hooks three lifecycle events on every normalized arrival: stage arrival, the open-ing of an unresolved branch, and the canonical request carrying its resolved selection. The hooks reuse the serving path’s existing queue, slot, and KV accounting, the same CSL manager, and the same terminal settlement path; canonical requests and speculative fills execute through the existing SGLang or vLLM executors [39, 116]. Disabling DynBranch bypasses the hooks and preserves the original semantics. 
+
+## 5 Evaluation 
+
+We evaluate end-to-end latency, completion, and tail (§5.2); how width, replicas, and depth trade GPU work for latency (§5.3); what reuse (C1), early fill (C2), and each admission gate contribute (§5.4); and how the system holds up under rising and bursty load (§5.5). Task accuracy is checked against the floor in every experiment. 
+
+5.1 Experimental Setup Testbed. Our main testbed is a dedicated server with two AMD EPYC 9755 CPUs, 2.2 TiB of main memory, and four NVIDIA H200 NVL GPUs with 141 GiB of HBM each. Work-ers serve Qwen3-32B [103] unless stated otherwise, and a distilled Qwen3-0.6B drafts branch candidates. The commod-ity replication in Figure 8(c,d) uses four distributed worker nodes on vast.ai, each serving Qwen3-8B on one NVIDIA RTX 4090 with 24 GiB of device memory. 
+
+Workloads. We instantiate the regimes in §2.1 with: 
+
+• Routing : BFCL function-calling records [66], replayed with their handler choices and arguments. 
+
+• ReAct : multi-hop questions from MuSiQue [90] over a local HotpotQA-derived retrieval corpus [106]. 
+
+• Sub-Agent : MuSiQue-derived research sub-topics; the reuse-only run (Table 1) uses the same entity distribution. 
+
+• HCI : menu-offer/user-pick pairs from Schema-Guided Dialogue [71], with paired, sampled think gaps between offer and selection [14, 22]; latency is measured on the user turn that follows the gap. 
+
+Baselines. We compare five systems spanning completed-result reuse [94, 121], workflow scheduling, and agent-level speculation. InstCache [121] pre-populates an exact request cache from predicted instructions. Helium + [94] 1 combines cache-aware scheduling with exact operator-result reuse. Parrot [52] exposes workflow dataflow as semantic variables. DSP [28] tunes speculative-plan depth under a latency–cost objective. SPAgent [34] speculates the next search-agent action and retains it in an in-request buffer. 
+
+Metrics. The reference throughout is a no-reuse floor : the same stack with speculation and cross-request reuse disabled.  
+
+> 1Helium +runs Helium’s cache-aware scheduling policy on the concurrent dispatch path and adds exact per-operator result caching.
+
+Open-loop experiments report client-observed mean per-request wall time at arrival rate 𝜆 (req/s) as the primary metric, with p99 characterizing the tail; serial comparisons report mean change against that floor. Correctness is task accuracy relative to it; the absolute level is workload-specific and not comparable across workloads. Error bars are ±1 s.d. over seeds. 
+
+5.2 End-to-End Comparison 
+
+DynBranch achieves the lowest mean latency across all four workloads, both load levels, and both hardware configura-tions (Figure 8). On 32B/H200, it improves over each work-load’s strongest external baseline by 14–32% at low load. At load, the reductions are 15–31% on Routing , Sub-Agent , and 
+
+HCI , and 6 .2% on ReAct . Across these cells, reductions against the no-reuse floor span 46–66%. Task accuracy tracks the floor in every experiment below: promotion is lossless by construction (§3.3). 
+
+Early fill under load. C2 retains substantial benefit under load on Sub-Agent and HCI , reducing latency by 30% and 35% over C1-only, respectively; Routing gains 8 .6%. On open-vocabulary ReAct , the gain falls from 16 .0% at low load to 0.4% at load, while 53–55% of issued fills fail to match the resolved branch and are discarded at both points. The similar mismatch rates accompany different latency gains: under load the binding constraint is how much execution a fill can still hide, not how often the branch is guessed right (§5.5). 
+
+Completion and tail latency. Every arm completes the offered load with zero runtime failures. Relative to the no-reuse floor on 32B/H200, DynBranch lowers p99 by 11–33% at load and 19–36% at low load on Routing , ReAct , and Sub-Agent ; HCI matches the floor at both points. 
+
+Commodity replication. The benefit generalizes to the smaller-model, distributed deployment: with Qwen3-8B on four RTX 4090s, DynBranch lowers mean latency by 6 .9– 37 .6% relative to each cell’s strongest external baseline and 29 .6–54 .6% relative to its no-reuse floor (Figure 8c,d). C2 improves over C1-only in every cell. 
+
+5.3 Speculation Cost and Sensitivity 
+
+Width, replicas, and depth each buy latency with GPU work, and each saturates; the benefit holds across model sizes and backbone families. 
+
+Width. Wider fanout keeps lowering latency, but a grow-ing share of what it adds is thrown away. At four workers, increasing fanout 𝐾 from 0 to 3 lowers mean latency from 18 .2 to 15 .2 s and adds 19 .8 GPU-seconds of speculative work per request (Figure 9a). The reduction becomes statistically significant at 𝐾 =2 (Welch’s 𝑡 -test [98] against 𝐾 =0). The dis-carded share rises from 20% at 𝐾 =1 to 33% at 𝐾 =3. Waste shifts from selected fills that fail to promote to fills for unse-lected candidates. 
+
+> 8
+
+00.51latency / floor 
+
+(a) low load 32B, 4 ×H200 00.51
+
+(b) at load 32B, 4 ×H200 
+
+Routing ReAct Sub-Agent HCI 
+
+00.511.5latency / floor 
+
+(c) low load 8B, 4 ×RTX4090 DynBranch C1-only DSP SPAgent InstCache Helium + Parrot 
+
+Routing ReAct Sub-Agent HCI 
+
+00.511.5
+
+(d) at load 8B, 4 ×RTX4090 
+
+Figure 8. Open-loop mean latency, normalized to each workload’s own no-reuse floor (dashed = 1.0). Rows are hardware; columns are load, at 𝜆 =0.12 ( HCI 0.3) and 0 .8 req/s on H200 and at lower per-workload rates on RTX 4090. Cancellation releases capacity promptly but cannot re-cover spent work: abort is confirmed 3 ms after branch reso-lution, by which point a cancelled fill has consumed 4 .1 s of engine time against 6 .2–6 .5 s for a completed one. 
+
+Replicas. Replicas stop paying after the third worker. Scaling from one to four workers with 𝐾 =𝑊 −1 at fixed per-GPU load reduces mean latency from 22 .3 to 15 .2 s (Figure 9b). The fourth worker saves only 0 .25 s while adding 1 .9 GPU-seconds of discarded work per request. Consumed work is nearly flat once width reaches the workload’s average of 2 .67 candidates per branch. Task accuracy shows no regression across the seven width and replica configurations. 
+
+Depth. On ReAct , speculating beyond one run-ahead cycle (one hop ahead) does not pay. One cycle captures the useful 0 1 2 315 18 21 010 20 1 2 3 4fanout 𝐾 
+
+> latency (s)
+
+(a) fixed box 
+
+> spec. GPU-s / request
+
+workers 𝑊 (𝐾 =𝑊 −1) 
+
+(b) box and 𝐾 
+
+latency consumed discarded 
+
+Figure 9. Speculation width and scale on Routing . (a) Fixed four-worker box, 𝐾 swept. (b) Box and 𝐾 grown together (𝐾 =𝑊 −1). overlap in the hop chain, reducing median session wall time by 11 .8% and serving 60 of 96 arrivals. Two or three cycles reach the additional hops but consume no results from them; latency changes by at most 0 .7%, within the observed 2–5% run-to-run spread. Deeper speculative decisions finish too late to precede canonical work. 
+
+Repetition and model size. More recurrence increases relative gain; larger serving models increase absolute savings (Figure 10). Raising exact replay from 0 .22 to 0 .77 increases mean-latency speedup from 1 .8× to 8 .6×. Across Qwen3 0.6B–32B models, speedup stays at 1 .75–2 .06 × while savings grow from 1 .6 to 8 .9 s per request. 
+
+Backbone family. Speedup varies little with the served family. Four alternative backbones (Figure 11a) yield 1 .55– 1.99 × speedup over their paired no-reuse floors across three seeds each, with task accuracy within 0 .012 of the floor. 0.2 0 .4 0 .6 0 .82468repeat speedup vs. floor  (a) repeat rate 
+
+speedup (left) seconds saved (right) 0510 15 20 0.6B 4B 32B 11.52params 
+
+(b) model size 
+
+0510 seconds saved (s) 
+
+Figure 10. Sensitivity on Routing to (a) exact-replay rate and (b) serving-model size (dotted: mean over sizes). 
+
+> 9Qwen3 Gemma3 OLMo2 Llama3 Yi1.5
+
+11.41.82.2speedup vs. floor  (a) backbone 
+
+0.6B 4B 8B 0.10.30.5+LoRA top-3 top-1 drafter params branch accuracy 
+
+(b) drafter Figure 11. Sensitivity to the models. (a) Served backbone on 
+
+Routing (dashed: Qwen3-32B). (b) Drafter size on ReAct .
+
+Drafter variants. Higher branch-prediction accuracy does not by itself improve end-to-end latency: a prediction must also yield its result in time for demand. Across 0.6B–8B drafters, mean-latency speedup stays at 1 .63–1 .70 ×, with no statistically significant difference between sizes across three seeds; every size improves over the floor. The 8B drafter has the highest top-1 accuracy over 140 held-out branches (Figure 11b) and issues the most fills, but has the lowest consumption rate, 50% versus 70% for 1.7B. The drafter need not match the served model’s family: Llama-3.2-1B matches Qwen3-1.7B in top-1 accuracy, and Qwen2.5-3B exceeds Qwen3-4B. Distilling 32B branch de-cisions into a 0.6B LoRA drafter yields 0 .34 top-1 accuracy, exceeding the 8B drafter at a little over half its decode cost (+LoRA in Figure 11b). 
+
+5.4 Ablation Study 
+
+C1 captures reuse across partially overlapping requests; C2 lowers latency even with cross-request reuse disabled. Both preserve task accuracy against their paired no-reuse floors. A final pair of experiments ablates the two admission gates. 
+
+Reuse alone. With C2 disabled, DynBranch reduces mean latency on partial-overlap requests by 31%, matching Helium +’s 30% reduction; InstCache [121] gains only 7% (Ta-ble 1). The workload mixes exact repeats, shared sub-DAGs, and fresh negative controls; arms are paired by request id on cold-started stacks. Exact repeats reach the cache-hit path; fresh requests yield no reuse benefit. Across the mix, DynBranch reduces mean latency by 32 .2%, with zero unsafe splices. C1 thus captures reuse below the whole-request boundary while retaining write-cascade invalidation. 
+
+Early fill alone. With C1 disabled, DynBranch reduces mean latency by 8 .5–47 .7% against the shared no-reuse floor across all four workloads on both two- and four-GPU deploy-ments (Table 2). The baselines run their native admission, and DynBranch outperforms DSP [28] and SPAgent [34] through-out. These gains overlap with C1’s: some filled stages would also be served by reuse. 
+
+Arm repeat partial overlap fresh 
+
+floor 14 .4 s 14 .8 s 13 .6 s InstCache 0.01 s 13 .8 s ( −7%) 14 .6 s Helium + 0.16 s 10 .3 s ( −30%) 14 .0 s 
+
+DynBranch 0.01 s 10 .2 s (−31 %) 14 .1 s 
+
+Table 1. Reuse alone by request type (Qwen3-32B, paired by request id); partial overlap = a sub-DAG shared with another record. 
+
+System Routing ReAct Sub-Agent HCI 
+
+2 GPUs 
+
+DynBranch −18 .6 −8.7 −34 .4 −46 .6
+
+SPAgent −12 .3 −0.7 −23 .6 −1.0DSP −13 .1 −0.4 −23 .8 −0.7
+
+4 GPUs 
+
+DynBranch −21 .9 −8.5 −34 .0 −47 .7
+
+SPAgent −10 .6 +0.7 −25 .0 +1.6DSP −11 .2 −0.2 −24 .7 −0.2
+
+Table 2. C2 isolation (serial closed-loop): mean Δ% against the shared no-reuse floor, C1 off on every arm. The gain extends beyond a single predicted action. On 
+
+Routing , 349 fills yield 500 consumed stages through chained promotion. HCI shows the largest separation: completed fills serve 73% of choices, cutting user-turn wait by 46 .6–47 .7%; neither baseline materially benefits from the think gap. 
+
+Case study. Early fill removes four downstream stages from the critical path in the paired Routing request in Figure 12, saving 5 .75 s end to end. The request computes an area and then converts its units. Two fills overlap router decoding on other workers, each completing a handler and its executor before demand, so they are served at zero engine time. The floor instead runs all four after the decisions that gate them, for 6 .50 s in total, close to the observed end-to-end saving. Both arms take the same route, and this request has the median paired saving. Across the run, 99% of promotions find a completed fill and 1% wait for one. Producer identities distinguish speculative consumption from ordinary cache hits; attributed stage counts match the system’s own counter. 
+
+DynBranch router 0 router 1
+
+h𝑡 , e𝑡 served here — 0 s engine time 
+
+fills 2.7 s 3.7 s ready ∼3 s early 
+
+floor router 0 router 1
+
+h𝑡 , e𝑡 run 6 .50 s −5.75 s 0 5 10 15 20 s 
+
+Figure 12. A paired Routing request. Each decision ( router 𝑡 )gates a handler and executor ( h𝑡 , e𝑡 ). 
+
+> 10
+
+priced off .3 .5 1232.8×
+
+4.7×
+
+> 8.3×
+
+Action 0 fills / request 
+
+(a) fills issued 
+
+A1 priced A1 fixed 0.1 1 10 
+
+−8
+
+−40
+
+𝑝 ∗=.999 2.5–2 .6 s draft 0.89 s draft fills / request 
+
+> Δ wall vs. control (%)
+
+(b) latency bought 
+
+constant 𝑝 ∗ DynBranch 
+
+Figure 13. Two-level admission on ReAct . (a) The 2 × 2ablation. (b) The same gate vs. fixed thresholds (95% CIs). 
+
+Two-level attribution. Pricing both levels issues 8 .3× fewer fills than disabling Action 0 and fixing Action 1, at indistin-guishable latency (Figure 13a at 𝜆 =0.80; 𝑛 =155, paired within batch with arm order reversed between batches). Each level controls a distinct cost: Action 0 cuts candidate-generation openings from 1 .53 to 0 .35 per request with Action 1 priced, and from 1 .42 to 0 .50 with it fixed; Action 1 reduces fill execution under either setting of Action 0. 
+
+Generation cost. Only Action 0 removes drafting cost; a fill threshold cannot. On ReAct with C1 disabled, we disable Action 0, so the drafter runs at every branch, and replace Action 1 with fixed thresholds 𝑝 ∗. Across these thresholds, fills per request vary 55 × (0 .09–4 .99), yet drafting stays at 2 .5– 2.6 s per request (Figure 13b). Against 𝑝 ∗=0.999, which issues almost no fills, the fixed thresholds lower latency by 2 .5–3 .5%, within noise (their CIs include zero); DynBranch with both gates priced lowers it by 4 .5% (95% CI 0 .5–8 .5%, 𝑛 =174 over three order-balanced seeds at 𝜆 =0.12) while drafting 0 .89 s, 2.8× less. Task accuracy spans 0 .305–0 .328 across the sweep. 
+
+5.5 Stress Test 
+
+Under rising and bursty load, priced admission keeps the benefit that fixed policies lose. 
+
+Load decomposition. C1’s saving follows the request mix rather than the rate; C2’s follows load. Across five open-loop Routing rates, C1 removes 40–48% of the floor latency; C2 removes a further 0 .25–1 .39 s (Figure 14). The floor, C1-only, and full arms replay the same schedule, giving Δ𝐶 1 =
+
+floor −C1only and Δ𝐶 2 = C1only −full; the three stack to the no-reuse floor in Figure 14a. All requests complete. C1-only and full have identical task accuracy. C2’s gain falls by 82% from its peak as load rises but re-mains positive at every measured rate. Fills issued fall from 1.4 to 0 .9 per request, while latency saved per fill falls by 72%; the latter accounts for about three quarters of the narrowing. The gain therefore depends on both admission volume and .12 .3 .55 .8 1.2 0510 15 20 
+
+𝜆 (req/s) mean latency (s)  (a) decomposition 
+
+DynBranch Δ𝐶 2 fill Δ𝐶 1 reuse .12 .3 .55 .8 1.2 00.511.5
+
+Δ𝐶 2 (s) 
+
+𝜆 (req/s) 
+
+(b) load response 
+
+saved (s) fills / request 00.5 11.5 C2 fills issued / request 
+
+Figure 14. Routing under load, three seeds. (a) Latency de-composition. (b) What C2 saves and the fills it issues. A B C D00.51phase normalized value  (a) decisions 
+
+load ¯ 𝜌 𝐻 candidate 𝑝 ∗ A0 open A B C D010 20 phase latency excess (%) 
+
+(b) control cost 
+
+DynBranch static always 
+
+Figure 15. Phased adaptation on Routing . (a) What the two levels decide. (b) What the simple controls cost. how much execution each fill hides within the remaining resolution window. 
+
+Dynamic adaptation. Priced admission lowers complete-trace mean latency to 8 .09 s, 5 .7% below static and 5 .5% below always (Figure 15b). Static opens candidate genera-tion only with at least three free workers and queue depth at most two; always opens whenever a candidate exists. Task accuracy is 0 .977 for DynBranch and static and 0 .979 for always, with no failures. The trace brackets a burst (B) and a reuse-heavy phase (C) with low-load (A) and recovery (D) phases. B and C have the same arrival rate, but C1 absorbs more work in C. The share of candidate-opening branches rises from 43% in B to 100% in C, while the break-even threshold (candidate-set mean, phase median) falls from 0 .678 to 0 .380 (Figure 15a). 
+
+5.6 Limitations and Future Work 
+
+The evaluated workflows use homogeneous serving models, stable branch coordinates before resolution, and side-effect-free speculative stages. Benefit depends on recurrence, pre-dictability, available overlap, and spare capacity. Extensions 
+
+> 11
+
+include templates from emitted plans [112], transactional isolation and cross-resource scheduling for stateful tools and heterogeneous multimodal pipelines [17, 89], and speculative units ranging from retrieval or prefill [96, 114] to branches. 
+
+## 6 Related Work 
+
+LLM state and result caches. Whole responses are cached under exact or semantic query matches [9, 45, 121], plan tem-plates are reused [112], prefix or chunk KV state is retained, blended, or routed [2, 16, 24, 64, 85, 107, 110, 115, 116], and tool outputs are memoized [10, 76, 92]. Continuum preserves KV state across tool-call pauses using tool-aware lifetimes and program-level scheduling [44]. These systems retain content or model state whose identity is already known. DynBranch instead produces work before the branch out-come exists, then promotes the exact selected result with its dependency provenance for later reuse. 
+
+Reusable computation and freshness. Semantic caching and answering queries using views established sub-query reuse [19, 30]; derived state can be maintained incremen-tally [11, 29], as Noria, ReadySet, and Differential Dataflow do in dataflow systems [27, 57, 72]. Freshness scheduling and self-adjusting computation track when derived work remains valid [1, 40]. Adaptive query processing and multi-query optimization revise and share execution plans [6, 35, 78]. DynBranch adopts the same principle (reusable work needs an explicit dependency and freshness contract) for an LLM subgraph whose dependencies are external reads, not base tables. 
+
+Agent-aware serving. Recent characterization finds hetero-geneous resources, long idle intervals, shifting bottlenecks, and cross-request tool redundancy in agentic workloads [15]. Agentix treats programs as first-class scheduling units [55], while a policy-driven agent runtime exposes observation, prediction, scoring, and action hooks between frameworks and engines, evaluating agent-aware KV prefetch and re-tention [113]. Murakkab configures workflow components across models and hardware under SLOs [17], and Dyserve adapts per-node model, verifier, and backend choices under load [69]. 
+
+Workflow and dataflow optimization. Helium couples proactive caching with workflow scheduling, while Halo plans model residency for known DAGs [79, 94]. FlowMesh deduplicates operator work by content, and Lumilake merges identical intermediate nodes across known jobs [80, 87]. Ses-sion DAG and stage-pipeline systems make their inter-stage dependencies explicit to the scheduler [38, 52, 89]. Agentix, Alto, and Conveyor add program-aware preemption, nested-ancestry dataflow orchestration, and streamed tool/decode overlap [55, 70, 102]. DynBranch supplies a dependency not yet visible to the scheduler and returns the confirmed result to the same dataflow, so these techniques remain comple-mentary. 
+
+Speculative agents and serving. Interactive Speculative Planning, dialogue-response prefetching, Speculative Ac-tions, DSP, SpecHop, SPORK, and SPEX predict future ac-tions, reasoning paths, or downstream work and verify the realized path [8, 28, 33, 59, 77, 109, 117]. Skim executes a site-template fast path and verifies its output before falling back to the full agent [100]; Sherlock instead overlaps a produced node’s verification with its downstream work [75]. Tool-oriented systems execute predicted calls [32, 88]; PASTE, SPAgent, IdleSpec, B-PASTE, and DualSpec gate them on confidence, utility, capacity, or semantic consistency [18, 34, 83, 88, 118]. PASTE is closest: beyond the hold-until-match of §2 it co-schedules tools with returning LLM ses-sions, but still consumes the confirmed result within its orig-inating request. Speculate-with-Memory carries predictor statistics and episodes across tasks [50], rather than persist-ing validated products. Token-level speculative decoding drafts and verifies individual tokens [13, 43, 49, 119], and serving systems adapt that draft work to load, batch, or bud-get [47, 48, 51, 53, 54]. A separate family lowers latency by changing what the model computes: routing to a cheaper model [62, 69], or bounding the reasoning budget, which can change the answer itself [42, 60]. DynBranch overlaps candidate subgraphs with resolving decode; completed re-sults serve later requests after exact matching and freshness checks. DynBranch reprices each branch at generation and every fill using live load and observed outcomes. 
+
+## 7 Conclusion 
+
+DynBranch removes the branch-resolution barrier by treat-ing an unresolved branch as serving state: a coordinate names candidate work before the branch resolves, an ex-act input match with fresh dependencies authorizes it af-terwards, and a two-level controller prices both against live load. Across four agentic workloads it cuts mean latency by up to 32% over the strongest prior system and by 46–66% against a no-reuse floor, with workflow results unchanged; with reuse disabled, early fill alone still removes 8 .5–47 .7%. The contract behind that result rests only on a named de-cision point and a stage safe to run twice, so it carries to workflows whose shape is decided at runtime, and priced ad-mission sustains it from idle to saturated load. Within those two requirements, predictors and pricing policies can evolve without weakening exact reuse or freshness. 
+
+## References   
+
+> [1] Umut A. Acar, Guy E. Blelloch, and Robert Harper. 2002. Adaptive Functional Programming. In POPL .[2] Shubham Agarwal, Sai Sundaresan, Subrata Mitra, Debabrata Ma-hapatra, Archit Gupta, Rounak Sharma, Nirmal Joshua Kapu, Tong Yu, and Shiv Saini. 2025. Cache-Craft: Managing Chunk-Caches for Efficient Retrieval-Augmented Generation. Proceedings of the ACM on
+> 12
+
+Management of Data (PACMMOD) 3, 3 (2025), 1–28. arXiv:2502.15734. [3] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav S. Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Infer-ence with Sarathi-Serve. In USENIX Symposium on Operating Systems Design and Implementation (OSDI) . arXiv:2403.02310. [4] Jonatha Anselmi and Neil Walton. 2022. Stability and Optimiza-tion of Speculative Queueing Networks. IEEE/ACM Transactions on Networking 30, 2 (2022), 911–922. [5] Anthropic. 2025. Claude Code Documentation. https://code.claude. com/docs . Accessed 2026-07. [6] Ron Avnur and Joseph M. Hellerstein. 2000. Eddies: Continuously Adaptive Query Processing. In SIGMOD .[7] Ibragim Badertdinov, Alexander Golubev, Maksim Nekrashevich, An-ton Shevtsov, Simon Karasik, Andrei Andriushchenko, Maria Trofi-mova, Daria Litvintseva, and Boris Yangel. 2025. SWE-rebench: An Automated Pipeline for Task Collection and Decontaminated Evalua-tion of Software Engineering Agents. arXiv preprint arXiv:2505.20411 
+
+(2025). [8] Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu. 2026. SPORK: Self-Speculative Forking to Accelerate Agentic LLM Inference. arXiv:2607.03333. [9] Fu Bang. 2023. GPTCache: An Open-Source Semantic Cache for LLM Applications Enabling Faster Answers and Cost Savings. In 
+
+Proceedings of the 3rd Workshop for Natural Language Processing Open Source Software (NLP-OSS) .[10] Farhana Begum, Craig Scott, Kofi Nyarko, Mansoureh Jeihani, and Fahmi Khalifa. 2026. Hierarchical Caching for Agentic Workflows: A Multi-Level Architecture to Reduce Tool-Execution Overhead. 
+
+Machine Learning and Knowledge Extraction (MDPI) 8, 2 (2026), 30. doi: 10.3390/make8020030 
+
+[11] José A. Blakeley, Per-Åke Larson, and Frank Wm. Tompa. 1986. Effi-ciently Updating Materialized Views. In SIGMOD .[12] Jake Brutlag. 2009. Speed Matters for Google Web Search. Google Research. [13] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads. In ICML .[14] Stuart K. Card, Thomas P. Moran, and Allen Newell. 1980. The Keystroke-Level Model for User Performance Time with Interactive Systems. Commun. ACM 23, 7 (1980), 396–410. [15] Chaokun Chang, Yukun Zhou, Kaihua Fu, Dakai An, Tianyu Feng, Hanfeng Lu, Sheng Yao, Pu Guo, Yinghao Yu, Yizhou Shan, Bo Li, Binhang Yuan, and Wei Wang. 2026. From LLM Inference to Agentic Workloads: Characterization and Implications for Serving Systems. arXiv:2608.15127. [16] Character.AI. 2024. Optimizing AI Inference at Character.AI. Char-acter.AI Research Blog. Archived at https://web.archive.org/web/20 250907181248/https://research.character.ai/optimizing-inference/ .Original URL https://research.character.ai/optimizing-inference/ 
+
+now redirects to the blog index; accessed 2026-09. [17] Gohar Irfan Chaudhry, Esha Choukse, Haoran Qiu, Íñigo Goiri, Ro-drigo Fonseca, Adam Belay, and Ricardo Bianchini. 2026. Murakkab: Resource-Efficient Agentic Workflow Orchestration in Cloud Plat-forms. In 20th USENIX Symposium on Operating Systems Design and Implementation (OSDI) . 567–587. [18] Daewon Choi, Kyunghyun Park, Woomin Song, Saket Dingliwal, Sai Muralidhar Jayanthi, Jinwoo Shin, and Aram Galstyan. 2026. Idle-Spec: Exploiting Idle Time via Speculative Planning for LLM Agents. 
+
+arXiv preprint arXiv:2605.22154 (2026). [19] Shaul Dar, Michael J. Franklin, Björn Thór Jónsson, Divesh Srivastava, and Michael Tan. 1996. Semantic Data Caching and Replacement. In 
+
+VLDB .[20] Brian D. Davison and Haym Hirsh. 1998. Predicting Sequences of User Actions. In AAAI/ICML Workshop on Predicting the Future: AI Approaches to Time-Series Analysis .[21] DeepSeek-AI. 2026. DeepSeek Harness: Everything is a Plugin. https: //github.com/deepseek-ai/deepseek-harness . Documentation at 
+
+https://deepseek-harness.github.io/deepseek-harness/ . Accessed 2026-09. [22] W. J. Doherty and A. J. Thadhani. 1982. The Economic Value of Rapid Response Time . Technical Report GE20-0752-0. IBM. [23] Stephen Fitchett and Andy Cockburn. 2012. AccessRank: Predicting What Users Will Do Next. In ACM CHI Conference on Human Factors in Computing Systems .[24] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient Large Language Model Serving for Multi-turn Conversations with CachedAttention. In USENIX Annual Technical Conference (ATC 24) .[25] Dawei Gao, Zitao Li, Xuchen Pan, Weirui Kuang, Zhijian Ma, Bingchen Qian, Fei Wei, Wenhao Zhang, Yuexiang Xie, Daoyuan Chen, Liuyi Yao, Hongyi Peng, Zeyu Zhang, Lin Zhu, Chen Cheng, Hongzhu Shi, Yaliang Li, Bolin Ding, and Jingren Zhou. 2024. AgentScope: A Flexible yet Robust Multi-Agent Platform. arXiv:2402.14034. [26] Wei Gao, Yuheng Zhao, Dilxat Muhtar, Dakai An, Xuchun Shang, Tianyuan Wu, Lunxi Cao, Shaopan Xiong, Weixun Wang, Ju Huang, Teng Ma, Siran Yang, Jiamang Wang, Lin Qu, Bo Zheng, and Wei Wang. 2026. ROSE: Rollout On Serving GPUs via Cooperative Elas-ticity for Agentic RL. arXiv:2605.06534. [27] Jon Gjengset, Malte Schwarzkopf, Jonathan Behrens, Lara Timbó Araújo, Martin Ek, Eddie Kohler, M. Frans Kaashoek, and Robert Morris. 2018. Noria: Dynamic, Partially-Stateful Data-Flow for High-Performance Web Applications. In 13th USENIX Symposium on Oper-ating Systems Design and Implementation (OSDI ’18) . USENIX Associ-ation, Carlsbad, CA, 213–231. https://www.usenix.org/conference/ osdi18/presentation/gjengset 
+
+[28] Yilin Guan, Qingfeng Lan, Fei Sun, Dujian Ding, Devang Acharya, Chi Wang, William Yang Wang, and Wenyue Hua. 2025. Dynamic Speculative Agent Planning. arXiv:2509.01920. [29] Ashish Gupta, Inderpal Singh Mumick, and V. S. Subrahmanian. 1993. Maintaining Views Incrementally. In SIGMOD .[30] Alon Y. Halevy. 2001. Answering Queries Using Views: A Survey. 
+
+The VLDB Journal 10, 4 (2001). [31] Horace He and Thinking Machines Lab. 2025. Defeating Nondeter-minism in LLM Inference. Thinking Machines Lab: Connectionism. doi: 10.64434/tml.20250910 https://thinkingmachines.ai/blog/defeati ng-nondeterminism-in-llm-inference/ .[32] Coleman Hooper, Minwoo Kang, Suhong Moon, Nicholas Lee, Eric Wen, John Wawrzynek, Michael W. Mahoney, Yakun Sophia Shao, Amir Gholami, and Kurt Keutzer. 2026. Speculative Interaction Agents: Building Real-Time Agents with Asynchronous I/O and Spec-ulative Tool Calling. arXiv:2605.13360. [33] Wenyue Hua, Mengting Wan, Shashank Vadrevu, Ryan Nadel, Yongfeng Zhang, and Chi Wang. 2024. Interactive Speculative Plan-ning: Enhance Agent Efficiency through Co-design of System and User Interface. arXiv:2410.00079. [34] Zixiao Huang, Wen Zeng, Tianyu Fu, Tengxuan Liu, Yizhou Sun, Ke Hong, Xinhao Yang, Chengchun Liu, Yan Li, Quanlu Zhang, Guohao Dai, Zhenhua Zhu, and Yu Wang. 2025. Reducing Latency of LLM Search Agent via Speculation-based Algorithm–System Co-Design. 
+
+arXiv preprint arXiv:2511.20048 (2025). [35] Navin Kabra and David J. DeWitt. 1998. Efficient Mid-Query Re-Optimization of Sub-Optimal Query Execution Plans. In SIGMOD .[36] Vladimir Karpukhin, Barlas Oğuz, Sewon Min, Patrick Lewis, Ledell Wu, Sergey Edunov, Danqi Chen, and Wen-tau Yih. 2020. Dense 
+
+> 13
+
+Passage Retrieval for Open-Domain Question Answering. In Confer-ence on Empirical Methods in Natural Language Processing (EMNLP) .arXiv:2004.04906. [37] Emilie Kaufmann, Olivier Cappé, and Aurélien Garivier. 2012. On Bayesian Upper Confidence Bounds for Bandit Problems. In Proceed-ings of the 15th International Conference on Artificial Intelligence and Statistics (AISTATS) . 592–600. [38] Sehoon Kim, Suhong Moon, Ryan Tabrizi, Nicholas Lee, Michael W. Mahoney, Kurt Keutzer, and Amir Gholami. 2024. An LLM Compiler for Parallel Function Calling. In ICML .[39] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In SOSP .[40] Alexandros Labrinidis and Nick Roussopoulos. 2003. Balancing Per-formance and Data Freshness in Web Database Servers. In VLDB .[41] LangChain. 2025. LangGraph: Low-Level Orchestration Framework for Building Stateful Agents. https://docs.langchain.com/oss/pytho n/langgraph/overview . Accessed 2026-09. [42] Tamera Lanham, Anna Chen, Ansh Radhakrishnan, Benoit Steiner, Carson Denison, et al. 2023. Measuring Faithfulness in Chain-of-Thought Reasoning. arXiv:2307.13702. [43] Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast Infer-ence from Transformers via Speculative Decoding. In ICML .[44] Hanchen Li, Runyuan He, Qiuyang Mang, Qizheng Zhang, Huanzhi Mao, Xiaokun Chen, Hangrui Zhou, Huanchen Zhang, Alvin Cheung, Joseph E. Gonzalez, and Ion Stoica. 2025. Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live. arXiv:2511.02230. [45] Jiaxing Li, Chi Xu, Feng Wang, Isaac von Riedemann, Cong Zhang, and Jiangchuan Liu. 2024. SCALM: Towards Semantic Caching for Automated Chat Services with Large Language Models. In IEEE/ACM International Symposium on Quality of Service (IWQoS) .[46] Lihong Li, Wei Chu, John Langford, and Robert E. Schapire. 2010. A Contextual-Bandit Approach to Personalized News Article Rec-ommendation. In Proceedings of the 19th International Conference on World Wide Web . 661–670. doi: 10.1145/1772690.1772758 
+
+[47] Ruixiao Li, Fahao Chen, and Peng Li. 2025. Semi-Clairvoyant Sched-uling of Speculative Decoding Requests to Minimize LLM Inference Latency. In IJCAI .[48] Rui Li, Zhaoning Zhang, Libo Zhang, Huaimin Wang, Xiang Fu, and Zhiquan Lai. 2025. Nightjar: Dynamic Adaptive Speculative Decoding for Large Language Models Serving. arXiv preprint arXiv:2512.22420 
+
+(2025). [49] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024. EA-GLE: Speculative Sampling Requires Rethinking Feature Uncertainty. In ICML .[50] Yu Li, Qinyuan Ye, Prafulla Kumar Choubey, Jiaxin Zhang, and Chien-Sheng Wu. 2026. Speculate with Memory: Lossless Acceleration for LLM Agents. arXiv:2607.12236. [51] Zikun Li, Zhuofu Chen, Remi Delacourt, Gabriele Oliaro, Zeyu Wang, Qinghan Chen, Shuhuai Lin, April Yang, Zhihao Zhang, Zhuoming Chen, Yi-Hsiang Lai, Xinhao Cheng, Xupeng Miao, and Zhihao Jia. 2026. AdaServe: Accelerating Multi-SLO LLM Serving with SLO-Customized Speculative Decoding. In EuroSys .[52] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient Serv-ing of LLM-based Applications with Semantic Variable. In OSDI .arXiv:2405.19888. [53] Xiaoxuan Liu, Lanxiang Hu, Peter Bailis, Alvin Cheung, Zhijie Deng, Ion Stoica, and Hao Zhang. 2024. Online Speculative Decoding. In 
+
+ICML .[54] Xiaoxuan Liu, Jongseok Park, Langxiang Hu, Woosuk Kwon, Zhuohan Li, Chen Zhang, Kuntai Du, Xiangxi Mo, Kaichao You, Alvin Cheung, Zhijie Deng, Ion Stoica, and Hao Zhang. 2024. TurboSpec: Closed-loop Speculation Control System for Optimizing LLM Serving Goodput. 
+
+arXiv preprint arXiv:2406.14066 (2024). [55] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong, Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E. Gonzalez, and Ion Stoica. 2026. Agentix: An Efficient Serving Engine for LLM Agents as General Programs. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI ’26) . USENIX Association, Renton, WA, 2443–2459. https://www.usenix.org/c onference/nsdi26/presentation/luo Earlier preprint titled Autellix, arXiv:2502.13965. [56] Oorja Majgaonkar, Zhiwei Fei, Xiang Li, Federica Sarro, and He Ye. 2025. Understanding Code Agent Behaviour: An Empirical Study of Success and Failure Trajectories. arXiv:2511.00197. [57] Frank McSherry, Derek G. Murray, Rebecca Isaacs, and Michael Isard. 2013. Differential Dataflow. In CIDR .[58] Xupeng Miao, Gabriele Oliaro, Zhihao Zhang, Xinhao Cheng, Zeyu Wang, Zhengxin Zhang, Rae Ying Yee Wong, Alan Zhu, Lijie Yang, Xiaoxiang Shi, Chunan Shi, Zhuoming Chen, Daiyaan Arfeen, Reyna Abhyankar, and Zhihao Jia. 2024. SpecInfer: Accelerating Large Language Model Serving with Tree-based Speculative Inference and Verification. In ASPLOS . doi: 10.1145/3620666.3651335 
+
+[59] Kiyotada Mori, Seiya Kawano, Angel Fernando Garcia Contreras, and Koichiro Yoshino. 2025. Dialogue Response Prefetching Based on Semantic Similarity and Prediction Confidence of Language Model. In INTERSPEECH .[60] Niklas Muennighoff, Zitong Yang, Weijia Shi, Xiang Lisa Li, Li Fei-Fei, Hannaneh Hajishirzi, Luke Zettlemoyer, Percy Liang, Emmanuel Candès, and Tatsunori Hashimoto. 2025. s1: Simple Test-Time Scaling. arXiv:2501.19393. [61] Robert O’Callahan, Chris Jones, Nathan Froyd, Kyle Huey, Albert Noll, and Nimrod Partush. 2017. Engineering Record and Replay for Deployability. In USENIX Annual Technical Conference (ATC) .[62] Isaac Ong, Amjad Almahairi, Vincent Wu, Wei-Lin Chiang, Tian-hao Wu, Joseph E. Gonzalez, M. Waleed Kadous, and Ion Stoica. 2024. RouteLLM: Learning to Route LLMs with Preference Data. arXiv:2406.18665. [63] OpenAI. 2025. Codex CLI Documentation. https://developers.openai. com/codex/cli . Accessed 2026-07. [64] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Efficient Prefix Caching for Accelerating LLM-Based Multi-Agent Workflows. arXiv preprint arXiv:2507.07400 (2025). [65] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Split-wise: Efficient Generative LLM Inference Using Phase Splitting. In 
+
+ACM/IEEE International Symposium on Computer Architecture (ISCA) .arXiv:2311.18677. [66] Shishir G. Patil, Huanzhi Mao, Fanjia Yan, Charlie Cheng-Jie Ji, Vishnu Suresh, Ion Stoica, and Joseph E. Gonzalez. 2025. The Berkeley Func-tion Calling Leaderboard (BFCL): From Tool Use to Agentic Eval-uation of Large Language Models. In Proceedings of the 42nd Inter-national Conference on Machine Learning (ICML) (PMLR, Vol. 267) .48371–48392. [67] Shishir G. Patil, Tianjun Zhang, Xin Wang, and Joseph E. Gonzalez. 2024. Gorilla: Large Language Model Connected with Massive APIs. In NeurIPS .[68] R. Hugo Patterson, Garth A. Gibson, Eka Ginting, Daniel Stodolsky, and Jim Zelenka. 1995. Informed Prefetching and Caching. In SOSP .[69] Jiayi Qian, Yichong Zhang, Hanchen Yang, Chun Tao, Souvik Kundu, Zishen Wan, and Tushar Krishna. 2026. Serving Agentic Workflows with a Physical-Plan Compiler and Adaptive Runtime. arXiv:2607.02942. 
+
+> 14
+
+[70] Deepti Raghavan, Keshav Santhanam, Muhammad Shahir Rahman, Nayani Modugula, Luis Gaspar Schroeder, Maximilien Cura, Houjun Liu, Pratiksha Thaker, Philip Levis, and Matei Zaharia. 2024. Alto: Or-chestrating Distributed Compound AI Systems with Nested Ancestry. arXiv:2403.04311v3. [71] Abhinav Rastogi, Xiaoxue Zang, Srinivas Sunkara, Raghav Gupta, and Pranav Khaitan. 2020. Towards Scalable Multi-Domain Conversa-tional Agents: The Schema-Guided Dialogue Dataset. In Proceedings of the AAAI Conference on Artificial Intelligence .[72] Readyset. 2022. Introducing Readyset: High-Performance SQL Caching Engine. https://readyset.io/blog/introducing-readyset .[73] Pol G. Recasens, Ferran Agullo, Yue Zhu, Chen Wang, Eun Kyung Lee, Olivier Tardieu, Jordi Torres, and Josep Ll. Berral. 2025. Mind the Memory Gap: Unveiling GPU Bottlenecks in Large-Batch LLM Infer-ence. In IEEE International Conference on Cloud Computing (CLOUD) .arXiv:2503.08311. [74] Sajal Regmi and Chetan Phakami Pun. 2024. GPT Semantic Cache: Reducing LLM Costs and Latency via Semantic Embedding Caching. 
+
+arXiv preprint arXiv:2411.05276 (2024). [75] Yeonju Ro, Haoran Qiu, Íñigo Goiri, Rodrigo Fonseca, Ricardo Bian-chini, Aditya Akella, Zhangyang Wang, Mattan Erez, and Esha Choukse. 2025. Sherlock: Reliable and Efficient Agentic Workflow Execution. arXiv:2511.00330. [76] Chaoyi Ruan, Chao Bi, Kaiwen Zheng, Ziji Shi, Xinyi Wan, and Jialin Li. 2026. Cortex: Achieving Low-Latency, Cost-Efficient Remote Data Access for LLM via Semantic-Aware Knowledge Caching. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI ’26) . USENIX Association, Renton, WA, 2407–2421. https: //www.usenix.org/conference/nsdi26/presentation/ruan-cortex 
+
+[77] Mehrdad Saberi, Keivan Rezaei, and Soheil Feizi. 2026. SpecHop: Continuous Speculation for Accelerating Multi-Hop Retrieval Agents. 
+
+arXiv preprint arXiv:2605.21965 (2026). [78] Timos K. Sellis. 1988. Multiple-Query Optimization. ACM TODS 13, 1 (1988), 23–52. doi: 10.1145/42201.42203 
+
+[79] Junyi Shen, Noppanat Wadlom, and Yao Lu. 2025. Batch Query Processing and Optimization for Agentic Workflows. arXiv preprint arXiv:2509.02121 (2025). [80] Junyi Shen, Noppanat Wadlom, Lingfeng Zhou, Dequan Wang, Xu Miao, Lei Fang, and Yao Lu. 2025. FlowMesh: A Service Fabric for Composable LLM Workflows. arXiv preprint arXiv:2510.26913 (2025). [81] Zhengliang Shi, Yuhan Wang, Lingyong Yan, Pengjie Ren, Shuaiqiang Wang, Dawei Yin, and Zhaochun Ren. 2025. Retrieval Models Aren’t Tool-Savvy: Benchmarking Tool Retrieval for Large Language Models. In Findings of the Association for Computational Linguistics (ACL Findings) . arXiv:2503.01763. [82] James E. Smith. 1981. A Study of Branch Prediction Strategies. In 
+
+Proceedings of the 8th Annual Symposium on Computer Architecture (ISCA) . 135–148. [83] Yanfei Song. 2026. B-PASTE: Beam-Aware Pattern-Guided Speculative Execution for Resource-Constrained LLM Agents. arXiv:2604.16469 [84] Santhosh Srinath, Onur Mutlu, Hyesoon Kim, and Yale N. Patt. 2007. Feedback Directed Prefetching: Improving the Performance and Bandwidth-Efficiency of Hardware Prefetchers. In HPCA .[85] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, and Yiying Zhang. 2025. Preble: Efficient Distributed Prompt Scheduling for LLM Serving. In International Conference on Learning Representa-tions (ICLR) .[86] Qidong Su, Christina Giannoula, and Gennady Pekhimenko. 2023. The Synergy of Speculative Decoding and Batching in Serving Large Language Models. arXiv preprint arXiv:2310.18813 (2023). [87] Zhengyuan Su, Noppanat Wadlom, Junyi Shen, Yicong Huang, Wen-tao Wu, and Yao Lu. 2026. Lumilake: An Agentic Analytics Engine for AI4Science. Proceedings of the Supporting Our AI Overlords work-shop at the ACM Conference on AI and Agentic Systems (SAO@CAIS 2026). https://www.microsoft.com/en-us/research/publication/lumi lake-an-agentic-analytics-engine-for-ai4science/ 
+
+[88] Yifan Sui, Han Zhao, Rui Ma, Zhiyuan He, Hao Wang, Jianxun Li, Kaiqiang Xu, Kai Chen, and Yuqing Yang. 2026. Parallelizing Tool Execution and LLM Generation for Low-Latency Agent Serving. arXiv:2603.18897v3 (rev. 2026-06-16). [89] Xin Tan, Yimin Jiang, Yitao Yang, and Hong Xu. 2025. Towards End-to-End Optimization of LLM-based Applications with Ayo. In 
+
+Proceedings of the 30th ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 2 (ASPLOS ’25) . Association for Computing Machinery, Rotterdam, Netherlands, 1302–1316. doi: 10.1145/3676641.3716278 Earlier preprint titled Teola, arXiv:2407.00326. [90] Harsh Trivedi, Niranjan Balasubramanian, Tushar Khot, and Ashish Sabharwal. 2022. MuSiQue: Multihop Questions via Single-hop Ques-tion Composition. Transactions of the Association for Computational Linguistics (TACL) 10 (2022). [91] Claire Vernade, Alexandra Carpentier, Tor Lattimore, Giovanni Zap-pella, Beyza Ermis, and Michael Brückner. 2020. Linear Bandits with Stochastic Delayed Feedback. In Proceedings of the 37th Interna-tional Conference on Machine Learning (ICML) (Proceedings of Machine Learning Research, Vol. 119) . 9712–9721. arXiv:1807.02089. [92] Abhishek Vijaya Kumar, Bhaskar Kataria, Byungsoo Oh, Emaad Man-zoor, and Rachee Singh. 2026. TVCache: A Stateful Tool-Value Cache for Post-Training LLM Agents. arXiv:2602.10986. [93] Ashish Vulimiri, P. Brighten Godfrey, Radhika Mittal, Justine Sherry, Sylvia Ratnasamy, and Scott Shenker. 2013. Low Latency via Redun-dancy. In ACM CoNEXT .[94] Noppanat Wadlom, Junyi Shen, and Yao Lu. 2026. Efficient LLM Serving for Agentic Workflows: A Data Systems Perspective. arXiv preprint arXiv:2603.16104 (2026). [95] Jiahao Wang, Jinbo Han, Xingda Wei, Sijie Shen, Dingyan Zhang, Chenguang Fang, Rong Chen, Wenyuan Yu, and Haibo Chen. 2025. KVCache Cache in the Wild: Characterizing and Optimizing KV-Cache Cache at a Large Cloud Provider. In USENIX Annual Technical Conference (ATC) . arXiv:2506.02634. [96] Zilong Wang, Zifeng Wang, Long Le, Huaixiu Steven Zheng, Swaroop Mishra, Vincent Perot, Yuwei Zhang, Anush Mattapalli, Ankur Taly, Jingbo Shang, Chen-Yu Lee, and Tomas Pfister. 2025. Speculative RAG: Enhancing Retrieval Augmented Generation through Drafting. In ICLR .[97] Martin L. Weitzman. 1979. Optimal Search for the Best Alternative. 
+
+Econometrica 47, 3 (1979), 641–654. [98] B. L. Welch. 1947. The Generalization of ‘Student’s’ Problem when Several Different Population Variances Are Involved. Biometrika 34, 1-2 (1947), 28–35. doi: 10.1093/biomet/34.1-2.28 
+
+[99] Qizhen Weng, Wencong Xiao, Yinghao Yu, Wei Wang, Cheng Wang, Jian He, Yong Li, Liping Zhang, Wei Lin, and Yu Ding. 2022. MLaaS in the Wild: Workload Analysis and Scheduling in Large-Scale Hetero-geneous GPU Clusters. In USENIX Symposium on Networked Systems Design and Implementation (NSDI) .[100] Mike Wong, Kevin Hsieh, Suman Nath, and Ravi Netravali. 2026. Skim: Speculative Execution for Fast and Efficient Web Agents. arXiv:2605.16565. [101] Qingyun Wu, Gagan Bansal, Jieyu Zhang, Yiran Wu, Beibin Li, Erkang Zhu, Li Jiang, Xiaoyun Zhang, Shaokun Zhang, Jiale Liu, Ahmed Has-san Awadallah, Ryen W. White, Doug Burger, and Chi Wang. 2023. AutoGen: Enabling Next-Gen LLM Applications via Multi-Agent Con-versation. arXiv:2308.08155. [102] Yechen Xu, Xinhao Kong, Tingjun Chen, and Danyang Zhuo. 2024. Conveyor: Efficient Tool-aware LLM Serving with Tool Partial Exe-cution. arXiv:2406.00059. 
+
+> 15
+
+[103] An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. 2025. Qwen3 Technical Report. arXiv:2505.09388. [104] John Yang, Carlos E. Jimenez, Alexander Wettig, Kilian Lieret, Shunyu Yao, Karthik Narasimhan, and Ofir Press. 2024. SWE-agent: Agent-Computer Interfaces Enable Automated Software Engineering. In 
+
+Advances in Neural Information Processing Systems (NeurIPS) .[105] Sen Yang, Shujian Huang, Xinyu Dai, and Jiajun Chen. 2024. Multi-Candidate Speculative Decoding. arXiv preprint arXiv:2401.06706 
+
+(2024). [106] Zhilin Yang, Peng Qi, Saizheng Zhang, Yoshua Bengio, William W. Cohen, Ruslan Salakhutdinov, and Christopher D. Manning. 2018. HotpotQA: A Dataset for Diverse, Explainable Multi-hop Question Answering. In EMNLP .[107] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fusion. In European Conference on Computer Sys-tems (EuroSys) . arXiv:2405.16444. [108] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2023. ReAct: Synergizing Reasoning and Acting in Language Models. In ICLR .[109] Naimeng Ye, Arnav Ahuja, Georgios Liargkovas, Yunan Lu, Kostis Kaffes, and Tianyi Peng. 2025. Speculative Actions: A Lossless Frame-work for Faster Agentic Systems. arXiv preprint arXiv:2510.04371 
+
+(2025). [110] Shan Yu, Junyi Shu, Yuanjiang Ni, Kun Qian, Xue Li, Yang Wang, Jinyuan Zhang, Ziyi Xu, Shuo Yang, Lingjun Zhu, Ennan Zhai, Qingda Lu, Jiarong Xing, Youyou Lu, Xin Jin, Xuanzhe Liu, and Harry Xu. 2026. Pythia: Exploiting Workflow Predictability for Efficient Agent-Native LLM Serving. arXiv preprint arXiv:2604.25899 (2026). [111] Mengqi Yuan, Zilong Zhou, Xinzhuang Xiong, Weiming Wu, Jiayang Sun, Jiamin Song, Kaiqian Cui, Bowen Wang, Haoyuan Wu, Yitong Li, Dunjie Lu, Haikong Lu, Qi Zhen, Xinyuan Wang, Jiaqi Deng, Yuhao Yang, Cheng Chen, Boyuan Zheng, Alex Su, Xiao Yu, Hao Zou, Saaket Agashe, Xing Han Lu, Manpreet Kaur, Zhengyang Qi, Vincent Sunn Chen, Frederic Sala, Dayiheng Liu, Junyang Lin, Zhou Yu, Yu Su, Siva Reddy, Xin Eric Wang, Peng Qi, Tianbao Xie, and Tao Yu. 2026. OSWorld 2.0: Benchmarking Computer Use Agents on Long-Horizon Real-World Tasks. arXiv:2606.29537. [112] Qizheng Zhang, Michael Wornow, and Kunle Olukotun. 2025. Agentic Plan Caching: Test-Time Memory for Fast and Cost-Efficient LLM Agents. In NeurIPS . doi: 10.52202/085713-3451 arXiv:2506.14852. [113] Rui Zhang, Chaeeun Kim, and Liting Hu. 2026. A Policy-Driven Runtime Layer for Agentic LLM Serving. arXiv:2605.27744. [114] Wuyang Zhang and Shichao Pei. 2026. Predictive Prefetching for Retrieval-Augmented Generation. In ICML .[115] Haoyu Zheng, Fangcheng Fu, Jia Wu, Binhang Yuan, Yongqiang Zhang, Hao Wang, Yuanyuan Zhu, Xiao Yan, and Jiawei Jiang. 2026. Efficient Serving for Dynamic Agent Workflows with Prediction-based KV-Cache Management. arXiv preprint arXiv:2605.06472 (2026). [116] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Effi-cient Execution of Structured Language Model Programs. In NeurIPS .[117] Shuzhang Zhong, Haochen Huang, Shengxuan Qiu, Pengfei Zuo, Runsheng Wang, and Meng Li. 2026. Breaking the Reward Barrier: Accelerating Tree-of-Thought Reasoning via Speculative Exploration. In 20th USENIX Symposium on Operating Systems Design and Imple-mentation (OSDI 26) . arXiv:2605.10195. [118] Shuzhang Zhong, Baotong Lu, Qi Chen, Chuanjie Liu, Fan Yang, and Meng Li. 2026. DualSpec: Accelerating Deep Research Agents via Dual-Process Action Speculation. arXiv:2603.07416. [119] Yongchao Zhou, Kaifeng Lyu, Ankit Singh Rawat, Aditya Krishna Menon, Afshin Rostamizadeh, Sanjiv Kumar, Jean-François Kagy, and Rishabh Agarwal. 2024. DistillSpec: Improving Speculative Decoding via Knowledge Distillation. In ICLR .[120] Kan Zhu, Mathew Jacob, Chenxi Ma, Yi Pan, Stephanie Wang, Arvind Krishnamurthy, and Baris Kasikci. 2026. TraceLab: Characterizing Coding Agent Workloads for LLM Serving. arXiv:2606.30560. [121] Longwei Zou, Yan Liu, Jiamu Kang, Tingfeng Liu, Jiangang Kong, and Yangdong Deng. 2024. InstCache: A Predictive Cache for LLM Serving. arXiv:2411.13820. 
+
+## A Guarantees and Complexity of Reuse and Admission 
+
+This appendix derives the guarantees behind DynBranch. Two results concern C1 and C2: the subgraph key is the coarsest reuse key that is safe without a model of the stage, so it maximizes the reuse of Equation (1), and promotion is correspondingly the most permissive safe rule. For C3, we analyze Action 0’s branch-level sign decision, then establish exact per-candidate break-even, stepwise optimality, and terminal maximality of Action 1’s sequential repricing. An exact ordered-subset oracle checks the latter. 
+
+Setting. Fix a realized execution domain E. An execution 
+
+𝑒 ∈ E of a speculable stage 𝑣 (𝑒 ) renders an input 𝑞 (𝑒 ), reads external records at versions 𝐷 (𝑒 ), and has semantic input 
+
+𝑡 (𝑒 ) =  fp (𝑣 (𝑒 )) , 𝑞 (𝑒 ), 𝐷 (𝑒 ),
+
+where the stage fingerprint covers its code, model, and ex-ecution parameters. It produces 𝑦 (𝑒 ) = 𝐹  𝑡 (𝑒 ), where 𝐹 is deterministic: equal inputs and dependency versions give equal outputs (§3.3). Write 𝑥 (𝑒 ) =  𝑡 (𝑒 ), 𝑧 (𝑒 ) for the meta-data available before the stage executes, where 𝑧 is any fur-ther recorded field, such as unrelated parts of the request. A keying function 𝜅 is input-based if 𝜅 (𝑥 ) is a fixed function of that metadata for every possible 𝐹 : it neither executes nor models 𝐹 , and cannot inspect the stage’s outputs or interme-diate results to decide a match. Every cache that does not model the stage it serves is input-based in this sense. Let F be the family of stage semantics the serving layer admits—every deterministic function of 𝑡 , since nothing fur-ther about 𝐹 is known to it. Call 𝜅 uniformly sound if for every 
+
+𝐹 ∈ F and all 𝑒 1, 𝑒 2 ∈ E , 𝜅 (𝑥 1) = 𝜅 (𝑥 2) implies 𝑦 (𝑒 1) = 𝑦 (𝑒 2).Write 
+
+𝜅 ★(𝑥 ) =  fp (𝑣 ), ℎ (𝑞 ), 𝐷 
+
+for DynBranch’s reuse name under its freshness guard (§3.2): the stage fingerprint, the rendered input under a hash ℎ
+
+assumed collision-free on inputs in E, and the dependency versions the guard certifies. 
+
+> 16
+
+Lemma A.1 (Soundness) . 𝜅 ★ is uniformly sound. Proof. 𝜅 ★(𝑥 1) = 𝜅 ★(𝑥 2) gives 𝑡 (𝑒 1) = 𝑡 (𝑒 2) because ℎ is collision-free on the realized inputs. Determinism of 𝐹 yields 
+
+𝑦 (𝑒 1) = 𝑦 (𝑒 2). □
+
+Lemma A.2 (Coarsest sound key) . Let 𝜅 be input-based and uniformly sound. Then 𝜅 (𝑥 1) = 𝜅 (𝑥 2) implies 𝜅 ★(𝑥 1) =
+
+𝜅 ★(𝑥 2): the partition 𝜅 induces refines the one 𝜅 ★ induces. Proof. By contraposition. Suppose 𝜅 ★(𝑥 1) ≠ 𝜅 ★(𝑥 2). Then 
+
+𝑡 (𝑒 1) ≠ 𝑡 (𝑒 2). Because F contains every deterministic func-tion of 𝑡 , it contains some 𝐹 with 𝐹  𝑡 (𝑒 1) ≠ 𝐹  𝑡 (𝑒 2). Uni-form soundness of 𝜅 on that 𝐹 forces 𝜅 (𝑥 1) ≠ 𝜅 (𝑥 2); because an input-based 𝜅 is fixed independently of 𝐹 , it cannot merge the pair for any other semantics either. □
+
+Corollary A.3 (Maximal hit rate) . Over the same resident entries and subgraph at each decision point 𝑗 , 𝜅 ★ maximizes every 𝑃 hit  
+
+> 𝑗
+
+in Equation (1) among uniformly sound input-based keys, and hence maximizes the expected saving E[Δ𝑇 reuse ].Proof. A coarser partition serves weakly more demands, and by Lemma A.2 no uniformly sound input-based key is coarser than 𝜅 ★. Soundness is Lemma A.1. Each 𝑇 sub  
+
+> 𝑗
+
+is fixed, so maximizing every 𝑃 hit  
+
+> 𝑗
+
+maximizes the sum. □
+
+A whole-response key, which requires the entire request to match, and a root-anchored prefix key, which requires every token up to 𝑣 to match, both separate executions that 
+
+𝜅 ★ merges whenever the difference lies outside 𝑣 ’s rendered input. Each is therefore a strict refinement on some workflow; Figure 7 exhibits one, where they serve 0 and 2 of the six taken nodes against 𝜅 ★’s 4. Corollary A.3 says that 4 is the top of that ladder and not merely its highest built rung. Input-based is necessary rather than cosmetic: a key that modeled 
+
+𝐹 could merge distinct inputs with equal outputs, but that lies outside the exact input-identity contract of §3.2. 
+
+Corollary A.4 (Completeness of promotion) . Fix the shad-ows eligible under C2’s lifecycle and C1’s freshness and prove-nance guards. Promotion—match on 𝜅 ★ with a fresh recorded read-set—is the most permissive sound rule over that set: no demand–shadow pair that some uniformly sound input-based rule could authorize is refused. Proof. A uniformly sound input-based rule admitting a pair that 𝜅 ★ separates would contradict Lemma A.2. Every re-maining pair has equal keys and is authorized. □
+
+With the soundness argument of §3.3, which shows pro-motion never serves a value canonical execution would not have produced, Corollary A.4 brackets C2 from the other side. 
+
+Proposition A.5 (Minimal graph-based write cascade) . As-sume complete read sets and producer edges, and consider invalidation rules using only this dependency graph, without modeling stage semantics. For a write set 𝑊 , let 𝐴 contain its direct readers and every descendant that loses a valid producer. The reverse-index cascade invalidates exactly 𝐴 . If 𝐸 𝐴 are the traversed producer edges and 𝑅 𝐴 the dependency references removed, it takes 𝑂 (| 𝑊 | + | 𝐴 | + | 𝐸 𝐴 | + | 𝑅 𝐴 |) time and 𝑂 (| 𝐴 |) 
+
+auxiliary space. No uniformly sound rule over this graph can invalidate a strict subset of 𝐴 .Proof. The reverse index finds exactly the direct readers, and graph traversal visits each affected node and edge once; re-moving a node retires each of its recorded dependencies once. Every node in 𝐴 lies on a dependency path from a changed record. For each such node, the admitted seman-tic family contains a deterministic function in which that change reaches its output. A graph-only rule cannot estab-lish that the output is unchanged, so retaining the node is not uniformly sound. A node outside 𝐴 either has no such path or retains a valid producer, so the cascade need not invalidate it. With incomplete provenance, DynBranch may extend the cascade conservatively; soundness remains, but minimality is not claimed. □
+
+Lemma A.6 (Tight overlap bound) . Fix the realized durations at branch 𝑘 . Early execution removes at most min (𝑇 gen  
+
+> 𝑘
+
+,𝑇 exec  
+
+> 𝑘
+
+)
+
+when the selected candidate is covered and zero otherwise. Expectation over coverage and summation give Equation (2). Equality is attainable when an eligible fill starts with the res-olution window, runs without contention, and is consumed immediately after resolution. Proof. Execution cannot overlap more than either the win-dow or its own duration. The stated schedule attains their minimum; multiplying by the coverage indicator and taking expectations gives the bound. □
+
+Reuse-path complexity. For rendered-input size |𝑞 |, re-turned payload size |𝑦 |, and a read set of size 𝑟 , content-key construction costs 𝑂 (| 𝑞 |) , an indexed probe is expected 𝑂 (1),deep-copying a hit costs 𝑂 (| 𝑦 |) , and constructing the sorted read-set version costs 𝑂 (𝑟 log 𝑟 ). For 𝐾 𝑏 shadows and 𝑅 𝑏 de-pendency references on branch 𝑏 , its index makes branch resolution and promotion 𝑂 (𝐾 𝑏 +𝑅 𝑏 ) rather than linear in all shadows. Exceeding the CSL’s capacity can add an eviction scan over the cache. Aside from payloads, 𝑁 entries with 
+
+𝑅 dependency references use 𝑂 (𝑁 + 𝑅 ) metadata; caps and TTLs bound this state. 
+
+The generation gate (Action 0). Action 0 learns one net return per branch (Equation (4)), charging setup and enabled fills once and crediting consumption only after a C1 miss. An unproductive expansion retains its setup charge; mutually ex-clusive candidates do not receive separate optimism bonuses. Write 𝑚 𝑐 (𝑥 ) = 𝑥 ⊤𝐴 −1 
+
+> 𝑐
+
+𝑞 𝑐 and 𝑟 𝑐 (𝑥 ) = ˆ𝜎 𝑐 √︁ 𝑥 ⊤𝐴 −1 
+
+> 𝑐
+
+𝑥 ≥ 0. After cold trials, unaudited admission opens iff 𝑚 𝑐 (𝑥 ) + 𝑟 𝑐 (𝑥 ) > 0. 
+
+Proposition A.7 (Conditional Action 0 sign guarantee) . Let 
+
+𝜇 𝑐 (𝑥 ) = E[ ˆ𝑦 𝑏 | 𝑐, 𝑥 ]. At a trained, unaudited decision, 𝜇 𝑐 (𝑥 ) ≤ 
+
+> 17
+
+𝑚 𝑐 (𝑥 ) + 𝑟 𝑐 (𝑥 ) makes every refusal satisfy 𝜇 𝑐 (𝑥 ) ≤ 0. If also 
+
+𝜇 𝑐 (𝑥 ) ≥ 𝑚 𝑐 (𝑥 ) − 𝑟 𝑐 (𝑥 ), then 𝑚 𝑐 (𝑥 ) − 𝑟 𝑐 (𝑥 ) > 0 certifies positive conditional net return. Proof. Refusal means 𝑚 𝑐 (𝑥 ) + 𝑟 𝑐 (𝑥 ) ≤ 0; apply the assumed upper bound. The lower bound gives the second claim. □
+
+The radius scales with observed target RMS, not a cal-ibrated confidence bound; Proposition A.7 is conditional. Cold trials and seeded audits gather feedback outside this sign decision. Pending trials count toward the cold budget and register a branch token before expansion; delayed feed-back revises that trial’s target and 𝑞 𝑐 without adding another observation to 𝐴 𝑐 .
+
+The fill gate (Action 1). Consider one exclusive branch with candidates 1 , . . . , 𝑛 and the estimates of §3.4: ˜ 𝑝 𝑠 =
+
+˜𝜋 sel  
+
+> 𝑠
+
+¯𝜋 use  
+
+> 𝑠
+
+∈ [ 0, 1] for useful consumption, ˆ𝐺 Δ 
+
+> 𝑠
+
+≥ 0 for the execution its consumption saves after C1 lookup, and 𝐶 𝑠 =
+
+𝐶 𝑠 (𝑉 𝐻 ) ≥ 0 for the delay its execution imposes when it is not consumed. At projected state 𝑉 𝐻 , write 𝑈 𝑠 (𝑉 𝐻 ) =
+
+˜𝑝 𝑠 ˆ𝐺 Δ 
+
+> 𝑠
+
+− ( 1 − ˜𝑝 𝑠 )𝐶 𝑠 (𝑉 𝐻 ).
+
+Proposition A.8 (Stepwise optimality and maximality) . At any fixed 𝑉 𝐻 with ˆ𝐺 Δ 
+
+> 𝑠
+
++𝐶 𝑠 (𝑉 𝐻 ) > 0, 𝑈 𝑠 (𝑉 𝐻 ) > 0 exactly when 
+
+˜𝑝 𝑠 > 𝐶 𝑠 (𝑉 𝐻 )/( ˆ𝐺 Δ 
+
+> 𝑠
+
++ 𝐶 𝑠 (𝑉 𝐻 )) , the threshold 𝑝 ∗ of Equation (7). If both terms vanish, 𝑈 𝑠 = 0 and the strict rule rejects the can-didate; the break-even ratio 0/0 is undefined. Excluding seeded audits, each Action 1 admission maximizes immediate utility among the candidates that pass hard feasibility and atomic reservation at the current projected state. Every admitted fill is therefore value-positive at reservation. If Action 1 stops because the maximum utility is non-positive, no remaining candidate can acquire positive utility after any further admissions. Proof. When ˆ𝐺 Δ 
+
+> 𝑠
+
++ 𝐶 𝑠 (𝑉 𝐻 ) > 0, rearranging 𝑈 𝑠 (𝑉 𝐻 ) > 0gives the threshold; equality gives 𝑈 𝑠 (𝑉 𝐻 ) = 0. In partic-ular, 𝐶 𝑠 = 0 < ˆ𝐺 Δ 
+
+> 𝑠
+
+gives threshold 0, and ˆ𝐺 Δ 
+
+> 𝑠
+
+= 0 < 𝐶 𝑠 
+
+gives threshold 1. When both vanish, 𝑈 𝑠 = 0 directly. The algorithm examines candidates in decreasing current utility, discards reservation failures, and admits the first feasible pos-itive one. After an admission, ProjectLoad only increases slot and KV occupancy. The price curves are componentwise monotone, while ˜ 𝑝 𝑠 , ˆ 𝐺 Δ 
+
+> 𝑠
+
+, and ˆ R𝑠 remain fixed within the de-cision; hence every remaining 𝐶 𝑠 can only rise and every 𝑈 𝑠 
+
+can only fall. The stopping condition is therefore preserved in all states reachable by further admissions. □
+
+The proposition characterizes the implemented dynamic process: its next choice maximizes current feasible utility, and its price-based terminal set is maximal—no positive-utility fill can be appended. These per-step properties do not imply maximum total utility over all feasible orders; Appendix B compares that total with an exact oracle. 
+
+Admission complexity. For 𝐾 candidates and context dimension 𝑑 , Action 0 observation costs 𝑂 (𝑑 2); revising a delayed target costs 𝑂 (𝑑 ) without changing 𝐴 𝑐 or the sample count. The direct matrix inversion used to score a context costs 𝑂 (𝑑 3) and stores 𝑂 (𝑑 2) per branch class ( 𝑑 = 6 here). Action 1 rescans the remaining candidates after every pro-jected reservation, taking 𝑂 (𝐾 2) time and 𝑂 (𝐾 ) space. Appendix B uses exact dynamic programming over all or-dered subsets in 756 archived snapshots. Among the 639 with positive optimum, the implemented rule selects an exact-oracle set in 626 (98 .0%) and retains 99 .36% of aggregate sequence-aware oracle utility. With a binding footprint bud-get, global sequence optimization contains 0 /1 knapsack even at zero price: for 𝐾 mutually exclusive candidates, set ˜𝑝 𝑠 = 1/𝐾 , ˆ 𝐺 Δ 
+
+> 𝑠
+
+= 𝐾𝑣 𝑠 , and KV footprint 𝑤 𝑠 for each item, with budget 𝐵 and all other limits slack. Each feasible subset then has value Í𝑠 𝑣 𝑠 and weight Í𝑠 𝑤 𝑠 ≤ 𝐵 , so the problem is NP-hard. For this projected-state update, exact ordered-subset dynamic programming takes 𝑂 (𝐾 2𝐾 ) time and 𝑂 (2𝐾 ) space. 
+
+Scope. The Action 1 guarantees apply to estimated utility over revealed candidates. Action 0’s sign guarantee concerns its aggregate branch return under the stated bound; it makes no claim about unrevealed candidates. The gates’ end-to-end latency effect is evaluated in §5.4–§5.5. 
+
+## B Checks from Archived Runs 
+
+We use archived artifacts—recorded outputs and admission snapshots, no new serving runs—to check deterministic exe-cution and to replay the implemented sequential repricing rule against an exact ordered-subset oracle. The replay script, input hashes, and per-decision results will be released with the artifact. The replay holds Action 0 fixed: closed branches reveal no candidate set for its exact oracle; Figure 13 reports the two-level ablation. 
+
+Deterministic execution. A three-seed ReAct repro-ducibility run enables deterministic inference. In its no-reuse floor, 38 repeated-question groups contain 96 executions and 87 within-group pairs. Every pair has identical final answer text, and every group has an identical hop count. Across the full and C1-only arms, hop counts also agree on all 116 paired question IDs. All nine request artifacts match their manifest hashes, which supports Lemma A.1’s determinism premise in this configuration. 
+
+Sequential-admission replay. We use all 756 admission snapshots from a three-seed Routing run, including nine startup warmup events. The remaining 747 events join to the request artifacts by workflow ID. Each snapshot contains two or three candidates, totaling 2 ,133, with the probability, gain, cost, footprint, and load values used by the gate. The applicable price functions and curves match the archived source; reconstructed costs agree with all logged costs within their printing precision. 
+
+> 18
+
+For each snapshot, an exact dynamic program optimizes over all ordered subsets under recorded KV headroom. Pro-jected state depends only on the selected subset’s cardinality and total footprint, so one best prefix per subset suffices. Both oracle and implementation use the archived estimates and production price curves, project slot and KV occupancy after each admission, and score (𝑠 1, . . . , 𝑠 𝑚 ) by 𝐽 seq = Í𝑖 𝑈 𝑠 𝑖 (𝑉 𝑖 −1).Seeded audits are disabled. Measure Repriced / exact oracle Oracle-set match 626 /639 (98 .0%) Í 𝐽 seq /Í 𝐽 ★ 
+
+> seq
+
+99 .36% Median 𝐽 seq /𝐽 ★ 
+
+> seq
+
+99 .86% 5th percentile 97 .35% Minimum 94 .32% 
+
+Table B.1. Exact replay of the sequence-aware admission objective. All rows use the 639 snapshots with positive opti-mum; the other 117 have zero optimum and both methods select nothing. Among the 639 positive-optimum snapshots, the imple-mented order attains the exact sequence value in 281. An-other 345 select an oracle-optimal set in a lower-value order; only 13 differ in selected set. The rule retains 99 .36% of ag-gregate oracle utility (Table B.1). All candidates together use at most 16 .8% of recorded KV headroom, so the footprint-cap knapsack case does not arise in this archive. This replay gives an exact comparison for the logged estimates and revealed candidates; §5.4–§5.5 measure the end-to-end latency effect.
