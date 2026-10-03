@@ -1,0 +1,529 @@
+Title: Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving
+
+URL Source: https://arxiv.org/pdf/2609.32999v1
+
+Published Time: Tue, 29 Sep 2026 01:32:19 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving 
+
+## Fei Fang ∗ Chung-Hsiang Lo ∗ Yi Liu Yifan Hua Chen Qian 
+
+## University of California, Santa Cruz 
+
+## Abstract 
+
+RAG and retrieval-based agent memory both inject retrieved content into LLM prompts, as document chunks and recalled memory records, respectively. The same content can recur across requests at different prompt positions or after different preceding contexts, preventing reuse through conventional prefix caching. Our characterization finds that records recur-ring outside the matching prefix account for over 70% of injected memory tokens in agent-memory workloads. Com-posable KV-reuse methods enable reuse in such cases, but online serving introduces a management problem: a recurring unit’s KV states may not yet exist, may have been evicted, or may reside on another node. We present Tessera, a disaggre-gated serving system that makes retrieval the control plane for KV reuse. By exposing the context units needed before model execution, retrieval allows Tessera to combine current demand with retrieval history, KV residency, and generation load to co-ordinate cache management and request routing. Generation nodes concurrently prepare locally cached, remotely cached, and missing states, while retaining newly computed states off the request’s critical path. Across RAG and agent-memory workloads, Tessera lowers mean TTFT by up to 3.6 × over SGLang and LMCache with EPIC at matched request rates, and sustains low TTFT at rates where the baselines saturate, while matching the answer quality of the underlying compo-sition policy. 
+
+## 1 Introduction 
+
+Large language model (LLM) applications construct prompts by retrieving text from external state. Retrieval-augmented generation (RAG) retrieves document chunks from a knowl-edge base to ground generation in external evidence [12, 17, 27]. Similarly, agents with retrieval-based memory recall records of previous interactions, observations, or experiences when constructing prompts for subsequent steps [41, 56]. Al-though these applications retrieve different types of content, they share a common input structure: each request combines independently selected text segments with task-specific in-structions and a query for a single model invocation. Figure 1                                           
+
+> ∗These authors contributed equally. Agent Context @ Task 𝑚 Step 𝑡
+> Instruction Task Act( 1)…Obs( 1)Act( t)Obs( t)
+> Block 1Block 2
+> …
+> Block 𝑘
+> Task 𝑚
+> s…
+> Task 𝑛
+> t…
+> Agents
+> Memory store
+> retrieve
+> [Doc D]
+> …
+> …
+> Q1
+> Q2Documents
+> retrieve
+> RAG
+> Sys [Doc A] [Doc B] [Doc C] …Q1
+> Sys [Doc B] [Doc D] [Doc A] …Q2
+> Sys Block 1Block 2…task rollout
+> Sys Block 1Block 2…task rollout
+> LLM
+> GPU
+
+Figure 1: Retrieved context units in RAG and retrieval-based agent memory. illustrates this pattern in both settings, with retrieved doc-ument chunks or memory records arranged as an ordered sequence within the prompt. We use context unit to denote each independently retrieved segment, including a document chunk in RAG or a memory record in an agent system. Before generating a response, the serving engine must pre-fill the request prompt and construct key and value (KV) states for both the request-specific text and its retrieved context units. For requests with long retrieved contexts, this computation can dominate time to first token (TTFT) and consume sub-stantial GPU resources [22]. Much of this work is repeated. Popular document chunks recur across RAG queries, while memory records may be recalled by multiple steps or ses-sions. Conventional prefix caching cannot capture reuse when the same context unit appears at a different prompt position or after a different preceding context. This pattern occurs in both RAG and retrieval-based agent memory. In our two agent workloads, repeated memory records outside the match-ing prefix account for 73.9% and 76.3% of injected memory tokens (Section 3). In RAG, the dependence of a chunk’s KV states on its prompt position and preceding context has motivated com-posable chunk-level KV reuse, which prepares chunks in-dependently and assembles their cached states at inference time [13, 21, 33, 52, 53]. Existing methods address positional placement and cross-chunk context through mechanisms such as position-preserving layouts, selective recomputation, mod-ified attention, or learned link tokens. These techniques make it possible to reuse a recurring unit beyond the matching pre-1arXiv:2609.32999v1 [cs.DC] 26 Sep 2026 fix. They do not, however, ensure that its states are available when it is retrieved again: under dynamic retrieval demand and finite cache capacity, a unit’s states may never have been computed, may have been evicted, or may reside on a node other than the one serving the request. RAGCache [22] stores prefix-dependent document states in a knowledge tree, while Cache-Craft [1] maintains context-specific chunk variants with selective recomputation. Their cache-management designs focus on node-local memory hi-erarchies. Distributed KV systems support cross-node cache access and cache-aware scheduling [31, 45, 48], but their deci-sions are not driven by the retrieval demand that determines which units will recur. Turning recurrence into reuse in on-line serving raises three challenges. First, cache management and request routing are coupled. Where a unit’s states are re-tained determines which node can reuse them, while routing determines where that demand arrives: sending a request to the node holding most of its states can overload that node, whereas dispatching by load alone forfeits local reuse. Sec-ond, a request may mix cached and missing states, some of which must be transferred while others must be computed from text. Preparing them serially accumulates both delays on the request’s critical path, while blocking the scheduler until all are ready delays unrelated requests. Third, retaining newly computed states benefits only future requests but com-petes with the current one for memory and transfer resources. Retention can be declined when capacity is short or reuse value is low, yet the current request must still be served. Our key insight is that retrieval exposes the context units a re-quest needs before model execution, making the retrieval tier a natural control plane for KV reuse. Retrieval alone does not know where those units’ states reside or how valuable they are; combined with the demand history, KV residency, and generation load that the serving system maintains, however, this per-request demand lets the control plane decide cache retention and request routing before dispatch, addressing the first and third challenges. The same unit identities tell the selected node which states to fetch and which to compute, so cached-state access and miss prefill can proceed together, ad-dressing the second. Because retention is decided separately from preparation, a request proceeds once its states are ready, even when retention is declined or still in progress. We present Tessera, a serving system that realizes this de-sign for RAG and retrieval-based agent memory. Tessera dis-aggregates retrieval, shared KV storage, and generation into independently provisioned pools. The Retrieval Pool serves as the control plane, tracking context-unit demand and residency and jointly deciding cache retention and cache-aware routing. The shared KV Pool extends reuse across generation nodes. Generation nodes prepare cached and missing states concur-rently, compose them before completing prefill, and retain authorized states in the background. Our prototype composes states with EPIC’s LegoLink policy [21]. Other policies that operate on independently prepared unit states can use the same interfaces. In summary, this paper makes the following contributions: • We characterize retrieval-based agent memory and find that 73.9–76.3% of injected memory tokens recur beyond the matching prompt prefix, exposing substantial reuse unavailable to conventional prefix caching. • We present Tessera, a disaggregated serving system that couples retrieval demand with KV residency and gener-ation load to coordinate cache management and request routing, while supporting mixed cached/missing execution and nonblocking state retention. • We implement a Tessera prototype by extending SGLang [57]. At matched request rates, Tessera low-ers mean TTFT by up to 3.6 × over SGLang and LM-Cache [31] with EPIC, and sustains low TTFT where the baselines saturate, while matching the answer quality of the underlying composition policy. • We release the Tessera prototype and, to our knowledge, the first public request-level traces of agents with retrieval-based memory together with the memory stores they recall from. 
+
+## 2 Background and Motivation 
+
+We review prefix caching (Section 2.1) and composable KV reuse for retrieved context in RAG (Section 2.2) and retrieval-based agent memory (Section 2.3). We then examine what changes when composable KV reuse moves to online serving, and the challenges this raises (Section 2.4). 
+
+## 2.1 LLM Inference and Prefix KV Caching 
+
+Most modern LLM serving engines run autoregressive Trans-former models [8, 51]. Given an input prompt, such a model first performs a prefill pass to process all input tokens and compute their corresponding KV states, which are stored in the request’s KV cache . Each decode step then attends to these cached states rather than recomputing them for earlier tokens. For long prompts, constructing these states can make prefill a major contributor to TTFT. Serving engines such as vLLM and SGLang reduce repeated prefill through prefix KV caching [25, 57], but only when requests share an identical prompt prefix. Because a token’s KV states depend on its position and on all preceding tokens, reuse stops at the first divergence: identical text that follows a different prefix cannot use the cached states directly. 
+
+## 2.2 RAG Retrieval and Composable KV Reuse 
+
+Retrieval. RAG enhances LLMs by incorporating retrieved external knowledge into generation. Retrieval may use vector search [26, 54], graph-based search [9, 15, 16, 46], or combina-tions of the two. We consider pipelines whose output reaches the LLM as an ordered sequence of textual context units. Be-cause retrieval is query-dependent, the selected units and their order vary across requests, so the same unit can appear at different positions in different prompts. 
+
+Limitations of prefix KV reuse. Figure 2 gives an example. Suppose Q1 retrieves [Doc A, Doc B, Doc C] and Q2 re-trieves [Doc B, Doc D, Doc A] . Doc B occupies positions 2Stage 1: retrieval QUERY 1: 
+
+"What are the best things to do in Tokyo?" 
+
+> …
+> Vector search
+
+Stage 2: KV Cache Reuse (Prefix-Based System) 
+
+> [Doc C] [Doc B] [Doc A]
+
+QUERY 1: 
+
+> Sys
+> Prefix cache insertion
+> Attention Dependancy
+
+Cache Miss!      
+
+> Match prefix
+> 0-99 100-227 228-355 Q1
+> K!"#
+> K$%&'()
+> K'$%&*()
+> K'$%&*() ≠ K $%&'()
+> ∆Pos
+> …[Doc C] [Doc B] [Doc A] 355-483 Sys 0-99 100-227 228-355 Q2 …[Doc A] [Doc D] [Doc B] 355-483 Root Sys [Doc A] [Doc B] [Doc C]
+
+Stage 2: KV Cache Reuse (Chunk-level Pure KV Cache) 
+
+> [Doc B] [Doc D] [Doc A]
+> Look up
+> Encode position && Slight recomputation
+> prefix-based cache step
+> chunk-level pure KV cache steps
+
+"How should I plan a 2-week Japan itinerary?"  
+
+> …[Doc A] [Doc D] [Doc B] [Doc D] [Doc A] Tokyo Sightseeing Highlights [Doc B] Japan Rail Pass Guide [Doc C] Tokyo Restaurants Kyoto Temples & Day Trips
+> Vector search
+
+QUERY 2:  
+
+> [Doc X] original chunk text KV of Doc X
+
+Composable && Reusable! Figure 2: Dynamic RAG retrieval vs. prefix caching. 150–249 after Doc A in Q1, but positions 50–149 with no preceding document in Q2. Its cached keys therefore carry rotary position embedding (RoPE) rotations for the wrong positions, and its keys and values encode a dependency on 
+
+Doc A that no longer holds. Conversely, the states cached for 
+
+Doc A in Q1 lack the dependencies on Doc B and Doc D that precede it in Q2. The text is unchanged, yet a prefix cache must prefill both documents again. 
+
+Composable Context Unit KV Reuse. This mismatch moti-vates treating context units as independently prepared reuse units. Recent methods extend reuse beyond matching prefixes by preparing context units independently and composing their cached states at inference time [13,21,33,52,53]. Such compo-sition must address both positional placement and cross-unit context. We target RoPE-based models [49, 50], which rotate queries and keys but not values; caching keys before RoPE lets them be rotated for a unit’s new offset. This removes the keys’ dependence on absolute offsets but not on preced-ing context. When a context unit is prefilled independently, its deeper-layer KV states do not incorporate causal influ-ences from preceding units in the assembled prompt. Existing methods provide different mechanisms for positioning and cross-unit context, including position-preserving layouts, po-sition restoration, selective recomputation, modified attention, and learned link tokens [13, 21, 33, 52, 53]. These approaches offer different quality–computation tradeoffs and do not pro-vide identical composition semantics. The composition rule is an algorithmic choice separate from the online cache man-agement problem studied in this paper. Accordingly, Tessera separates the algorithm-specific composition stage from its common path for context-unit identification, cache manage-ment, state access, and miss execution. Our prototype instan-tiates this stage with EPIC’s LegoLink policy [21]. 
+
+## 2.3 Retrieval-Based Agent Memory 
+
+Memory retrieval across agent steps. Retrieval-based agent memory retains information from prior interactions in ex-Vector database     
+
+> Top 𝑘 retrieval
+> LLM
+> {Thought( 𝑡 ), Action( 𝑡 )}
+> Tool/Env(Action( 𝑡 ))
+> Observation( 𝑡 )
+> · · · ...
+> Web Search Code Execution
+> Vector Search …
+
+Agent Context  @ Task  𝑚  Step  𝑡            
+
+> Instruction Task Act( 1)…Obs( 1)Act( t)Obs( t)Block 1Block 2…Block 𝑘
+> Will
+> append
+> At
+> Step t+1
+
+Figure 3: A typical retrieval-based memory workflow in an LLM agent. Vector database 
+
+· · · ... 
+
+Top  𝑘  retrieval 
+
+Files / External Knowl. 
+
+Prior Obs. / Exps. 
+
+Agent Context  @ Task  𝑚  Step  𝑡    
+
+> Instruction Task Act( 1)
+
+…Obs( 1) Act( t) Obs( t)Block  1 Block  2 … Block  𝑘 
+
+Agent Context  @ Task  n Step  s   
+
+> Instruction Task Act( 1)
+
+…Obs( 1) Act( s) Obs( s)Block  1 Block  2 … Block  𝑘 
+
+Top  𝑘  retrieval 
+
+Figure 4: Non-prefix recurrence across agent trajectories. ternal storage for later recall. Systems such as Mem0 [7] and OpenViking [6] extract, maintain, and retrieve memory records, supporting memory writing, management, and read-ing [56]. As illustrated in Figure 3, an agent execution forms a multi-step trajectory. At a memory-augmented step, the model input combines task instructions and recent observa-tions with memory records retrieved according to the current task state. The retrieved memory may originate from external knowledge, such as files, or information accumulated from prior interactions. The LLM may then invoke external tools or environments, producing new observations that extend the trajectory and influence subsequent steps. 
+
+Common interface, distinct workloads. Like retrieved doc-uments in RAG, recalled memory records become part of the LLM prompt and require prefill. The workloads nevertheless differ in record lifecycles, sharing scopes, interaction histo-ries, and recurrence patterns. We therefore focus on reusing unchanged records within their permitted sharing scope, leav-ing memory extraction, maintenance, and retrieval selection to the memory system. 
+
+Recurrence within and across agent trajectories. The same memory record may be retrieved at nonconsecutive steps within an agent trajectory or across trajectories permitted access to it. In Figure 4, the highlighted memory block ap-pears as the first retrieved block at step t of task m and the second at step s of task n. The additional preceding block changes its prompt position and preceding context despite its unchanged content. Prefix caching cannot exploit this recur-rence once the preceding token sequences diverge. Section 3 characterizes this non-prefix recurrence in agent workloads. 31 2 4 8 16        
+
+> READ window
+> 0510
+> GB/s
+> (a) RDMA Transfer
+> 7.15 req/s
+> 0.5 2816
+> Tokens/step
+> 0510
+> Tokens/s
+> ×10 3
+> OOM
+> ×10 3
+> (b) GPU Prefill
+> 0.76 req/s
+> 124816
+> CPU cores
+> 0510 15
+> Queries/s
+> ×10 3
+> (c) CPU Search
+> 14.4K req/s
+
+Figure 5: Capacity of vector search, KV fetch, and KV prefill.                
+
+> (i) N = 8 (ii) Budget = 10%
+>    
+>    
+
+Figure 6: Chunk hit rate of a shared cache vs. N split caches. 
+
+## 2.4 From Composable KV Reuse to Online Serving 
+
+Problem: Online Composable KV Reuse Requires Demand-Driven State Management. The preceding sec-tions illustrate how context units in RAG and retrieval-based agent memory can recur outside a matching prompt prefix. Section 3 measures how often this occurs in agent workloads. We target online deployments in which requests are served across multiple generation nodes under bounded KV-cache capacity. Composable KV-reuse methods address how inde-pendently prepared states can be positioned and combined while recovering cross-unit context [21, 53]. These mecha-nisms, however, do not by themselves determine how reusable states should be managed in an online serving system. Dy-namic retrieval continually changes the active set of context units, while finite cache capacity can prevent retaining KV states for an entire document corpus or memory store. Conse-quently, the recurrence of a context unit does not guarantee that its KV states are available when the unit is retrieved again. The central systems problem is therefore to convert context-unit recurrence into actual reuse: deciding which states to materialize and retain, making them accessible across gener-ation nodes, and falling back efficiently to prefill when they are absent. Serving a request in this setting involves retrieval, KV fetch, and KV prefill, which rely on different resources and operate at substantially different rates. Figure 5 reports their native throughput on a 200-request 2WikiMQA [19] workload, together with their request-equivalent rates. These rates span more than four orders of magnitude, from 0.76 req/s for KV prefill to 14.4K req/s for retrieval. This disparity motivates provisioning the three stages independently. 
+
+Challenge 1: Cache Management and Request Routing Are Coupled. In a distributed deployment, the value of retain-ing a context unit depends on both future retrieval demand and where subsequent requests execute. Pooling capacity im-proves reuse: Figure 6 shows that, on a 2WikiMQA work-load, splitting the same aggregate capacity across eight per-node caches reduces the hit rate by roughly 5 ×, under both LRU and LFU. Yet node-local caches avoid network transfers, creating a tradeoff between hit rate and access cost. Cache management and routing therefore cannot be optimized inde-pendently: admission and eviction determine where reusable states reside, while routing determines whether requests can exploit that locality. Effective reuse requires coordinating these decisions across local and shared caches while account-ing for retrieval demand and generation load. 
+
+Challenge 2: Cache Hits and Misses Must Execute Con-currently. After routing, a request may require both cached context-unit states that must be accessed from their storage locations and missing states that must be computed from text. These preparation paths consume different resources and com-plete at different times, while subsequent composition and query processing depend on their results. Serializing them places both transfer and miss-prefill latency on the critical path, whereas blocking the scheduler until all states are ready delays unrelated requests and reduces batching opportunities. The serving engine must therefore coordinate preparation work that becomes ready at different times while continuing to serve other requests. 
+
+Challenge 3: Retention Competes with Request Execution. 
+
+Retaining a newly computed context unit enables future reuse, but competes with the current request for host memory, regis-tered buffers, and the same NIC path that remote hits use to fetch cached states. The cost is substantial: for L layers, Hkv 
+
+KV heads, head dimension dh, tensor-parallel degree TP, and element width w, each token produces 2 L(Hkv /TP )dhw bytes of KV state per rank. For example, Qwen3-32B has L=64, 
+
+Hkv =8, and dh=128, so with 16-bit KV states each token of retained context occupies 64 KiB per rank. NIC provisioning does not follow GPU count. Our servers pair four GPUs with a single NIC, so at TP =4 all four ranks share one link and every single retained token moves 256 KiB across it. Synchronous retention therefore adds significant data movement to the re-quest’s critical path, while asynchronous retention introduces publication and lifetime races if incomplete or in-flight states can be read or reclaimed. Retention must therefore proceed off the critical path while publishing states only after completion and protecting storage used by in-flight transfers. 
+
+Opportunity: Retrieval Exposes Context-Unit Demand Before Model Execution. When retrieval completes, the iden-tities and order of the context units a request needs are already known. Retrieval does not inherently know their KV residency or future value, but the serving system can associate this per-request demand with retrieval history, cache residency, and generation load. Retrieval therefore provides a control point for deciding admission, eviction, and routing before model execution, and for telling the selected node how to obtain each 4required state. 
+
+## 3 Agent Workload Characterization 
+
+Previous work has shown that popular document chunks recur across RAG queries [22], but whether agent memory offers the same reuse opportunity is unclear. The key question is not whether memory records recur, but whether they recur beyond the matching prompt prefix: repeats within the prefix are already captured by prefix caching, while those beyond it represent unexploited reuse. We measure this distinction on two agent workloads and find that non-prefix recurrence is prevalent in both. 
+
+## 3.1 Workloads and Methodology 
+
+Workloads and trace collection. We collect prompt traces from OpenClaw [40], an open-source agent framework, us-ing OpenViking [6] as its retrieval-based memory store. A 
+
+memory-augmented request is the first LLM request follow-ing a memory injection, retained with its complete rendered prompt. LoCoMo [34] is a long-term conversational-memory benchmark of questions about facts stated in long conver-sations between recurring speakers. We import four conver-sations into a shared OpenViking service as four isolated user–agent namespaces; each question starts a fresh single-turn session that retrieves only from its namespace, yielding 642 memory-augmented requests. τ2-bench [3] evaluates tool-using customer-service agents in the airline, retail, and tele-com domains. We executed its 178 training tasks with mem-ory recall disabled and imported the resulting trajectories into OpenViking, whose extraction pipeline produces customer-scoped records visible only to the corresponding customer and agent-scoped records recallable by other sessions of the same domain agent. We then executed the 100 test tasks (20 airline, 40 retail, 40 telecom) as multi-turn sessions with per-turn recall. Each session contributes one initial warm recall plus its logged per-turn recalls, giving 219 memory-augmented requests (44, 86, 89) drawn from the 533 test-split agent re-quests. GPT-5-mini [37] drives the agent, the user simulator, and memory extraction. Both workloads use frozen memory snapshots during measurement; memory writes, updates, and invalidation are outside the scope of this characterization. 
+
+Prompt construction and controls. Each retrieval returns at most K=15 records. Following OpenClaw’s native prompt construction, retrieved records appear immediately after the system prompt in LoCoMo and, in τ2, after the accumulated interaction history within the newest user turn or tool result. We render prompts with the Qwen3 chat template and tok-enize them with the Qwen3-8B tokenizer [50], and enable deferred tool loading so that unused tool definitions are not repeated in every request [2, 11, 39]; the τ2 agent carries three dispatch tools and reaches domain tools through search. Be-fore tokenization we replace request-specific session identi-fiers and wall-clock timestamps with fixed placeholders. This LoCoMo τ2         
+
+> 025 50 75 100
+> Memory tokens (%)
+> 20.9% 24.8%
+> 73.9% 76.3%
+> New Prefix Non-prefix
+> (a) Memory token composition 020 40 60 80 100
+> Requests (%)
+> 025 50 75 100
+> Repeat rate (%)
+> 83.2% 80.8%
+> LoCoMo
+> τ2(b) Non-prefix repeat rate
+
+Figure 7: Characteristics of injected memory tokens and their recurrence across agent requests. normalization prevents request-unique metadata alone from terminating an otherwise reusable prefix, thereby giving exact-prefix caching a favorable baseline; all other prompt content remains unchanged. 
+
+Token classification. A stream is one LoCoMo conversation or one τ2 domain, matching the visibility scope of its records. The matching prefix of a request is the longest token-level prefix it shares with any earlier prompt in the same stream; assuming that all earlier prompts remain available makes this an optimistic upper bound on exact-prefix reuse. We assign every token of a request’s newly injected memory records to one of three disjoint categories: prefix-covered if it falls within the matching prefix; a non-prefix repeat if it falls beyond the matching prefix and belongs to a record whose token sequence already appeared in an earlier prompt of the same stream; and 
+
+new otherwise. 
+
+## 3.2 Recalled Memories Recur Outside Prefix 
+
+We first quantify recurrence within newly injected memory records, while determining the matching prefix from the com-plete prompt. For each workload, Figure 7a aggregates token counts across the analyzed requests and reports each category as a fraction of all tokens in these memory records. Of these memory-record tokens, 73.9% in LoCoMo and 76.3% in τ2
+
+repeat beyond the matching prefix. These shares quantify po-tential exact recurrence missed by prefix-keyed reuse; they are not cache hit rates, realized prefill savings, or guarantees that the corresponding KV states remain resident. Repeats that prefix caching does cover are a minority in LoCoMo (24.8%) and nearly absent in τ2 (2.8%), and new content accounts for the remainder. The two workloads reach this outcome by dif-ferent routes. In LoCoMo, the memory block directly follows the system prompt, so a change in the leading records or their order breaks the matching prefix, leaving subsequent records outside it. In τ2, the block follows the conversation history and the new user turn or tool result, whose differences across requests typically cause the prefix to diverge before reaching the recalled records. Figure 7b shows that this opportunity is typical rather than driven by a small number of requests. Specifically, 83.2% of LoCoMo requests and 80.8% of τ2 requests have at least half of the tokens in their injected memory records classified as repeated beyond the matching prefix. This opportunity remains material when measured against the complete prompt. As shown in Figure 8, repeated memory beyond the matching prefix accounts for 31.5–44.9% of com-5conv-1 conv-2 conv-3 conv-4 025 50 75 100         
+
+> Prompt tokens (%)
+> 66.8% 58.3% 53.7% 62.2%
+> 31.5% 40.1% 44.9% 36.6%
+> Other Prefix Non-prefix
+
+(a) LoCoMo conversations airline retail telecom 025 50 75 100       
+
+> Prompt tokens (%)
+> 22.0% 28.8% 10.7% 40.7% 38.1% 35.5%
+> 37.3% 33.1% 53.8%
+> Other Prefix Non-prefix
+
+(b) τ2 domains 
+
+Figure 8: Complete-prompt token composition per stream: matching prefix, repeated memory beyond it, and other tokens. plete prompt tokens across the four LoCoMo conversations and 33.1–53.8% across the three τ2 domains. In every stream, it also constitutes more than half of all tokens outside the matching prefix. Thus, the high recurrence within recalled memory identified in Figure 7 represents a substantial reuse opportunity at the full-prompt level. 
+
+Takeaway. Non-prefix memory recurrence is both common and substantial, making the context unit, not the prompt prefix, the natural unit of reuse. 
+
+## 4 Tessera Overview 
+
+Tessera is a disaggregated serving architecture for online, demand-driven reuse of recurring context units in RAG and retrieval-based agent memory. Tessera organizes KV reuse around two decisions for each retrieved context unit: how to prepare its state for the current request, and whether to retain that state for future requests. Retrieval exposes the context units required by a request before model execution, allow-ing Tessera to coordinate these decisions with KV residency and generation load. Tessera separates retrieval and reuse planning, shared KV memory, and model execution into inde-pendently provisioned Retrieval, KV, and Generation Pools, as shown in Figure 9. 
+
+Request flow. An online request enters the Retrieval Pool, which retrieves and identifies its context units. Using retrieval history, KV residency, and generation load, Tessera selects a generation node and produces a per-unit preparation and reten-tion plan. The selected node obtains each unit from its local cache, the shared KV Pool, or independent prefill, overlapping these paths. Once the states are ready, it composes them and continues generation. Newly computed states may be retained locally or written back to the KV Pool asynchronously. 
+
+Retrieval Pool. The Retrieval Pool executes retrieval to ob-tain the ordered context units required by each request and coordinates their KV reuse. It selects a generation node and produces a per-unit plan specifying how each state should be prepared and whether it should be retained for future reuse. It makes these decisions by combining retrieval demand with KV residency and generation load (Sections 5.1 and 5.2). 
+
+Generation Pool. Each generation node runs an LLM serving engine with a context-unit cache in pinned host memory. It executes the per-unit plan by copying local states, fetching shared states, and prefilling missing units concurrently while continuing to serve other requests. Once the required states are ready, the node recomputes the tokens selected by the composition policy and processes the remaining prompt be-fore decoding (Section 5.3). Authorized states are retained locally or written back to the shared KV Pool asynchronously, without delaying the current request (Section 5.4). 
+
+KV Pool. The KV Pool provides shared, RDMA-accessible memory for context-unit states, extending reuse across gener-ation nodes. The Retrieval Pool manages residency metadata and storage allocation, while generation nodes transfer KV payloads directly to and from memory nodes. Section 5.4 describes the consistency and lifetime mechanisms that make these transfers safe. 
+
+## 5 Tessera Design 
+
+This section describes how Tessera turns retrieval-time context-unit demand into cache-management, routing, and execution decisions. We first describe the per-unit planning interface that connects retrieval demand to KV reuse (Sec-tion 5.1). We then address the three serving challenges iden-tified in Section 2.4: coordinating cache management with request routing (Section 5.2), executing requests with partially available states (Section 5.3), and retaining newly computed states off the request’s critical path (Section 5.4). 
+
+## 5.1 Retrieval-Coupled KV Interface 
+
+Once retrieval determines the context units for a request, Tessera must turn this result into an execution plan for a specific generation node. The plan must identify each unit consistently across requests, specify where its state should come from, and carry any permission to retain that state after preparation. Tessera exposes these decisions through a per-unit interface shared by the Retrieval and Generation Pools. Figure 10 illustrates this control flow. 
+
+Stable context-unit identity. Within each sharing scope, Tessera assigns a context unit an identity derived from its token sequence and serving configuration. The identity is independent of the unit’s position or surrounding context, allowing retrieval demand and cached KV states to refer to the same unit across requests. The Retrieval Pool uses this identity to track retrieval history and KV residency. 
+
+Node-specific planning. Preparation depends on where the request executes: a state that is local on one generation node may require a remote fetch or computation on another. Tessera therefore selects a generation node and dispatches the request to it (Step 2 of Figure 10) before finalizing the per-unit plan. The Retrieval Pool’s directory tracks residency across nodes and drives this selection; the node returns its current cache snapshot (Step 3 ), which revalidates local availability before the plan is finalized. Section 5.2 describes node selection and cache management. 
+
+Per-unit plan. Using the selected node’s snapshot and shared-cache residency, the Retrieval Pool produces a plan for each retrieved unit and returns it to the node (Step 4 ). The prepa-ration field specifies whether the node should use a local state, fetch a state from the shared KV Pool, or compute the state from text. Retention is specified separately: the plan may au-thorize the resulting state to be kept in the node’s local cache, written back to the shared KV Pool, both, or neither. Thus, a 6KV Pool Generation Pool 
+
+LLM Serving Node 𝟏 Memory Node 𝟏 
+
+Retrieval Pool 
+
+Retrieval Node 𝟏 
+
+Online request 
+
+> …
+
+Memory Node 𝒎 
+
+Index Node 2   
+
+> …
+> Data Path: RDMA
+> Vector search Control Path: RPC KV Management & Router
+> GPU
+> Device Mem.
+> KV Cache Host Mem.
+> KV read
+> Admitted writeback
+> ……
+
+LLM Serving Node 𝒏 
+
+> Node state Per-unit state plan
+> Shared Context Unit KV Cache
+> RDMA-Registered DRAM
+> KV KV
+
+Retrieval Node 𝒊 KV Memory Node 𝒎 Figure 9: Tessera design overview. … Online request 
+
+Retrieval Node 𝒊 
+
+## … 
+
+> Assembled Prompt
+> Retrieve history Cache directory
+> Residency/ capacity
+> Router Reuse planner
+> Generation Node 𝒋
+
+## …
+
+> Device Mem. KV Cache
+> Host Mem.
+> Scheduler
+> GPU
+> Per-unit plan
+> Vector search
+
+gateway 
+
+Figure 10: The retrieval-side control plane. unit’s availability for the current request does not depend on whether Tessera chooses to retain it for future reuse. What is retained is the unit’s reusable form, its keys before RoPE together with its values, which is what both cache tiers store and transfer. 
+
+Storage blocks. Context units vary in length, so both cache tiers store their states in fixed-size blocks of up to B tokens. A unit of n tokens occupies ⌈n/B⌉ blocks, which need not be adjacent in memory and, in the shared KV Pool, may reside on different memory nodes. Tessera manages reuse at unit granularity. Admission and eviction always operate on whole context units, while blocks provide the granularity for capacity allocation and data transfer. A unit becomes readable only after all of its blocks have been written. 
+
+## 5.2 Retrieval-Aware Caching and Routing 
+
+Cache placement and request routing determine each other’s value: retaining a context unit on a generation node is useful only if future requests for that unit execute there, while rout-ing requests solely for cache locality can overload the node holding popular states. Tessera uses retrieval history to decide which KV states to retain, and routes requests based on local KV residency and generation load. 
+
+Estimating reuse value. Retrieval demand changes over time, but some context units remain popular across longer periods. For a context unit u at request ordinal t, Tessera scores reuse using both recent and cumulative retrieval frequency: 
+
+s(u,t) = wr fW (u,t) + wℓ f∞(u,t),
+
+where fW (u,t) is the number of requests that retrieved u
+
+among the last W requests, and f∞(u,t) is its cumulative re-trieval count. We fix wr = 1 as the unit of the score. W is set to the number of recent requests whose retrieved units would fill the cache, so that fW measures demand over the horizon the cache can retain; it thus follows from cache capacity and the average number of units per request rather than being tuned per workload. wℓ = 0.05 is held fixed across all experiments. The two cache tiers apply the same scoring rule to different request streams. The shared cache uses retrievals from all generation nodes, whereas each local cache uses only requests routed to that node. Thus, the same context unit may receive different scores in the local and shared caches. 
+
+Admission and eviction. A unit becomes an admission can-didate once its score reaches a threshold θ. By default, a unit is not admitted after its first retrieval, preventing one-time accesses from consuming retained capacity. If capacity is in-sufficient, Tessera considers resident units in increasing score order and admits the candidate only if units with strictly lower scores can free enough space. Replacement operates on whole context units, although capacity is accounted for in blocks. Units whose demand fades lose their recent-history contri-bution and can therefore be displaced by more frequently retrieved units. Section 5.4 describes when a selected victim is safe to reclaim. 
+
+Cache-aware routing. Cache locality should not come at the cost of overloading a generation node. Tessera first restricts consideration to nodes whose in-flight request count is within one request of the least-loaded node. Among these nodes, it selects the one holding the largest number of local blocks from the request’s context units, breaking ties by lower load and then round-robin. Shared-cache hits do not affect this ranking because they are accessible from every generation node. The load constraint prevents popular locally cached units from drawing too many requests to the same node. Local and shared admission are evaluated independently using their respective demand histories. A missing unit may therefore be retained locally, in the shared KV Pool, in both, or in neither, while a remote hit may still be admitted locally. The resulting retention permissions are carried in the per-unit plan described in Section 5.1. 
+
+## 5.3 Executing Partially Cached Requests 
+
+A request may contain local hits, remote hits, and misses, whose states become ready at different times. Tessera pre-pares these states independently, transferring cache hits asyn-chronously while misses enter the serving engine as prefill work. The request becomes ready once all required states are available, without blocking the scheduler from serving other requests. Figure 11 shows this execution path. 
+
+Placement before preparation. Before preparing any unit, Tessera fixes the prompt layout and allocates its final GPU KV slots. Local copies, remote fetches, and miss prefills can 7LLM … …                       
+
+> Request Queue
+> Local Hit
+> [Unit 3]
+> …Base Context Current Context Unit 1Unit 2Unit 3Unit k
+> Remote Hit Miss Local Hit Remote Hit
+> Top-𝑘 retrieved context units
+> Host Mem.
+> …
+> Remote hit
+> [Unit 1]
+> KV Pool
+> …
+> Reserve Slot
+> (Device Mem.)
+> …
+> Remote Hit
+> Unit 2
+> Miss
+> [Unit 1] [Unit 2] [Unit 3][Unit k]…
+> All units KV ready
+> + Apply ROPE Async H2D copy RDMA_READ (GPUDirect)
+> ……
+> Selective recompute
+> Output ………
+> Decode Async writeback (if admitted )
+> Independent prefill Remaining prompt prefill One fused extend pass Request batch
+
+Figure 11: Execution of a partially cached request. proceed independently without waiting for one another. Sep-arators and other request-specific tokens are processed with the remaining prompt after the unit states are ready. 
+
+Preparing cache hits. Local and remote hits follow the trans-fer paths in Step 2 of Figure 11. A local hit is copied from the node’s pinned host-memory cache, while a remote hit is fetched from the shared KV Pool with one-sided RDMA. Re-mote blocks pass through bounded GPU staging space before being placed into the request’s assigned KV slots. After ap-plying RoPE to the keys at their new positions, Tessera marks the unit ready and releases any remote read lease. 
+
+Preparing misses through the scheduler. Missing units are independently prefilled (Step 3 ) from position zero, without a preceding prefix. Tessera submits this work as an internal request so that miss prefill joins regular extend batches rather than blocking the parent request. This independent prefill produces the unit’s reusable form. Tessera writes it into the unit’s assigned slots with RoPE applied at the request’s own positions, and, when the plan authorizes retention, keeps the same unrotated copy for the cache, avoiding a second prefill solely to populate it. Concurrent requests on the same genera-tion node that miss on the same unit share one in-flight prefill. This coalescing is local to a generation node; different nodes may still compute the same missing unit independently. 
+
+Completing prefill. Once all unit states are ready (Step 4 ), the parent request re-enters the scheduler. Tessera recomputes token ranges selected by the composition policy and processes the remaining prompt, including separators and the query, in the final extend pass (Step 5 ). The recomputed states are used only by the current request. Cached context-unit states remain in their reusable form. 
+
+Preparation failures. If a cache transfer fails or times out, Tessera releases the affected resources and falls back to com-puting the unit from text. Under tensor parallelism, all ranks agree on the fallback before execution continues, preventing ranks from taking different preparation paths. 
+
+## 5.4 Nonblocking State Retention 
+
+Retaining a newly computed state benefits future requests, not the current one. Tessera therefore performs retention off the request’s critical path, while ensuring that a state is never read before it is complete and never reclaimed while a transfer still depends on it. 
+
+Reserving a shared entry. When a missing unit passes shared admission, the Retrieval Pool reserves its blocks and creates a PENDING entry tagged with a new storage epoch, a version number that distinguishes successive allocations for the same unit. The generation node receives permission to write the reserved blocks under this storage epoch, and only that writer may publish the entry. A PENDING entry is not a remote hit. Other requests that need the unit compute it for their own execution without shared-write permission, so no request depends on the first writer finishing. 
+
+Asynchronous retention. Once a unit’s reusable form is available on the generation node, whether fetched or com-puted, authorized local insertion and shared writeback pro-ceed independently of the parent request. For shared write-back, the generation node writes the reserved blocks with one-sided RDMA. The prototype bounds pinned-host stag-ing and the number of outstanding writes so that background writeback does not consume unbounded transfer resources. Source buffers remain valid until their dependent copies or transfers complete. 
+
+Publishing complete states. A shared state becomes readable only after all of its reserved blocks have been written success-fully. The writer requests publication after observing RDMA completion for every block, and the Retrieval Pool verifies the storage epoch, write permission, and expected block set be-fore atomically changing the entry from PENDING to READY .These checks prevent stale writers or partial writeback from publishing a cache entry. 
+
+Protecting readers and reclamation. A remote hit carries a read lease on a specific storage epoch. The referenced blocks cannot be reclaimed while the lease is active, including by admission decisions made later in the same per-unit plan, and the generation node releases the lease after the transfer completes. Local admission plans are similarly revalidated against current cache state before execution. Thus, routing and admission may use residency as a policy signal, but execution relies only on leases and revalidated entries. 
+
+Retention failures. A failed writeback is never published. The generation node cancels the reservation, and its blocks are reclaimed only after outstanding transfers have completed. Because the current request has already obtained the state it needs, retention failure only loses a future reuse opportu-nity; failures that prevent state preparation instead trigger the fallback in Section 5.3. Control plane failover and metadata recovery are discussed in Section 8. 
+
+## 6 Evaluation 
+
+We evaluate Tessera by asking three questions: (1) Does Tessera reduce TTFT across RAG and agent-memory work-8loads as request rate increases (Sections 6.2 and 6.3)? (2) How much do retrieval-aware cache management and cache-aware routing contribute to these gains (Section 6.4)? (3) Does Tessera preserve the answer quality of the underlying com-posable KV-reuse policy (Section 6.5)? 
+
+## 6.1 Methodology 
+
+Implementation. We implement Tessera on SGLang, extend-ing its scheduler, model forward path, and attention metadata to support context-unit preparation and composition. Miss-ing units are represented as internal requests and scheduled in the same extend batches as regular model work; concur-rent misses for the same unit on a generation node share one in-flight preparation. During these prefills, the forward path captures pre-RoPE keys and values for subsequent reuse. For composition, EPIC’s LegoLink policy identifies recomputa-tion ranges, encoded in the attention metadata and executed together with the remaining prompt in a single extend pass. A fused Triton kernel applies RoPE when cached keys are placed at their request-specific positions. The KV Pool is imple-mented as a standalone service backed by RDMA-registered host memory. Each memory node exposes fixed-size blocks for one-sided access, while the Retrieval Pool maintains al-location and residency metadata. Generation nodes perform one-sided RDMA transfers, using GPUDirect RDMA when available and pinned host memory otherwise; RDMA com-pletions and CUDA events synchronize state availability and buffer reuse. This testbed exercises cross-node reuse between the generation server and a separate KV server, but places all four generation replicas on one machine. Routing effects at larger replica counts, and generation spread across multiple servers, remain to be validated at scale. 
+
+Testbed. We develop and evaluate the prototype of Tessera on CloudLab [47]. Our testbed consists of two Dell Pow-erEdge XE8545 servers, each with two 24-core AMD EPYC 7413 CPUs, 512 GB host memory, four 40 GB NVIDIA A100 GPUs, and a Mellanox ConnectX-6 100Gb NIC. One server hosts the Generation Pool; the other hosts the Retrieval Pool and the KV Pool. We assign each generation node a disjoint host-memory region to emulate isolation across nodes. 
+
+Models. For RAG, we evaluate Llama-3.1-8B-Instruct with four TP=1 replicas and Qwen3-14B with two TP=2 replicas, using four GPUs in both configurations. For agent memory, we use Qwen3-32B with TP=4 and thinking disabled. 
+
+Workloads. We evaluate Tessera on RAG and retrieval-based agent-memory workloads. • RAG. We evaluate four QA datasets: MMLU [18], a multiple-choice knowledge benchmark; Natural Ques-tions (NQ) [24], which contains real Google Search queries; 2WikiMQA [19], a multi-hop QA benchmark over Wikipedia; and TriviaQA [23], a knowledge-intensive QA benchmark. Following RAGCache [22], we construct a popularity-selected corpus of 300,000 Wikipedia articles and retrieve the top five documents using FAISS [10], a widely used vector search engine, with HNSW [35] index-ing and precomputed text-embedding-3-small query embeddings [38]. For each dataset, we split the request se-quence 1:1 into a warm-up half and a measured half; only the latter is used for reported results. We measure time to first token (TTFT) end to end. TTFT includes online re-trieval and generation. Query embeddings are precomputed and identical across systems, so we exclude embedding computation and measure from retrieval onward. • Agent memory. We replay LoCoMo requests across four conversations and τ2 requests across three domains, fol-lowing Section 3.1. The trajectories were generated with GPT-5-mini [37] driving the agent, simulated user, and memory extraction, and are replayed unchanged on our testbed. For each LoCoMo conversation and each τ2 do-main, we use the first 10% of requests for warm-up and report results over the remaining 90%. Each request there-fore follows a fixed recorded trajectory, so later turns do not depend on the serving model’s outputs. Requests are issued through OpenClaw with OpenViking-backed mem-ory, using a separate OpenClaw instance for each conver-sation or domain and a shared generation backend. Both workloads use frozen memory snapshots. 
+
+Baselines. We compare Tessera with two baselines. • SGLang. We use unmodified SGLang [57] at commit 
+
+f81dec0 , the same commit on which Tessera is built. Pre-fix caching reuses KV states only for matching prompt prefixes; context units beyond the matching prefix are pre-filled from text. • LMCache (EPIC). LMCache [31] provides a general KV storage and transfer layer, while its CacheBlend integration assumes that reusable context-unit KV states are precom-puted and available before serving, rather than managing their residency dynamically as they recur online. To iso-late the serving architecture from the composition policy, we replace CacheBlend’s selective-recomputation policy with EPIC’s LegoLink [21], which Tessera also uses, and use the same recomputation configuration in both systems. We extend the integration with the KV-transfer support required by our configuration but otherwise leave LM-Cache’s storage and transfer architecture unchanged. The baseline runs on vLLM [25], using LMCache’s native lo-cal host-memory cache and Mooncake [45] backend for shared remote KV storage. 
+
+Experimental protocol. Requests follow a Poisson arrival process at the reported aggregate rate. Unless otherwise noted, each request generates one output token, allowing us to iso-late the prefill-side effects of KV reuse on TTFT and queue-ing. This setting also isolates the work that would remain on the prefill side of a prefill–decode disaggregated deploy-ment. Given the size of our testbed, we do not separately provision a decode pool and therefore do not evaluate long-decode throughput. For RAG, TTFT is measured from the 9Llama-3.1-8B Qwen3-14B 
+
+(i)MMLU (ii)NQ (iii)2WikiMQA (iv)TriviaQA    
+
+>     
+
+Figure 12: Mean TTFT vs. RAG request rate. start of retrieval until the first output token and excludes query-embedding computation. For agent memory, TTFT is mea-sured from the client’s HTTP request to OpenClaw until the first nonempty content arrives in the response stream. 
+
+## 6.2 RAG Serving Performance 
+
+We evaluate Tessera against SGLang and LMCache (EPIC) in terms of mean TTFT across four RAG datasets, increasing request rates, and two model configurations. Figure 12 shows that Tessera consistently lowers mean TTFT and sustains low latency to higher request rates across all four RAG workloads and both model configurations. The difference is modest at low request rate, where queueing is limited, and grows as prefill becomes a bottleneck. On 2WikiMQA with Llama-3.1-8B-Instruct, Tessera achieves ap-proximately 1.1 s mean TTFT at 2.5 req/s, compared with 2.7 s for SGLang and approximately 4 s for LMCache (EPIC), a re-duction of up to 3.6 ×. On MMLU with Qwen3-14B, Tessera achieves approximately 1.6 s at 1 req/s, versus approximately 3.5 s for the baselines. The gap is smaller at low request rate, particularly on NQ, and all systems eventually exhibit rapidly increasing TTFT as request rate rises. The widening gap at higher request rates reflects reduced prefill work: requests spend less GPU time reconstructing recurring context states, delaying the onset of queueing under the evaluated workload. LMCache (EPIC) has higher mean TTFT than SGLang at most request rates because its integration assumes a precom-puted KV store rather than online state construction. Thus, our comparison evaluates the extended integration (Section 6.1). 
+
+## 6.3 Agent-Memory Serving Performance 
+
+We evaluate Tessera against SGLang on LoCoMo and τ2.Figure 13 shows lower mean TTFT with Tessera on both workloads, with the gap widening as offered load increases. At 2.0 req/s on LoCoMo, Tessera achieves approximately 1.5 s, compared with 3.1 s for SGLang. At 0.4 req/s on τ2,it achieves approximately 2.4 s, compared with 4.1 s. With Tessera, the sharp rise occurs at a higher offered load, but it is not eliminated. Figures 14 and 15 examine the same representative request rate by user and across requests. Every LoCoMo conversa-tion sees a 2.0–2.3 × speedup in mean TTFT. The τ2 speedup ranges from 1.07 × for retail to 2.0 × for telecom. On Lo-CoMo, median and P90 TTFT fall from 2.45 s and 5.99 s to 1.39 s and 2.06 s, respectively. On τ2, median TTFT falls from 3.61 s to 1.73 s, while P90 improves more modestly from 6.27 s to 4.46 s. These measurements cover individual model requests issued by the agent, not end-to-end agent-task completion. 
+
+## 6.4 Effect of Cache Management and Routing 
+
+We isolate cache admission/eviction and request routing on 2WikiMQA with four Llama-3.1-8B-Instruct TP=1 replicas. All configurations use composable reuse (C), shared storage (S), and the same execution path. We independently ablate the retrieval-aware admission/eviction (A) and cache-aware routing (R) mechanisms described in Section 5.2. Figure 16 reports mean and P95 TTFT for four configurations: • C+S (Baseline): LRU eviction and load-aware routing without cache awareness; • C+S+R (+Routing): load- and cache-aware routing with LRU eviction; • C+S+A (+Policy): retrieval-aware admission and eviction with load-aware routing; • C+S+R+A (Full): both policies, representing the full Tessera. Admission and eviction have the larger effect at higher re-quest rates. At 4 req/s, enabling A reduces mean TTFT from 29.7 s to 2.8 s, whereas routing alone leaves latency above 25 s. Adding cache-aware routing to A further reduces mean and P95 TTFT by approximately 40% and 50%, respectively. At the lowest request rate, the configurations are much closer. At the two higher request rates, combining routing with retrieval-aware admission further reduces both mean and P95 TTFT, showing that locality-aware routing is useful once the cache retains the units that recur under load. Because composable 10 (i) LoCoMo (ii) !2     
+
+>       
+
+       
+
+>   
+
+     Figure 13: Mean TTFT vs. agent-memory request rate. (i) LoCoMo (ii) 𝜏 2 Figure 14: Mean TTFT across users and task domains. CDF 
+
+> 𝜏 2
+
+Figure 15: CDF of per-request TTFT for the agent workloads. 
+
+Figure 16: Ablation on 2WikiMQA: (i) mean TTFT and (ii) P95 TTFT. 2Wiki NQ LoCoMo 
+
+> 010 20 30 40 50 60
+> F1 Score (%)  SGLang EPIC Tessera
+
+Figure 17: Answer quality (F1) under se-lective recomputation. reuse, shared storage, and the execution path are fixed across configurations, this experiment isolates the two online man-agement policies introduced in Section 5.2. 
+
+## 6.5 Answer Quality 
+
+Tessera does not introduce a new composition policy; our pro-totype uses EPIC’s policy. We therefore ask whether Tessera’s serving path introduces additional quality loss relative to EPIC. We evaluate whether Tessera preserves the answer quality of EPIC [21]. We compare Tessera with EPIC’s ref-erence implementation and include SGLang full prefill as a reference. We report answer F1 against gold answers on a 0–100 scale. The evaluation uses 500 questions each from 2WikiMQA and NQ and 200 questions from LoCoMo, with the same recomputation budgets for Tessera and EPIC. Figure 17 shows only minor quality differences between Tessera and EPIC across all three workloads. On 2WikiMQA, NQ, and LoCoMo, Tessera achieves F1 scores of 23.54, 37.52, and 6.58, compared with 23.88, 37.57, and 6.70 for EPIC, re-spectively. The largest gap is only 0.34 F1 points on a 0–100 scale. Both systems also show the same direction of qual-ity change relative to full prefill: higher F1 on 2WikiMQA and lower F1 on NQ and LoCoMo. On LoCoMo, their gen-erated answers achieve 92.42 pairwise F1. Because Tessera and the EPIC baseline run on different serving engines, ex-act generated-text agreement is not expected even under full recomputation. For comparison, full recomputation with iden-tical input tokens across SGLang and vLLM yields 90.83 pairwise F1, showing that cross-framework execution alone can produce non-identical outputs. 
+
+## 7 Related Work 
+
+The Evolution of Composable KV Reuse. Prefix-based KV caching works well when overlap appears as a stable contigu-ous prefix, such as a system prompt or repeated conversation history, and is supported by systems such as Gemini context cache [14], vLLM [25], and SGLang [57]. However, prefix reuse cannot capture all recurring content in RAG workloads: retrieved document chunks often reappear beyond the match-ing prefix as retrieval results change in composition and or-der [22]. PromptCache [13] enables modular reuse through schema-defined position IDs and position-preserving layouts. TurboRAG [33] concatenates independently precomputed chunks, but removes cross-chunk attention and thus requires fine-tuning to adapt the model. CacheBlend [53] dynamically selects context-sensitive tokens for recomputation, whereas EPIC [21] uses a fixed chunk-initial recomputation window to mitigate attention-sink effects. KVLink [52] uses trainable link tokens to connect encoded chunks, enabling cross-chunk context with limited online KV computation. These meth-ods determine how an available unit state is composed into a prompt. Tessera addresses the complementary online prob-lem: which unit states exist and where they reside, where a request executes, how cached and missing states are prepared together, and which newly computed states are retained. Our prototype uses EPIC as its composition policy. 
+
+RAG-Aware Chunk-Cache Management. RAGCache and Cache-Craft also couple retrieval with cache management, but retain states whose validity depends on the prompt prefix or surrounding context. RAGCache [22] organizes prefix-11 dependent document states in a knowledge tree and com-bines retrieval-aware replacement with cache-aware schedul-ing. Cache-Craft [1] removes RoPE from previously com-puted chunk states but retains their preceding-context de-pendencies, maintaining context-specific variants in a single-node GPU/CPU/SSD hierarchy while overlapping cache load-ing, miss prefill, and selective recomputation. HYPIC [30] combines segment-level cache lookup with cross-instance miss prefill and state assembly for hybrid-attention mod-els. These systems decide retention for prefix-dependent or context-specific states within a single node’s memory hierar-chy. Tessera instead manages independently prepared context-unit states whose identity remains stable across prompt po-sitions and surrounding contexts, coordinating their demand and residency across generation nodes and shared memory. 
+
+Distributed KV-Cache Management and Scheduling. 
+
+Prefill–decode disaggregation systems such as DistServe [58] and Splitwise [44] separate the two inference phases to match their distinct resource demands. Beyond execution disaggre-gation, Mooncake [45], MemServe [20], LMCache [31], and InfiniStore [5] extend KV-cache storage and access across devices and serving nodes through tiered memory, remote transfer, and shared cache pools. Cache-aware schedulers such as Preble [48], as well as production KV-aware routers in SGLang, Mooncake, and NVIDIA Dynamo [36], further balance prompt-prefix locality against worker load. Tessera builds on these capabilities by making retrieval-selected con-text units the objects of cluster-wide coordination, linking their demand and residency to cache retention, request rout-ing, and per-request state preparation. 
+
+KV Cache Reuse for Agent Workloads. Prior work ex-ploits recurring structure in agent workloads through looka-head preparation of transformed contexts [42], reuse of rela-tively ordered segments under absolute-position shifts [29], and prefix sharing across same-architecture fine-tuned model variants [32]. KVCOMM [55] aligns shared-content caches under diverse agent prefixes, while TokenDance [4] collec-tively reuses and compresses shared blocks in synchronized multi-agent rounds. Recent work also examines reuse fidelity: judge-side reuse of candidate-cache blocks can weaken cross-candidate interactions [28], whereas AgentKVShift [43] ap-plies probe-guided correction to retrieved-memory states. These works target workflow-specific cache preparation, re-construction, or sharing. Tessera instead treats retrieved mem-ory records through the same context-unit interface used for RAG and manages their reuse across requests. 
+
+## 8 Discussion 
+
+Algorithm and Model Compatibility. Tessera currently sup-ports RoPE-based full-attention models with conventional per-token K/V caches and EPIC recomputation [21], accom-modates other composition policies based on independent context-unit states and token-range recomputation, and re-quires extensions for hybrid-attention, MLA, or non-RoPE models, which we do not evaluate. 
+
+Content Updates and Isolation. Source documents may be revised, and agent memories may be updated or consoli-dated [56]. Content-based identities distinguish revised units while preserving reuse of unchanged ones. Multi-tenant de-ployment requires namespaces aligned with each record’s au-thorized visibility scope, distinguishing customer-private and agent-shared records within tenant boundaries, with authoriza-tion checked before KV resolution. Superseded versions may undergo eviction, whereas explicit deletion or access revoca-tion requires invalidating affected shared and local entries, rejecting readmission and stale writeback, and reclaiming stor-age after outstanding accesses are safely fenced or drained. Our agent characterization uses fixed memory snapshots. On-line mutation and revocation remain outside its scope. 
+
+Comparison with RAG-specific Cache Systems. RAG-Cache and Cache-Craft are relevant end-to-end RAG serv-ing systems, but neither operates on independently prepared context-unit states. Our controlled comparison therefore uses LMCache with the same EPIC composition policy as Tessera, allowing us to compare online cache management while hold-ing the underlying reuse mechanism fixed. Comparing against RAGCache or Cache-Craft end to end would additionally vary how reusable states are constructed and composed. 
+
+Prefill–Decode Disaggregation. Tessera’s reuse mechanisms operate on prompt preparation and can precede a sepa-rate decode stage in a prefill–decode disaggregated deploy-ment [44, 58]. Our prototype does not implement this handoff, and we therefore do not characterize long-decode throughput or interactions with decode-side scheduling. 
+
+Control-Plane Deployment. Tessera hosts its control plane on the retrieval nodes rather than as a separate tier, and han-dles two control RPCs per routed request for route preparation and cache classification. Token caching reduces repeated to-kenization, while directory maintenance and routing costs depend on request volume, replica count, and cache occu-pancy. Our performance claims are limited to the evaluated cluster configurations. Routing quality at larger replica counts, controller throughput under higher request volume, and con-troller failover with metadata recovery remain open deploy-ment questions. Preble’s parallel request processing [48] and Mooncake’s reconstruction of scheduling metadata from au-thoritative node state [45] provide relevant directions for these extensions. 
+
+## 9 Conclusion 
+
+RAG and retrieval-based agent memory create substantial op-portunities for KV reuse beyond the matching prompt prefix; in our agent workloads, 73.9–76.3% of injected memory to-kens are such repeats. Tessera couples retrieval demand with KV residency and generation load, while supporting mixed cached/missing execution and nonblocking state retention. Tessera reduces mean TTFT by up to 3.6 × and sustains low latency where the baselines saturate, while matching the an-swer quality of the underlying composition policy. 12 References 
+
+[1] Shubham Agarwal, Sai Sundaresan, Subrata Mitra, De-babrata Mahapatra, Archit Gupta, Rounak Sharma, Nir-mal Joshua Kapu, Tong Yu, and Shiv Saini. Cache-craft: Managing chunk-caches for efficient retrieval-augmented generation. Proceedings of the ACM on Management of Data , 3(3):1–28, 2025. [2] Anthropic. Tool search tool. Claude Developer Platform documentation, https://platform.claude. com/docs/en/agents-and-tools/tool-use/ tool-search-tool , 2026. Accessed September 2026. [3] Victor Barres, Honghua Dong, Soham Ray, Xujie Si, and Karthik Narasimhan. τ2-bench: Evaluating conver-sational agents in a dual-control environment. arXiv preprint arXiv:2506.07982 , 2025. [4] Zhuohang Bian, Feiyang Wu, Zhuoran Li, Hangcheng Dong, Chengrui Zhang, Yun Liang, and Youwei Zhuo. Tokendance: Scaling multi-agent llm serving via collec-tive kv cache sharing. CoRR , abs/2604.03143, 2026. [5] ByteDance. https://github.com/bytedance/infinistore. [6] ByteDance Volcengine. OpenViking: The context database for AI agents. https://github.com/ volcengine/OpenViking , 2026. [7] Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and Deshraj Yadav. Mem0: Building Production-Ready AI Agents with Scalable Long-Term Memory ,pages 2993–3000. SAGE Publications, 2025. [8] Aakanksha Chowdhery, Sharan Narang, Jacob Devlin, Maarten Bosma, Gaurav Mishra, Adam Roberts, Paul Barham, Hyung Won Chung, Charles Sutton, Sebastian Gehrmann, et al. Palm: Scaling language modeling with pathways. Journal of machine learning research ,24(240):1–113, 2023. [9] Darren Edge, Ha Trinh, Newman Cheng, Joshua Bradley, Alex Chao, Apurva Mody, Steven Truitt, Dasha Metropolitansky, Robert Osazuwa Ness, and Jonathan Larson. From local to global: A graph rag ap-proach to query-focused summarization. arXiv preprint arXiv:2404.16130 , 2024. [10] Facebook. Faiss: A library for efficient similarity search and clustering of dense vectors. [11] Xiang Fei, Xiawu Zheng, and Hao Feng. Mcp-zero: Active tool discovery for autonomous llm agents. arXiv preprint arXiv:2506.01056 , 2025. [12] Yunfan Gao, Yun Xiong, Xinyu Gao, Kangxiang Jia, Jinliu Pan, Yuxi Bi, Yixin Dai, Jiawei Sun, Haofen Wang, Haofen Wang, et al. Retrieval-augmented generation for large language models: A survey. arXiv preprint arXiv:2312.10997 , 2(1):32, 2023. [13] In Gim, Guojun Chen, Seung-seob Lee, Nikhil Sarda, Anurag Khandelwal, and Lin Zhong. Prompt cache: Modular attention reuse for low-latency inference. Pro-ceedings of Machine Learning and Systems , 6:325–338, 2024. [14] Google. Gemini context caching. https://ai.google. dev/gemini-api/docs/caching?lang=python ,2026. [15] Zirui Guo, Lianghao Xia, Yanhua Yu, Tian Ao, and Chao Huang. Lightrag: Simple and fast retrieval-augmented generation. arXiv preprint arXiv:2410.05779 , 2(3), 2024. [16] Bernal Jiménez Gutiérrez, Yiheng Shu, Weijian Qi, Sizhe Zhou, and Yu Su. From rag to memory: Non-parametric continual learning for large language models. 
+
+arXiv preprint arXiv:2502.14802 , 2025. [17] Kelvin Guu, Kenton Lee, Zora Tung, Panupong Pasupat, and Mingwei Chang. Retrieval augmented language model pre-training. In International conference on ma-chine learning , pages 3929–3938. PMLR, 2020. [18] Dan Hendrycks, Collin Burns, Steven Basart, Andy Zou, Mantas Mazeika, Dawn Song, and Jacob Steinhardt. Measuring massive multitask language understanding. 
+
+Proceedings of the International Conference on Learn-ing Representations (ICLR) , 2021. [19] Xanh Ho, Anh-Khoa Duong Nguyen, Saku Sugawara, and Akiko Aizawa. Constructing a multi-hop QA dataset for comprehensive evaluation of reasoning steps. In Donia Scott, Nuria Bel, and Chengqing Zong, ed-itors, Proceedings of the 28th International Confer-ence on Computational Linguistics , pages 6609–6625, Barcelona, Spain (Online), December 2020. Interna-tional Committee on Computational Linguistics. [20] Cunchen Hu, Heyang Huang, Junhao Hu, Jiang Xu, Xusheng Chen, Tao Xie, Chenxi Wang, Sa Wang, Yun-gang Bao, Ninghui Sun, et al. Memserve: Context caching for disaggregated llm serving with elastic mem-ory pool. arXiv preprint arXiv:2406.17565 , 2024. [21] Junhao Hu, Wenrui Huang, Weidong Wang, Haoyi Wang, tiancheng hu, zhang qin, Hao Feng, Xusheng Chen, Yizhou Shan, and Tao Xie. EPIC: Efficient position-independent caching for serving large language models. In Forty-second International Conference on Machine Learning , 2025. 13 [22] Chao Jin, Zili Zhang, Xuanlin Jiang, Fangyue Liu, Shu-fan Liu, Xuanzhe Liu, and Xin Jin. Ragcache: Efficient knowledge caching for retrieval-augmented generation. 
+
+ACM Transactions on Computer Systems , 44(1):1–27, 2025. [23] Mandar Joshi, Eunsol Choi, Daniel Weld, and Luke Zettlemoyer. TriviaQA: A large scale distantly super-vised challenge dataset for reading comprehension. In Regina Barzilay and Min-Yen Kan, editors, Proceedings of the 55th Annual Meeting of the Association for Com-putational Linguistics (Volume 1: Long Papers) , pages 1601–1611, Vancouver, Canada, July 2017. Association for Computational Linguistics. [24] Tom Kwiatkowski, Jennimaria Palomaki, Olivia Red-field, Michael Collins, Ankur Parikh, Chris Alberti, Danielle Epstein, Illia Polosukhin, Jacob Devlin, Kenton Lee, Kristina Toutanova, Llion Jones, Matthew Kelcey, Ming-Wei Chang, Andrew M. Dai, Jakob Uszkoreit, Quoc Le, and Slav Petrov. Natural questions: A bench-mark for question answering research. Transactions of the Association for Computational Linguistics , 7:452– 466, 2019. [25] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory manage-ment for large language model serving with pagedatten-tion. In Proceedings of the 29th symposium on operating systems principles , pages 611–626, 2023. [26] Md Tahmid Rahman Laskar, Enamul Hoque, and Jimmy Huang. Query focused abstractive summarization via incorporating query relevance and transfer learning with transformer models. In Canadian conference on artifi-cial intelligence , pages 342–348. Springer, 2020. [27] Patrick Lewis, Ethan Perez, Aleksandra Piktus, Fabio Petroni, Vladimir Karpukhin, Naman Goyal, Heinrich Küttler, Mike Lewis, Wen-tau Yih, Tim Rocktäschel, et al. Retrieval-augmented generation for knowledge-intensive nlp tasks. Advances in neural information processing systems , 33:9459–9474, 2020. [28] Sichu Liang, Zhenglin Wang, Chujiajia, Pengfei Xia, Hui Zang, and Deyu Zhou. When KV cache reuse fails in multi-agent systems: Cross-candidate interaction is crucial for LLM judges. In Maria Liakata, Viviane P. Moreira, Jiajun Zhang, and David Jurgens, editors, Pro-ceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pages 7205–7230, San Diego, California, United States, July 2026. Association for Computational Linguistics. [29] Yang Liu, Yunfei Gu, Liqiang Zhang, Chentao Wu, Guangtao Xue, Jie Li, Minyi Guo, Junhao Hu, and Jie Meng. CacheSlide: Unlocking cross Position-Aware KV cache reuse for accelerating LLM serving. In 24th USENIX Conference on File and Storage Technologies (FAST 26) , pages 83–99, Santa Clara, CA, February 2026. USENIX Association. [30] Yifei Liu, Juntong Wu, Yang Liu, Junhao Hu, Ming-hao Li, Xiaoxu Chen, and Weihang Chen. Hypic: Ac-celerating hybrid-attention llm serving with position-independent caching, 2026. [31] Yuhan Liu, Yihua Cheng, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Rui Zhang, Kuntai Du, et al. Lmcache: An efficient kv cache layer for enterprise-scale llm inference. arXiv preprint arXiv:2510.09665 , 2025. [32] Yuhan Liu, Yuyang Huang, Jiayi Yao, Shaoting Feng, Zhuohan Gu, Kuntai Du, Hanchen Li, Yihua Cheng, Junchen Jiang, Shan Lu, Madan Musuvathi, and Esha Choukse. DroidSpeak: KV cache sharing across fine-tuned model variants. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) , pages 319–338, Renton, WA, May 2026. USENIX Association. [33] Songshuo Lu, Hua Wang, Yutian Rong, Zhi Chen, and Yaohua Tang. Turborag: Accelerating retrieval-augmented generation with precomputed kv caches for chunked text. In Proceedings of the 2025 Conference on Empirical Methods in Natural Language Processing ,pages 6599–6612, 2025. [34] Adyasha Maharana, Dong-Ho Lee, Sergey Tulyakov, Mohit Bansal, Francesco Barbieri, and Yuwei Fang. Evaluating very long-term conversational memory of LLM agents. In Proceedings of the 62nd Annual Meet-ing of the Association for Computational Linguistics (Volume 1: Long Papers) , pages 13851–13870, Bangkok, Thailand, August 2024. Association for Computational Linguistics. [35] Yu A Malkov and Dmitry A Yashunin. Efficient and robust approximate nearest neighbor search using hierar-chical navigable small world graphs. IEEE transactions on pattern analysis and machine intelligence , 42(4):824– 836, 2018. [36] NVIDIA. Nvidia dynamo router operations documenta-tion. [37] OpenAI. GPT-5 mini model. OpenAI API doc-umentation, https://platform.openai.com/docs/ models/gpt-5-mini .[38] OpenAI. text-embedding-3-small model. Ope-nAI API documentation, https://platform.openai. com/docs/models/text-embedding-3-small .14 [39] OpenAI. Tool search. OpenAI API docu-mentation, https://developers.openai.com/api/ docs/guides/tools-tool-search , 2026. Accessed September 2026. [40] OpenClaw Foundation. OpenClaw. https://github. com/openclaw/openclaw , 2026. [41] Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G Patil, Ion Stoica, and Joseph E Gonzalez. Memgpt: Towards llms as operating systems. arXiv preprint arXiv:2310.08560 , 2023. [42] Zaifeng Pan, Qianxu Wang, Zhengding Hu, Chang Chen, Yue Guan, Yanbo Zhou, Steven Swanson, and Yufei Ding. Smoothagent: Efficient long-horizon llm-based agent serving with lookahead context engineering, 2026. [43] Nilesh Prasad Pandey, Jason Kong, Lanxiang Hu, Quan-ling Zhao, Yujie Zhao, Onat Gungor, Hao Zhang, and Tajana Rosing. Agentkvshift: Efficient kv cache reuse for agentic memory systems, 2026. [44] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. Splitwise: Efficient generative llm inference using phase splitting. In 2024 ACM/IEEE 51st Annual International Symposium on Computer Architecture (ISCA) , pages 118–132. IEEE, 2024. [45] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Heyi Tang, Feng Ren, Teng Ma, Shangming Cai, Yineng Zhang, Mingxing Zhang, et al. Mooncake: A kvcache-centric disaggregated architecture for llm serving. ACM Transactions on Storage , 2024. [46] Parth Sarthi, Salman Abdullah, Aditi Tuli, Shubh Khanna, Anna Goldie, and Christopher D Manning. Rap-tor: Recursive abstractive processing for tree-organized retrieval. In The Twelfth International Conference on Learning Representations , 2024. [47] CloudLab: Flexible scientific infrastructure for research on the future of cloud computing. https://www.cloudlab.us. [48] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dong-ming Li, and Yiying Zhang. Preble: Efficient distributed prompt scheduling for llm serving. In Y. Yue, A. Garg, N. Peng, F. Sha, and R. Yu, editors, International Confer-ence on Learning Representations , volume 2025, pages 37057–37082, 2025. [49] Gemma Team, Thomas Mesnard, Cassidy Hardin, Robert Dadashi, Surya Bhupatiraju, Shreya Pathak, Lau-rent Sifre, Morgane Rivière, Mihir Sanjay Kale, Juliette Love, Pouya Tafti, Léonard Hussenot, Pier Giuseppe Sessa, Aakanksha Chowdhery, Adam Roberts, Aditya Barua, Alex Botev, Alex Castro-Ros, Ambrose Slone, Amélie Héliou, Andrea Tacchetti, Anna Bulanova, Antonia Paterson, Beth Tsai, Bobak Shahriari, Char-line Le Lan, Christopher A. Choquette-Choo, Clé-ment Crepy, Daniel Cer, Daphne Ippolito, David Reid, Elena Buchatskaya, Eric Ni, Eric Noland, Geng Yan, George Tucker, George-Christian Muraru, Grigory Rozhdestvenskiy, Henryk Michalewski, Ian Tenney, Ivan Grishchenko, Jacob Austin, James Keeling, Jane Labanowski, Jean-Baptiste Lespiau, Jeff Stanway, Jenny Brennan, Jeremy Chen, Johan Ferret, Justin Chiu, Justin Mao-Jones, Katherine Lee, Kathy Yu, Katie Millican, Lars Lowe Sjoesund, Lisa Lee, Lucas Dixon, Machel Reid, Maciej Mikuła, Mateo Wirth, Michael Sharman, Nikolai Chinaev, Nithum Thain, Olivier Bachem, Os-car Chang, Oscar Wahltinez, Paige Bailey, Paul Michel, Petko Yotov, Rahma Chaabouni, Ramona Comanescu, Reena Jana, Rohan Anil, Ross McIlroy, Ruibo Liu, Ryan Mullins, Samuel L Smith, Sebastian Borgeaud, Sertan Girgin, Sholto Douglas, Shree Pandya, Siamak Shak-eri, Soham De, Ted Klimenko, Tom Hennigan, Vlad Feinberg, Wojciech Stokowiec, Yu hui Chen, Zafarali Ahmed, Zhitao Gong, Tris Warkentin, Ludovic Peran, Minh Giang, Clément Farabet, Oriol Vinyals, Jeff Dean, Koray Kavukcuoglu, Demis Hassabis, Zoubin Ghahra-mani, Douglas Eck, Joelle Barral, Fernando Pereira, Eli Collins, Armand Joulin, Noah Fiedel, Evan Senter, Alek Andreev, and Kathleen Kenealy. Gemma: Open models based on gemini research and technology, 2024. [50] Qwen Team. Qwen3 technical report, 2025. [51] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. Attention is all you need. Advances in neural information processing systems , 30, 2017. [52] Jingbo Yang, Bairu Hou, Wei Wei, Yujia Bao, and Shiyu Chang. KVLink: Accelerating large language models via efficient KV cache reuse. In The Thirty-ninth Annual Conference on Neural Information Processing Systems ,2026. [53] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yi-hua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. Cacheblend: Fast large language model serving for rag with cached knowledge fusion. In Pro-ceedings of the twentieth European conference on com-puter systems , pages 94–109, 2025. [54] Jin-ge Yao, Xiaojun Wan, and Jianguo Xiao. Recent advances in document summarization. Knowledge and Information Systems , 53(2):297–336, 2017. [55] Hancheng Ye, Zhengqi Gao, Mingyuan Ma, Qinsi Wang, Yuzhe Fu, Ming-Yu Chung, Yueqian Lin, Zhijian Liu, 15 Jianyi Zhang, Danyang Zhuo, and Yiran Chen. KV-COMM: Online cross-context KV-cache communica-tion for efficient LLM-based multi-agent systems. In 
+
+The Thirty-ninth Annual Conference on Neural Informa-tion Processing Systems , 2025. [56] Zeyu Zhang, Quanyu Dai, Xiaohe Bo, Chen Ma, Rui Li, Xu Chen, Jieming Zhu, Zhenhua Dong, and Ji-Rong Wen. A survey on the memory mechanism of large language model-based agents. ACM Trans. Inf. Syst. ,43(6), September 2025. [57] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al. Sglang: Efficient execution of structured language model pro-grams. Advances in neural information processing sys-tems , 37:62557–62583, 2024. [58] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 
+
+{DistServe }: Disaggregating prefill and decoding for goodput-optimized large language model serving. In 
+
+18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) , pages 193–210, 2024. 16

@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-02</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-03</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 18 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>8</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>7</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-02 22:35:03 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-03 21:46:35 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日扫完18篇论文、精读8篇速读10篇，主线集中在多智能体与检索增强场景下的KV cache高效管理。</p>
-<p>最值得看的是精读双星《KVCMAS》（10.0）和《ActKV》（9.0），分别聚焦共享上下文KV缓存纠错与动作引导的Agent缓存管理。</p>
-<p>普通读者可优先关注KV cache优化如何降低多智能体/Agent推理开销，并顺带浏览速读中的DynBranch、Tessera和SparseEngine。</p>
+<p>今天完成12篇论文日报，精读7篇、速读5篇，核心聚焦异构多智能体LLM的KV Cache传输与智能体缓存管理。</p>
+<p>最值得看的是满分《Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs》和9分的《ActKV》，前者解决跨家族预填充瓶颈，后者用动作引导KV Cache提升智能体效率。</p>
+<p>普通读者可先读这两篇精读摘要，再扫一眼速读中Tessera和CADOC关于检索增强与长程上下文缓存的思路。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">7 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems">KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="ActKV: Efficient LLM Agents through Action-Guided KV Cache Management">ActKV: Efficient LLM Agents through Action-Guided KV Cache Management</span></li><li><span class="dpr-home-dashboard-paper-title" title="Receiver-Conditioned Latent Communication gives 94% CacheBack">Receiver-Conditioned Latent Communication gives 94% CacheBack</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs">Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="ActKV: Efficient LLM Agents through Action-Guided KV Cache Management">ActKV: Efficient LLM Agents through Action-Guided KV Cache Management</span></li><li><span class="dpr-home-dashboard-paper-title" title="Receiver-Conditioned Latent Communication gives 94% CacheBack">Receiver-Conditioned Latent Communication gives 94% CacheBack</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>5</strong></span><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>5</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">10 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving">DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving">Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="SparseEngine: Sparse-First Inference Engine">SparseEngine: Sparse-First Inference Engine</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving">Tessera: Demand-Driven KV Cache Management for Retrieval-Augmented LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="CADOC: Cache-Aware Dynamic Object Context for Long-Horizon Agents">CADOC: Cache-Aware Dynamic Object Context for Long-Horizon Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving">DynBranch: Speculative Subgraph Reuse for Dynamic Agentic LLM Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>4</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 
