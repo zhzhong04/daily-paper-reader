@@ -1,0 +1,2012 @@
+Capture the lifecycle: KV Cache management in ReAct
+Agents with KVTether
+Kaihua Fu1,*
+Yukun Zhou1,*
+Chaokun Chang1
+Yinghao Yu2
+Luping Wang2
+Guodong Yang2
+Jiuchen Shi3
+Quan Chen3
+Wei Wang1
+1Hong Kong University of Science and Technology
+2Alibaba Group
+3Shanghai Jiao Tong University
+*Equal contribution.
+Abstract
+Efficient serving of long-context reasoning-and-acting (Re-
+Act) agents relies on KV cache reuse to reduce large language
+model (LLM) prefill latency and monetary cost. However, a se-
+mantic gap exists between agent harnesses and the underly-
+ing serving stack. Through context mutation, tool execution,
+and subagent coordination, context messages may become
+actively engaged, permanently discarded, and temporarily
+unused, while the serving stack only observes accesses to the
+corresponding KV cache. This lifecycle blindness prevents
+recency-only policies such as LRU from reclaiming dead KV
+promptly and from preserving older KV that will be reused
+sooner than newer entries.
+We present KVTether, a lifecycle-aware KV cache man-
+agement framework for ReAct agents. By tracing seman-
+tic primitives embedded in agent harnesses, KVTether cap-
+tures runtime lifecycle semantics during highly dynamic
+execution. KVTether then translates message-level seman-
+tics into KV-level lifecycle states and uses these states to
+drive state-prioritized cache management without exposing
+physical complexities to agent harnesses. After reclaiming
+dead KV, KVTether preferentially preserves live-but-idle KV
+that is waiting for reuse, reducing premature eviction before
+reuse. Across agent benchmarks and production workloads,
+KVTether reduces end-to-end request latency by up to 26.3%
+and 17.4% relative to LMCache and MORI, respectively, and
+lowers estimated task cost by 40.0% and 33.2% on average.
+1
+Introduction
+Large language model (LLM) applications are evolving from
+interactive chatbots to autonomous agents. Mainstream agents
+such as Claude Code [2], Codex [23], OpenClaw [26], and
+Hermes [20] execute user requests through a reasoning-and-
+acting (ReAct) loop [34] interleaving LLM inference with
+tool calls. Over tens to hundreds of ReAct turns, a request
+can accumulate hundreds of thousands of tokens; for exam-
+ple, a Codex request can reach a 258K-token context. KV
+cache reuse is essential to avoid repeated prefill of these
+long contexts [8], reducing inference latency and cost. Yet
+retaining KV is costly: in GLM-4.7 [36], a 258K-token context
+requires 93GB of KV cache. Efficient KV-cache management
+is therefore essential for practical ReAct-agent serving.
+Step i: Compaction
+Step i+1: Message Append
+Step i+2: Subagent Call
+Msys M1
+… Mi−1
+Create Compaction Context
+Msys
+com. M1
+… Mi−1
+Compaction ContextLLM Msys
+com. Mcom.
+Result
+Replace origin
+history
+Msys Mcom.
+LLM Msys Mcom. Mi+1 LLM
+Msys Mcom. Mi+1 Mi+2
+Msys Mcom. Mi+1 M′i+2
+Fork
+Context
+Long-term Message
+Short-term Message
+Temporary Message
+Figure 1. An example of message lifecycle changes across
+three LLM calls. Within each context, long-term messages
+are retained for continued reuse across calls; short-term mes-
+sages remain reusable until removed or replaced; temporary
+messages expire after the current call.
+ReAct agents, however, expose a fundamental semantic
+gap between the application layer and the underlying serv-
+ing stack. At the application layer, the agent harness man-
+ages contexts through message-level operations [37] such
+as append, replace, remove, fork, and one-shot construc-
+tion, which define the logical lifecycle of messages: how long
+they remain reusable within each context (Figure 1). The
+LLM inference layer (e.g., vLLM [15] and SGLang [39]) trans-
+lates these contexts into token sequences, from which the
+KV-cache storage layer (e.g., MoonCake Store [28] and LM-
+Cache [7]) observes only cache pages, shared prefixes, and
+access events. As a result, physical KV residency can diverge
+from the logical lifecycles of source messages: the storage
+layer cannot tell whether a cached KV span is logically live,
+explicitly retained, temporarily waiting, or already dead.
+Our analysis of two production traces from a large cloud
+provider and a widely used agent benchmark reveals two
+common inefficiencies caused by this lack of lifecycle visibil-
+ity (§2.4). First, KV can remain physically resident as zombie
+KV after its logical lifetime ends. For example, after a com-
+paction subagent replaces a long history with a summary,
+both the discarded history and the one-shot compaction con-
+text are logically dead, yet their KV may persist until passive
+eviction. Our replay shows that zombie KV can occupy up
+to 36.3% of LMCache’s capacity. Second, recency-only poli-
+cies such as LRU can misorder live KV. Across the three
+workloads, 71.0–95.0% of LRU evictions are wrong-direction:
+admitted KV is needed later than the resident KV it displaces.
+This happens because recently produced KV in ReAct agents
+often awaits tool execution, scheduling, or subagent coordi-
+nation rather than being closest to reuse. Both inefficiencies
+1
+arXiv:2609.39819v1  [cs.OS]  30 Sep 2026
+
+
+arise because the serving stack cannot distinguish dead from
+live KV or waiting from cold KV.
+These observations motivate lifecycle-aware agent serv-
+ing, which requires exposing lifecycle information to the
+serving stack as it is generated. Prior works on agentic work-
+flows [5, 38] infer KV importance from predefined workflow
+structures [11, 22, 29] or execution histories, but this is insuf-
+ficient for ReAct agents. Their execution topology is created
+at runtime through context mutations, tool results, and sub-
+agent decisions rather than by a stable structure visible in
+advance; in one industrial trace, the fraction of LLM rounds
+executed by sub-agents ranges from 1.6% to 86.5% across re-
+quests (§2.2). More fundamentally, lifecycle-defining events
+such as message replacement, removal, one-shot construc-
+tion, and retention exist only in the harness’s message-level
+context management, so lower layers cannot infer how KV
+should track application-level context changes or be retained
+for future reuse. ReAct-agent serving therefore requires life-
+cycle events to be exported from the application layer via
+runtime tracing and in-harness integration, rather than in-
+ferred downstream.
+Making such lifecycle export practical is challenging for
+three reasons. (1) Diverse agent harnesses. Different agents,
+and even different subagents within one agent, may realize
+message-level context composition through incremental ap-
+pends, prompt rebuilding, selective history carry-over, or
+one-off contexts, so ad hoc harness-side hooks quickly be-
+come brittle and hard to generalize. Practical lifecycle export
+therefore requires a harness-side integration interface that
+captures common context-management semantics across
+diverse harness behaviors. (2) Cross-layer complexity. Life-
+cycle information originates at the application layer, while
+KV management operates on physical objects such as token
+prefixes and cache pages. The goal is to bridge these lay-
+ers without requiring application developers to reason about
+paging, prefix organization, or eviction timing; otherwise the
+lifecycle-export mechanism merely shifts KV-management
+complexity upward [12]. (3) Uncertain reuse intervals. Even
+after lifecycle events are captured and dead KV can be identi-
+fied, live-but-idle KV remains hard to manage because their
+reuse intervals vary with tool behavior, LLM decisions, and
+deployment conditions [6]. These dynamics motivate robust
+KV management under runtime uncertainty, without relying
+on precise reuse prediction [16, 32, 33].
+In this paper, we present KVTether, a lifecycle-aware KV-
+cache management framework for ReAct agents that exports
+message-level lifecycle semantics from the harness to the
+serving stack. KVTether comprises three design modules that
+work as a pipeline from semantic export to cache control. (1)
+Semantic primitive model (§4). KVTether places lifecycle
+export at the message-operation level, which matches how
+agent harnesses already compose and revise contexts. De-
+velopers use a small set of message-level primitives directly
+in existing context-management code, and KVTether cap-
+tures lifecycle events automatically from those operations.
+These exported events provide a common semantic interface
+across diverse harness behaviors and serve as the input to
+KVTether’s lifecycle manager. (2) Event-driven lifecycle
+manager (§5). KVTether uses an event-driven manager to
+translate exported message-level events into KV lifecycle
+states as cache action signals. It bridges the gap between
+message lists at the application layer and tokenized prefixes
+and cache pages in the serving stack. This design preserves
+precise KV control while keeping physical details transpar-
+ent to the application layer. (3) State-guided KV cache
+engine (§6). Guided by the lifecycle states produced by the
+manager, KVTether’s KV cache engine first reclaims space
+from dead KV, thereby confining the remaining uncertainty
+to live-but-idle KV. The further optimization is built upon
+a key observation that, when limited cache capacity forces
+space competition, newly used KV is often less urgent to re-
+tain than older live KV, as the execution of tools or subagents
+is not instantaneous. KVTether exploits this directional bias
+with MRU (most-recently-used) as a straightforward realiza-
+tion, mitigating wrong-direction evictions without relying
+on precise reuse prediction.
+We evaluate KVTether on agent benchmarks and pro-
+duction traces from a large cloud provider, using 12 Nvidia
+GB200 GPUs across three nodes (§8). We compare against
+LMCache [7], a strong semantic-blind KV cache, and MORI [33],
+an agent-aware baseline that predicts reuse from inferred
+request idleness. Relative to LMCache and MORI, KVTether
+lowers estimated task pricing by 40.0% and 33.2% on average
+and end-to-end request latency by up to 26.3% and 17.4%,
+respectively. To assess the semantic primitive model’s ease
+of adoption, we integrate KVTether into six agent harnesses
+with only 26–216 lines of integration code per harness.
+2
+Background and Motivation
+In this seciton, we introduce ReAct execution and context
+lifecycles (§2.1), then use workload traces to characterize KV
+reuse dynamics (§2.2). We investigate missed reuse under
+existing policies, and show the resulting prefill cost (§2.3). We
+analyze two underlying cache-management failures (§2.4)
+and discuss related work (§2.5).
+2.1
+ReAct Execution and Context Lifecycles
+ReAct execution and context messages. Reasoning-and-
+acting (ReAct) agents [2, 20, 23, 26] execute a user request
+as a loop that alternates LLM calls with tool execution [34].
+A context manager keeps the evolving task state as an or-
+dered sequence of messages and assembles them into the
+prompt for each LLM call. Each message carries a role: Sys-
+tem messages encode persistent instructions or memory, User
+messages describe goals and constraints, and Assistant and
+Tool messages record model outputs and tool results.
+2
+
+
+Long-term 
+Memory SubAgent
+Long-term.Sys
+Long-term.User
+Main.Sys
+Main Agent
+Main.Sys
+Main.User
+Main.Assistant
+LLM Decision
+Search
+files
+Web 
+Search
+Shell
+Spawn
+Agent
+Tool Result
+Compact 
+Agent
+Reviewer 
+Agent
+C.Sys
+R.Sys
+…
+…
+Reviewer
+Result
+Main.Tool
+⑤
+①
+②
+③
+④
+④
+Merge
+Merge
+③
+Merge
+Figure 2. A ReAct agent repeatedly composes message con-
+texts, calls the LLM, waits for tools or sub-agents, and up-
+dates the context for later rounds.
+Table 1. Min–max ranges of per-request characteristics
+across Codex and two production ReAct-agent traces. KV
+size is computed from total prefill tokens for GLM-4.7 [36].
+Metric
+Agent-G
+Codex
+Agent-X
+Total LLM rounds
+9–106
+3–97
+3–127
+Total prefill tokens
+17K–312K
+9K–363K
+11K–374K
+Total decode tokens
+2K–16K
+536–13K
+2K–11K
+Total KV size (GB)
+6–112
+3–130
+4–134
+Sub-agent LLM round ratio
+2.8%–25.0%
+2.0%–17.7%
+1.6%–86.5%
+Distinct tool-call types
+3–21
+2–47
+1–35
+Figure 2 traces one such loop. 1○A long-term-memory
+sub-agent prepares the System message. 2○The main agent
+initializes its context with System and User messages. 3○The
+LLM selects tools or sub-agent tasks and records its decisions
+as Assistant messages. 4○The agent issues these calls and
+waits for the results. 5○The context manager appends the
+results as messages. Steps 3○to 5○repeat until the task fin-
+ishes, and sub-agents keep their own contexts and may run
+in parallel. Because each tool and sub-agent choice depends
+on the accumulated context, the execution topology emerges
+at runtime rather than following a predefined workflow.
+Message and context lifecycles.
+This dynamic execu-
+tion creates diverse message lifecycles. Main-agent history
+may be reused across rounds, while a reviewer sub-agent
+may use task-specific messages for a single inference. A
+compaction sub-agent replaces older messages in the main
+context with a summary, ending their reuse while retaining
+selected instructions or memory. Child contexts may inherit
+parent prefixes yet evolve independently, so removing a mes-
+sage or terminating a context need not end reuse elsewhere.
+These operations determine whether the corresponding KV
+remains logically reusable.
+2.2
+KV Reuse under Dynamic Agent Execution
+We characterize how these execution and lifecycle dynam-
+ics shape KV reuse across three ReAct-agent workloads.
+The Codex workload uses a self-deployed software engineer-
+ing agent based on Codex [23] to run TerminalBench [19].
+Agent-X and Agent-G are two production coding agents de-
+ployed by a large cloud provider, which have a combined
+peak of over 27,000 active sessions; we collect 400 trajectories
+per agent. Table 1 summarizes per-request statistics.
+1
+100
+10000
+Longer wait / shorter wait
+0%
+25%
+50%
+75%
+100%
+CDF
+0
+40
+80
+120
+LLM round
+0.1
+1
+10
+100
+1000
+LLM Reuse
+Interval (s)
+0
+24
+48
+LLM round
+0.1
+1
+10
+Agent-G
+Codex
+Agent-X
+Figure 3. Agent workloads exhibit unstable non-LLM wait-
+ing intervals. (a) CDF of the longer-to-shorter ratio for adja-
+cent non-LLM waiting intervals. (b)–(c) Per-round non-LLM
+waiting times of one representative request per workload.
+Large reusable contexts. As messages accumulate across
+rounds, successive LLM calls often share long prefixes. Re-
+quests span 3–127 LLM rounds and accumulate 9K–374K
+prefill tokens (Table 1), making repeated prefill of these pre-
+fixes costly. KV reuse avoids this computation, but retain-
+ing reusable prefixes consumes cache capacity: these token
+counts correspond to 3–134 GB of KV for GLM-4.7.
+Lifecycle behavior varies across agents. Sub-agents ac-
+count for up to 86.5% of LLM rounds in Agent-X, versus
+17.7% in Codex and 25.0% in Agent-G. Some sub-agents reuse
+context across rounds, so their KV may remain useful for
+later calls. Others discard one-off contexts after a single call,
+ending reuse of their exclusive KV. Token overlap identifies
+shared prefixes, but does not reveal when a context ends or
+whether another context still needs its KV.
+Reuse intervals are unstable. Requests use 1–47 distinct
+tool types (Table 1), whose execution affects when the next
+LLM call can reuse the context’s live KV. Other runtime
+factors, including decoding, sub-agent execution, queueing,
+and scheduling, further shape this reuse interval. Figure 3(a)
+shows wide variation in consecutive non-LLM waiting inter-
+vals. The 90th-percentile longer-to-shorter ratio is 144.52×,
+33.67×, and 204.43× for Agent-G, Codex, and Agent-X, re-
+spectively. Panels (b)–(c) also show little temporal continuity
+within representative requests.
+KV liveness and reuse ordering depend on runtime execu-
+tion. This motivates adapting retention decisions online to
+changing contexts and reuse intervals.
+2.3
+Low KV Hit Rates under Semantic-Blind Policies
+We now quantify the reuse opportunities missed by existing
+KV-management policies under these dynamics. We replay
+the three traces on a three-node serving cluster, with the
+setup given in Table 4 in §8.1.
+We compare two representative baselines, LMCache [7]
+(LMC) and MORI [33], both using a decoupled three-layer
+serving stack. The harness manages messages and assembles
+prompts for LLM calls. SGLang [39] tokenizes prompts, per-
+forms prefill and decode, and indexes shared prefixes, while
+LMCache stores the resulting KV. For KV eviction, LMC uses
+3
+
+
+Agent-X
+Codex
+Agent-G
+0
+50
+100
+KV Cache Hit
+Ratio (%)
+LMC
+MORI
+Theory
+LMC MORI LMC MORI LMC MORI
+0
+50
+100
+Time Breakdown
+(%)
+Agent-X
+Codex
+Agent-G
+Prefill
+Decode
+Tool Call
+Figure 4. The theoretical maximum versus realized KV cache
+hit ratios (left) and aggregate execution time breakdown
+(right) under LMC and MORI on three workloads.
+LRU, whereas MORI ranks KV by relative idleness using re-
+cent LLM-active time and non-LLM waiting time, including
+tool and sub-agent waits. We report one representative load
+point, using 0.06, 0.05, and 0.06 requests per second (RPS)
+for the three workloads; §8 studies load sensitivity.
+Figure 4 (left) shows that realized KV cache hit ratios aver-
+age only 28.1% under LMC and 39.8% under MORI across the
+three workloads. Both fall far below the average theoretical
+maximum of 82.8%, which is measured by replaying each
+workload’s requests offline, one at a time.
+This decoupled serving stack creates a critical semantic
+gap between the harness and KV management. Message life-
+cycle changes in the harness are not propagated to lower
+layers, which manage physical residency per token or page.
+Without lifecycle semantics, they fall back on access history
+and timing signals to decide which KV to retain under ca-
+pacity pressure. This can leave obsolete KV resident while
+displacing prefixes needed by later calls.
+The resulting misses require recomputing reusable pre-
+fixes, increasing prefill work and inference cost. Figure 4
+(right) shows the breakdown of execution time summed
+across agents, sub-agents, and tool calls, including concur-
+rent work. Prefill remains a substantial component, account-
+ing for 37.6% under LMC and 34.6% under MORI on average.
+Improving KV cache hit ratios could therefore substantially
+reduce end-to-end latency by avoiding repeated prefill.
+2.4
+Two Failures Caused by the Semantic Gap
+This semantic gap leads to two cache-management failures.
+First, a liveness failure occurs when the system retains KV
+whose logical lifetime has ended. Second, an ordering failure
+arises when access history and timing signals misrepresent
+future reuse, causing misordered evictions among live KV.
+Liveness failure: zombie residency after lifecycle ter-
+mination.
+A zombie page is KV whose source message
+or context has lost all future reuse value because a request
+finished, a compaction replaced a history span, or a one-off
+context was discarded. Figure 5 reports the zombie share in
+the KV pool. On Agent-X, Codex, and Agent-G, LMC zombie
+shares peak at 31.1%, 36.3%, and 15.8%, respectively, because
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Zombie KV (%)
+Agent-X
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Codex
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Agent-G
+LMCache
+MORI
+Figure 5. Share of zombie pages in the KV pool under LMC
+and MORI on the three workloads.
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Eviction (%)
+Agent-X
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Codex
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Agent-G
+LMCache
+MORI
+Figure 6. Wrong-direction eviction ratio of LMC and MORI
+on the three workloads.
+LMC observes only recency, not lifecycle ends. MORI ex-
+hibits higher average zombie occupancy, with shares peak-
+ing at 49.7%, 33.1%, and 27.4%, respectively, because request
+idleness can prioritize dead KV indefinitely.
+This failure is not fundamentally a prediction problem.
+Once the harness removes, replaces, or retires a message
+span, its exclusive KV has already lost future reuse value.
+Failing to reclaim that KV is not due to uncertain timing, but
+to missing lifecycle information at the point where logical
+reachability changes.
+Ordering failure: wrong-direction evictions among
+live KV. Even after excluding dead KV, capacity pressure
+remains among live-but-idle KV. Figure 6 reports wrong-
+direction evictions over one hour on each trace. Following
+Belady’s rule [4], the best victim is the page whose next use
+lies farthest in the future; an eviction is wrong-direction
+when a newly inserted page A displaces a resident page B
+even though A will be reused later than B.
+LMC shows average wrong-direction ratios of 79.5%, 95.0%,
+and 71.0% on Agent-X, Codex, and Agent-G, respectively,
+because LRU assumes that recently used KV is closest to
+reuse. ReAct agents often invert this order: newly produced
+KV frequently enters a waiting period while the agent de-
+codes, runs tools, executes sub-agents, or waits behind other
+requests. MORI lowers these ratios to 57.8%, 75.6%, and 45.7%,
+respectively, by using idleness as a reuse proxy, but this still
+leaves a substantial fraction of misordered evictions. MORI
+accounts for observed idleness, but variable tool and sub-
+agent delays can decouple this signal from the remaining
+time to KV reuse.
+This residual problem remains difficult to resolve through
+precise prediction alone. As §2.2 shows, decoding, tools,
+sub-agents, queueing, and scheduling shape reuse intervals
+4
+
+
+online, causing wide variation across consecutive rounds.
+Even for live KV, exact next-use times remain uncertain.
+Prediction-based policies may help, but cannot replace life-
+cycle semantics for determining liveness or reliably eliminate
+ordering errors under this uncertainty.
+2.5
+Related Work
+Based on these observations, efficient agent KV management
+requires three capabilities: tracking harness-side message
+lifecycles, propagating lifecycle information across layers for
+KV retention and reclamation, and ordering live KV under
+uncertain reuse intervals. Existing work addresses parts of
+this space, but not this harness-to-cache lifecycle full path.
+Semantic-blind KV substrates.
+PagedAttention [15],
+RadixAttention [39], LMCache [7], MoonCake [28], and
+CachedAttention [10] provide the physical backbone of KV
+cache management through paging, prefix indexing, and
+tiered KV storage. However, besides the physical token
+streams, shared prefixes, and page accesses, they are totally
+blind to the logical message operations that determine KV
+cache reuse in ReAct contexts. Therefore, they only count
+on conventional recency policies such LRU for eviction
+ordering, underlying the two failures in §2.4.
+Semantic-aware serving improves scheduling and execu-
+tion coordination [14, 17, 18, 31], motivating similar support
+for agent KV management. Existing systems expose TTLs
+and KV retention ranges [3, 13, 21, 25], while Pie [12] exposes
+fine-grained programmable inference operations. However,
+these controls lack a common semantic contract mapping
+message operations to KV lifecycle updates. Applications still
+translate replacement, removal, fork inheritance, and one-off
+execution into backend-specific hints or operations; phys-
+ical interfaces additionally expose token/page boundaries,
+prefix dependencies, and shared-KV complexities. Lifecycle
+translation thus remains application-specific.
+Workflow-based KV Management.
+TokenCake [5],
+PBKV [38], and KVFlow [27] use predefined workflow
+stages and dependencies to anticipate reuse and guide KV
+retention and placement in agentic workflows [11, 22, 29],
+such as deep research. However, these methods cannot be di-
+rectly applied to ReAct agents, whose tool calls and subagent
+branches emerge incrementally from LLM decisions and tool
+results. Execution paths cannot be exhaustively enumerated
+in advance, and future topology remains unknown at cache
+decision time. The ReAct loop structure therefore cannot
+reveal which contexts will be revisited or their reuse order.
+Prediction-based KV policies. Continuum [16], Cache-
+Wise [32], and MORI [33] use tool-call timing to estimate
+KV reuse under dynamic ReAct execution. Continuum and
+CacheWise derive per-entry TTLs from historical tool-call in-
+terval distributions, while MORI infers reuse priorities from
+the fraction of recent execution time spent in tool calls. These
+Semantic events
+Semantic 
+Primitive Model
+Main Agent
+Compact Agent
+Append
+Truncate
+Delete
+Spawn
+Pin
+Event-Driven 
+Lifecycle Manager
+KV Cache 
+Eviction Engine
+State-prioritized KV 
+Cache Management
+One-off
+ctx2-sys
+ctx2-comp.
+ctx2-main
+Spawn
+…
+Discarded
+ctx2-main: 
+Active ctx2-main
+Pin
+ctx2-sys: …
+State Transition Diagram
+KV Page Storage
+3
+4
+1
+2
+0
+5
+Proactive 
+Delete
+Reject
+Storage
+3
+6 …
+x
+Pin
+Primitives
+Ctx Messages
+KV Pages
+One-off
+ctx2-comp.: 
+…
+2
+5
+Semantic Event Tracing
+LLM Engine
+Insert
+LLM Token
+Lifecycle State
+Agent Harness
+Context Management Operations
+Figure 7. The design overview of KVTether.
+approaches have two limitations. First, without lifecycle dis-
+tinctions, dead KV can occupy capacity and displace live
+KV, undermining eviction effectiveness. Second, runtime-
+dependent execution and changing deployment conditions
+make reuse intervals unstable, weakening prediction reliabil-
+ity across workloads and propagating per-entry uncertainty
+into eviction decisions.
+3
+Challenges and Design Overview
+The analysis in §2 shows that the semantic gap in ReAct
+agents cannot be closed by downstream inference alone:
+lifecycle semantics should be exported from the harness
+at runtime. Making this practical, however, still involves
+three concrete challenges. KVTether follows the architectural
+lifecycle-export idea and overcomes the challenges through
+three corresponding designs, summarized in Figure 7.
+C1: Diverse agent harnesses.
+Agent harnesses realize
+context evolution through different context-management
+patterns, making ad hoc hooks brittle and hard to generalize.
+Rather than tie lifecycle export to harness-specific functions,
+KVTether targets the more stable substrate that these har-
+nesses share: message-level context operations. It therefore
+provides a semantic primitive model that exports lifecycle se-
+mantics through a small set of primitives for message edits,
+context creation, and lifetime declaration. This gives hetero-
+geneous harnesses a common runtime interface for lifecycle
+export while preserving their existing agent logic.
+C2: Cross-layer complexity. Lifecycle semantics are gen-
+erated by message-level context management, while action-
+able application requires resolving physical details beyond
+harness-level concerns, including how messages materialize
+into tokens and KV, how edits invalidate KV suffixes due to
+prefix dependency, and how multiple contexts deal with con-
+flict message spans on shared prefixes. KVTether addresses
+this challenge with an event-driven lifecycle manager that
+translates message-level events into KV-level lifecycle states.
+This manager encapsulates tokenization, prefix structure,
+5
+
+
+and sharing details, so the serving stack can apply lifecycle-
+aware KV control precisely without pushing physical cache-
+management complexity back to agent harnesses.
+C3: Uncertain reuse intervals.
+Even after lifecycle se-
+mantics identify dead KV, capacity pressure remains among
+live-but-idle KV whose reuse intervals vary with tools, sub-
+agents, and runtime delays. KVTether’s state-guided KV cache
+engine therefore takes a state-prioritized approach. It first
+bypasses or proactively reclaims dead KV, confining uncer-
+tainty to the live-but-idle tier. KVTether then orders and
+evicts KV within this tier using observed overall reuse trends,
+avoiding depending on precise per-item prediction.
+Figure 7 also illustrates the end-to-end workflow. As the
+harness updates a context, it emits lifecycle events through
+the primitive interface. The lifecycle manager resolves each
+event to the affected token/KV scope and updates the corre-
+sponding KV lifecycle state. Guided by that state, the cache
+engine turns lifecycle state into cache actions such as bypass,
+reclamation, and eviction.
+4
+Semantic Primitive Model
+In this section, we introduce the semantic programming
+model in KVTether, which exposes context-management
+intent through message-level primitives. Developers declare
+context updates and message lifetimes through interfaces
+compatible with their existing harnesses. These operations
+generate semantic events for the lifecycle manager (§5).
+4.1
+Message-Level Primitives
+To identify context lifecycle transitions, an intuitive approach
+is to classify subagents by function (e.g. memory compaction
+or tool safety guardian) and map function invocations to
+the corresponding transitions. However, it is challenging
+to formulate function-based lifecycle rules that generalize
+across agent harnesses. We investigate four agent harnesses
+(Table 2) implemented in different programming languages.
+These agents support diverse functions, and even the same
+function can have different context requirements across har-
+nesses. For example, Codex’s safety guardian function [24]
+retains interaction history, including prior tool commands,
+across reviews, whereas Hermes [20] assesses the current
+command without prior history, and SWE-agent [30] and
+Agent-G invoke no LLM.
+Despite these differences, we find that all four harnesses
+rely on context-management logic that maintains messages
+and assembles LLM inputs. We refer to this abstraction as
+the context manager. Table 2 shows that all four harnesses
+store interaction histories as ordered message sequences, pro-
+viding an opportunity to track context lifecycle transitions
+at message granularity. Tracking message updates captures
+context changes, while explicit lifetime declarations capture
+retention intent.
+Table 2. The Data structure of context managements in agent
+harnesses.
+Agent
+Language
+Message sequence
+Codex CLI [24]
+Rust
+Vec<ResponseItemEnvelope>
+SWE-agent [30]
+Python
+list[HistoryItem]
+Hermes [20]
+Python
+List[{role: ..., content: ...}]
+Agent-G
+Go
+[]*types.ChatMessage
+Table 3. Primitives in KVTether’s library for managing agent
+contexts and declaring message lifetimes.
+Category
+Primitive
+Description
+Message edits
+append
+Record message appends.
+replace
+Record in-place message replacement.
+remove
+Record message removals.
+Context
+creation
+fork
+Register a child sharing a parent prefix.
+spawn
+Register an independent child context.
+Lifetime
+declarations
+one_off
+Mark a context for one inference.
+pin
+Declare long-term message retention.
+unpin
+Release retention protection.
+Based on this observation, KVTether exposes eight prim-
+itives that record context updates and retention intent for
+message-level lifecycle tracking as shown in Table 3. Mes-
+sage edits (append, replace, and remove) identify the af-
+fected context and message range; context creation (fork
+and spawn) records whether a child inherits a parent prefix.
+Lifetime declarations (one_off and pin) distinguish ordi-
+nary reuse from single-use and explicitly retained messages;
+unpin releases this protection.
+Expressiveness of the Primitive Set. These primitives
+capture both the spatial evolution of contexts and the tem-
+poral requirements for message retention. Spatially, changes
+to a message list reduce to adding, modifying, or removing
+messages; combining these edits also handles changes in
+order. Temporally, a new context either starts independently
+or inherits existing messages, which can have different life-
+times in different contexts. Messages may be used for one
+inference, reused across rounds, or explicitly retained, while
+runtime events mark when their use pauses, resumes, or ends
+(§5). These cases cover the context changes and retention
+requirements in our model, so more complex functions can
+be expressed by combining the existing primitives.
+4.2
+Integration and Composition
+Figure 8 combines a Python adapter that subclasses an ex-
+isting ContextManager with a context compaction exam-
+ple. The adapter preserves the harness’s message updates
+and prompt construction, reports operations through the
+SDK, and pins System messages during initialization. The
+agent harness continues to use the manager without han-
+dling the context’s tokens or KV pages. Compaction derives a
+temporary context, declares it one-off before inference, and
+replaces the selected history with the resulting summary.
+6
+
+
+1 import kvtether
+2 from agent_harness import ContextManager
+3
+4 class KVTetherContextManager(ContextManager):
+5
+def __init__(self, messages):
+6
+super().__init__(messages=messages)
+7
+kvtether.pin(messages)
+8
+9
+def append(self, message):
+10
+result = super().append(message)
+11
+kvtether.append(self, message)
+12
+return result
+13
+14
+def replace(self, start, end, message):
+15
+result = super().replace(start, end, message)
+16
+kvtether.replace(self, start, end, message)
+17
+return result
+18
+19
+def fork(self, end):
+20
+child = super().fork(end)
+# Same type; no init.
+21
+kvtether.fork(self, child, end)
+22
+return child
+23
+24 context = KVTetherContextManager([system_message])
+25 context.append(user_message)
+26 ...
+# Agent execution accumulates history.
+27 compaction = context.fork(end)
+28 kvtether.one_off(compaction)
+29 compaction.append(summary_instruction)
+30 context.replace(start, end, run_llm(compaction))
+Figure 8. Simplified SDK integration and context com-
+paction.
+System messages remain outside the replaced range, and
+subsequent rounds reuse the summary. Such sequences can
+be encapsulated in higher-level methods while preserving
+the same semantic events.
+Each derived context has an independent message con-
+tainer. Its termination ends only its own unpinned references;
+other contexts may still require the shared prefix. Similarly,
+replacing a message range preserves the order of unaffected
+messages and changes only the issuing context. The lifecycle
+manager reconciles these logical events with shared physical
+KV ownership.
+5
+Event-Driven Lifecycle Management
+The primitive model helps expose context evolution as harness-
+side semantic events, but these events still do not directly
+specify how physical KV should be managed. The lifecycle
+manager closes this gap by interpreting them against the
+physical organization of KV, including message-to-KV map-
+ping, prefix-sensitive validity, and cross-context sharing. It
+therefore proceeds in two steps: §5.1 resolves the affected
+KV scope, and §5.2 defines the resulting lifecycle states.
+5.1
+KV Scope Resolution
+KVTether resolves semantic events with context as the pri-
+mary management unit. For each independently evolving
+context, the lifecycle manager maintains the mapping from
+its messages to the materialized token and KV ranges they
+currently cover. Context-scoped events update an entire con-
+text scope directly, while message-scoped events require
+translation.
+Discarded
+Pinned
+Active
+Suspended
+Expired
+Temporary
+One-off(𝒄𝒕𝒙𝒊)
+Pin(𝒎𝒔𝒈𝒊,𝒋)
+Pin(𝒎𝒔𝒈𝒊,𝒋)
+unPin(𝒎𝒔𝒈𝒊,𝒋)
+𝒄𝒕𝒙𝒊 is terminated
+𝒎𝒔𝒈𝒊,𝒋…
+Remove(𝒎𝒔𝒈𝒊,𝒋)
+Active
+fork
+𝒄𝒕𝒙𝒊𝒄𝒕𝒙𝒌
+Lifecycle transitions 
+for 𝒄𝒕𝒙𝒌
+Append(𝒎𝒔𝒈𝒊,𝒋)
+… 𝒎𝒔𝒈𝒊,𝒋
+Figure 9. Message lifecycle state transitions within and
+across contexts in KVTether.
+This translation in KVTether follows the same prompt
+construction path in LLM engines. Message lists are first
+formatted into the actual prompt string and then tokenized
+into the token sequence indexing KV cache. Most events
+then translate by position, but remove and replace on mes-
+sages are constrained by prefix-dependent validity, where
+changing a message in the middle of a context invalidates
+the cached suffix due to the KV cache computing logic in
+LLM inference, even when later messages are unchanged.
+KVTether therefore translates them into suffix invalidation,
+and the affected KV ranges enter the Expired state (§5.2).
+Physical translation is further gated by KV existence: only
+messages that have already participated in inference have ma-
+terialized token spans and KV ranges to manage. KVTether
+therefore applies token/KV updates only at inference bound-
+aries. Between inferences, it processes each context’s events
+serially in program order, updating message states and record-
+ing the events against the latest materialized mapping; the
+next inference emits the minimal invalidation and update
+actions required by the new prefix structure.
+5.2
+Lifecycle State Management
+To preserve independent retention demands, KVTether main-
+tains a lifecycle state for each message version in each con-
+text. Figure 9 shows transitions driven by primitive opera-
+tions and runtime events. We denote the 𝑗-th message in
+context 𝑐𝑡𝑥𝑖by 𝑚𝑠𝑔𝑖,𝑗; its version changes when its content
+or preceding token prefix changes. Four categories capture
+these demands. Pinned messages receive explicit long-term
+or temporary protection. Ordinary messages are Active when
+newly appended or participating in LLM requests, and Sus-
+pended once LLM decoding starts. Discarded groups Expired
+messages whose lifetimes have ended and Temporary mes-
+sages declared for one inference. Temporary messages are
+tracked logically; their exclusive KV bypasses reuse storage.
+Runtime transitions.
+When a context 𝑐𝑡𝑥𝑖is spawned
+or forked, KVTether begins monitoring its execution and
+updating message lifecycle states. As messages are appended
+to 𝑐𝑡𝑥𝑖, KVTether marks each ordinary message 𝑚𝑠𝑔𝑖,𝑗Ac-
+tive. When an LLM request for 𝑐𝑡𝑥𝑖completes LLM prefilling,
+7
+
+
+KVTether moves all Active messages in that context to Sus-
+pended; before the next request, it reactivates participating
+ordinary messages. When 𝑐𝑡𝑥𝑖terminates, its ordinary mes-
+sages become Expired, while Pinned messages retain their
+declared protection. Releasing protection (unPin) returns a
+valid message to Suspended between calls, or to Expired if
+its context has terminated.
+During execution, KVTether handles three further types
+of context changes. (1) When 𝑚𝑠𝑔𝑖,𝑗is removed or replaced,
+its old version becomes Expired, along with old versions of
+subsequent messages whose token prefixes change. Their
+KV is no longer reusable by 𝑐𝑡𝑥𝑖. KVTether tracks the re-
+placement and affected suffix as new versions for subsequent
+LLM requests. (2) When 𝑐𝑡𝑥𝑖forks a child 𝑐𝑡𝑥𝑘, KVTether
+maintains separate states for inherited messages 𝑚𝑠𝑔𝑘,𝑗and
+their parent counterparts. Parent and child states evolve inde-
+pendently: execution and content changes in either context
+affect only its own message states. (3) When 𝑐𝑡𝑥𝑖is declared
+one_off before inference, KVTether marks its existing and
+subsequently appended messages Temporary.
+6
+State-Guided KV Cache Engine
+The lifecycle manager resolves message-level semantics into
+KV lifecycle states; the cache engine uses these states to make
+cache decisions under uncertain reuse. Treating this problem
+monolithically is counterproductive: if all KV is handled
+uniformly, semantically determined cases can interfere with
+the decisions that should be reserved for genuinely uncertain
+reuse. KVTether therefore adopts a state-prioritized design
+that narrows the problem in two steps. It first filters out
+determined cases (§6.1), and then focuses optimization on
+the residual core uncertainty among live-but-idle KV (§6.2).
+6.1
+Separating Determined and Uncertain Reuse
+KVTether begins by narrowing the uncertain-reuse problem
+with a state-prioritized policy. The key idea is that lifecycle
+state determines the default order of cache actions during KV
+admission, not merely the eviction order among live entries.
+When a new KV range arrives, the cache engine consults its
+lifecycle state together with the states of resident KV, and
+applies the decision order in Algorithm 1. This order first
+removes semantically determined cases from contention, and
+only then lets the remaining live KV compete for capacity.
+Algorithm 1 makes the narrowing effect explicit. Tempo-
+rary KV is bypassed at admission, Expired KV is reclaimed
+before any live eviction begins, and ordinary idle KV in the
+suspended state yields capacity before stronger live states
+do. This order prevents semantically determined cases from
+distorting eviction decisions for genuinely uncertain reuse.
+In particular, it reduces the chance of wrong-direction evic-
+tions by preventing dead KV and higher-priority live KV
+from distorting competition within the uncertain idle tier.
+Algorithm 1 State-prioritized KV admission
+Require: incoming KV 𝑟, resident cache C, free capacity 𝐹
+1: procedure FreeByState(C,𝑠, Δ)
+2:
+while Δ > 0 and ∃resident KV in C with state 𝑠do
+3:
+release one resident KV range with state 𝑠
+4:
+update Δ
+5:
+end while
+6: end procedure
+7: if 𝑠𝑡𝑎𝑡𝑒(𝑟) = Temporary then
+8:
+return
+// bypass Temporary KV
+9: end if
+10: Δ ←𝑠𝑖𝑧𝑒(𝑟) −𝐹
+11: FreeByState(C, Expired, Δ)
+// reclaim Expired KV
+12: FreeByState(C, Suspended, Δ)
+// evict Suspended KV
+13: FreeByState(C, Active, Δ)
+// fallback to Active KV
+14: if 𝑠𝑡𝑎𝑡𝑒(𝑟) = Pinned then
+15:
+FreeByState(C, Pinned, Δ)
+// compete with Pinned KV
+16: end if
+17: if Δ ≤0 then
+18:
+admit 𝑟into reusable storage
+19: end if
+Managing Shared KV. KVTether tracks the states of all
+message versions mapped to each token’s KV across con-
+texts (§5.2). Using the priorities in Algorithm 1, it assigns
+the KV the highest-priority mapped state for eviction deci-
+sions and updates this aggregate whenever a mapped version
+changes state. For example, if a parent removes a message
+but its forked child still holds a Suspended reference, their
+shared KV remains Suspended. The KV becomes Discarded
+only when all mapped versions are Discarded, and can be
+reclaimed once any in-flight use completes.
+After this filtering step, the core uncertainty is concen-
+trated in the suspended tier. Section 6.2 futher discusses how
+KVTether orders this residual uncertainty.
+6.2
+Ordering Suspended-KV Under Pressure
+After the state-prioritized filtering, the remaining uncer-
+tainty lies in the suspended tier: KV that is still live but
+currently idle. The key question is therefore how to order
+evictions within this tier under cache pressure. The widely
+adopted policy is LRU [7, 15, 28, 39], which assumes that the
+most recently accessed entry is also the one closest to reuse.
+However, this assumption is systematically misaligned with
+suspended KV in ReAct agents, where newly suspended KV
+is often unlikely to be reused immediately but waits during
+the execution of tools, sub-agents, or other physical stages.
+Figure 10 shows this pattern. The bars show the distribu-
+tion of reuse interval since writeback, and the curve shows
+the conditional probability that a suspended entry will be
+reused within the next second given that it has remained
+unused up to that age. Across all three workloads, reuses are
+not concentrated at the youngest ages. Instead, they cluster
+several seconds later: in Agent-G, 43.1% of observed returns
+fall within 1–3 s after writeback; in Codex, 46.6% fall within
+3–6 s; and in Agent-X, 87.5% fall within 2–4 s.
+8
+
+
+0
+2
+4 20
+0
+10
+20
+30
+40
+43.1% reuse in 1–3 s
+Agent-G
+0
+3
+7
+15
+0
+10
+20
+30
+46.6% reuse in 3–6 s
+Codex
+0
+2
+5
+9
+0
+20
+40
+60
+80
+87.5% reuse in 2–4 s
+Agent-X
+Probability / share (%)
+Time since writeback (s)
+Conditional return
+Sample share
+Figure 10. Observed suspended KV reuse behavior of the
+three traces under a deployment with PD-disaggregation,
+where KV writeback happens after LLM prefill.
+This reversed direction determines the poor behavior of
+LRU under high pressure. As older suspended KV are dis-
+placed earlier than newly suspended KV, LRU tends to spend
+scarce residency on entries whose waiting value has not yet
+matured, while evicting entries that are closer to actual reuse.
+This effect is visible in our evaluation at the highest load
+points: on Agent-X, for example, LMCache’s hit ratio under
+LRU falls to 10.2%, compared with 49.5% for KVTether (§8).
+Therefore, effective cache management for ReAct agents
+under high pressure should preserve KV long enough for its
+reuse value to be realized. Based on this principle, KVTether
+follows this principle and adopts MRU (most-recently-used)
+as a heuristic realization: under cache pressure, it evicts the
+most recently suspended KV first, favoring entries that have
+waited longer and are more likely to be reused.
+Note that the advantage of this design lies in the stable
+directional trend in suspended-KV reuse induced by ReAct
+execution, rather than precise per-entry next-use predic-
+tion [16, 32, 33]. Additional queueing may lengthen reuse
+intervals across deployments, but the trend remains action-
+able as long as the relative order of cache events is preserved
+(e.g., by a first-in-first-out policy). MRU thus sustains reuse
+across workloads and cache pressures (§8).
+7
+Implementation of KVTether
+KVTether comprises three components. First, a lightweight
+in-harness framework exposes the eight primitives. It records
+primitive invocations synchronously to preserve the order
+of context mutations, and exports them asynchronously to
+the server-side runtime in the same order, keeping lifecycle
+export off the critical path without changing event order.
+Second, the lifecycle manager is a server-side Python run-
+time that sits between the harness and the lower serving
+stack. It ingests lifecycle events, reproduces the LLM en-
+gine’s prompt-formatting and tokenization pipeline for inde-
+pendent message-to-KV translation, and interposes on LLM
+calls to coordinate cache actions. Before forwarding each
+call, it passes the call ID and context ID to the cache engine,
+enabling subsequent admission and bypass decisions over
+the correct context-owned KV ranges.
+Third, KVTether’s state-guided policy runs on a multi-tier
+cache engine spanning GPU HBM, host memory, and remote
+Table 4. Experimental setup.
+Specification
+Hardware
+3 nodes, each with 2 Nvidia Grace CPUs @ 3.38GHz
+4 Nvidia GB200 GPUs, 4×200Gb/s RDMA RoCE
+Software
+Ubuntu 24.04, CUDA 12.9, cuDNN 9.10.2, NCCL 2.27.5
+SGLang 0.5.8, LMCache 0.5.5, MoonCake 0.3.8
+Model
+GLM-4.7 (358B) with PD disaggregation
+(1 prefill + 2 decode instances, TP=4)
+Cache
+400 GB KV cache pool per node
+KV transfer through MoonCake transfer engine
+Dataset
+Production trajectories of Agent-X and Agent-G
+Codex
+memory. We separate global lifecycle control, which decides
+whether a page remains in reusable KV space, from per-tier
+caching, which decides whether a tier retains a fast copy.
+We provide a native engine using CUDA for local GPU-CPU
+movement and MoonCake for cross-node transfers, plus a
+compatibility path that proxies KVTether’s control logic onto
+existing backends such as LMCache and MoonCake Store.
+8
+Evaluation
+In this section, we first compare KVTether’s end-to-end per-
+formance with the baselines. We then conduct ablations of
+lifecycle tracking and recency optimization and assess the
+integration effort of its primitive interface across six agent
+harnesses. Finally, we measure runtime overhead.
+8.1
+Experimental Setup
+Hardware and software. We use the three-node cluster in
+Table 4, with 12 NVIDIA GB200 GPUs, six Grace CPUs, and
+RDMA RoCE networking. Each node allocates 400 GB of host
+memory to the KV pool (1.2 TB total). SGLang [39] serves
+GLM-4.7 [36] using prefill–decode disaggregation [40], with
+one prefill and two decode instances, each using tensor par-
+allelism of four. MoonCake [28] provides cross-node KV
+transfers. All methods use the same model deployment and
+per-tier KV capacity.
+Workloads.
+We replay the three workloads in §2.2. For
+Codex, we collect trajectories by running the Codex agent
+harness [24] on TerminalBench [19] tasks, with all LLM re-
+quests served by DeepSeek-V4-Pro [9]. For Agent-X and
+Agent-G, we use execution traces from two internal cod-
+ing agents deployed by a large cloud provider. Each trace
+contains 400 tasks.
+For controlled comparisons of cache policies, we replay
+each task through LLM inference on the real cluster, using
+random prompts with recorded per-round input token counts
+and enforcing recorded output counts. We adjust prompt con-
+tent across rounds to exactly match each request’s potentially
+reusable prefix length in the trace. We simulate tool calls by
+waiting for their recorded durations, eliminating variability
+in tool execution time across experiments.
+Across all three workloads, we replay lifecycle events at
+their original execution points and in order relative to LLM
+9
+
+
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+25
+50
+75
+KV Cache Hit
+Ratio (%)
+Agent-X
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+150
+300
+450
+Prefill Duration (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+200
+400
+600
+End-to-End
+Latency (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0.0
+2.5
+5.0
+7.5
+Price (USD/Request)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+20
+40
+60
+KV Cache Hit
+Ratio (%)
+Agent-G
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+60
+120
+180
+Prefill Duration (s)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+150
+300
+End-to-End
+Latency (s)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+1
+2
+3
+Price (USD/Request)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+20
+40
+60
+KV Cache Hit
+Ratio (%)
+Codex
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+150
+300
+450
+Prefill Duration (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+250
+500
+750
+End-to-End
+Latency (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+2
+4
+6
+Price (USD/Request)
+LMCache
+MORI
+KVTether
+Figure 11. KV cache hit ratio (first column), cumulative prefill time (second column), end-to-end latency (third column), and
+average task pricing (fourth column) of KVTether, LMCache, and MORI with Agent-X, Agent-G, and Codex.
+calls. This preserves message boundaries, prefix sharing,
+fork inheritance, and suffix invalidation from message re-
+placement or removal. For Codex, we integrate KVTether’s
+programming model into the harness to record events online
+during trace collection. For externally collected Agent-X and
+Agent-G traces, we reconstruct events offline from logged
+message updates, context relationships, and termination
+records, using only information available at that execution
+point. We evaluate each trace at five RPS settings with Pois-
+son arrivals, following prior serving evaluations [15, 35, 40].
+Task samples and arrival sequences are identical across meth-
+ods.
+Baselines. We compare KVTether with two baselines. LM-
+Cache (LMC) [7] uses LRU eviction based on page-access
+recency. MORI [33] ranks agent programs by idleness, the
+fraction of recent execution time spent in tool calls, includ-
+ing elapsed time in an ongoing call. It favors busy programs
+for GPU residency while offloading and evicting more idle
+programs, with admission control at both tiers.
+Metrics.
+We report four metrics. (1) KV cache utiliza-
+tion is the total number of cache-hit input tokens divided
+by the total number of input tokens across all rounds. (2)
+Cumulative prefill time measures the total prefill execu-
+tion time across all rounds. (3) End-to-end latency mea-
+sures the elapsed time from the start of task execution to
+its completion. (4) Average task pricing is estimated us-
+ing DeepSeek-V4-Pro’s peak rates of $0.044, $1.32, and $3.96
+per million cache-hit input, cache-miss input, and output
+tokens, respectively [9]. We aggregate token charges across
+rounds and average over tasks, applying the same rates to
+all methods.
+8.2
+End-to-End Performance
+Figure 11 compares KVTether with LMCache and MORI on
+Agent-X, Agent-G, and Codex at five RPS settings per trace.
+We report average and maximum improvements across all
+15 settings.
+KV cache hit ratio. KVTether achieves average absolute
+hit-ratio gains of 33.3% and 24.5% over LMCache and MORI,
+respectively, reaching up to 47.8% and 36.4%. The gap is
+smaller in some low-load settings. For example, at the low-
+est rate on Agent-X, LMCache and MORI retain useful KV,
+achieving 60.0% and 58.1% hit ratios, compared with KVTether’s
+71.9%. At the highest rate, their hit ratios fall to 10.2% and
+35.7%, while KVTether retains 49.5%. KVTether therefore
+degrades more gradually under contention and maintains
+higher reuse across the evaluated load range.
+Prefill time and end-to-end latency. By retaining more
+reusable KV under contention, KVTether avoids repeated
+prefix computation. KVTether reduces prefill time by 29.2%
+and 23.3% on average relative to LMCache and MORI, respec-
+tively, and by up to 41.2% and 33.2%. These savings reduce
+end-to-end latency by 16.5% and 12.4% on average relative
+to LMCache and MORI, respectively, and by up to 26.3% and
+17.4%. The latency gains are smaller than the prefill reduc-
+tions because decoding remains necessary.
+Average task pricing.
+KVTether lowers estimated task
+pricing by 40.0% and 33.2% on average relative to LMCache
+and MORI, respectively, and by up to 53.6% and 44.1%. As the
+baselines lose reuse under load, more input tokens incur the
+higher cache-miss price. KVTether limits this cost increase
+by retaining more cache hits, while output charges remain
+10
+
+
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+25
+50
+75
+KV Cache Hit
+Ratio (%)
+Agent-X
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+150
+300
+450
+Prefill Duration (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+200
+400
+600
+End-to-End
+Latency (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0.0
+2.5
+5.0
+7.5
+Price (USD/Request)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+20
+40
+60
+KV Cache Hit
+Ratio (%)
+Agent-G
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+60
+120
+180
+Prefill Duration (s)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+150
+300
+End-to-End
+Latency (s)
+0.06 0.07 0.08 0.09 0.10
+RPS
+0
+1
+2
+3
+Price (USD/Request)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+20
+40
+60
+KV Cache Hit
+Ratio (%)
+Codex
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+150
+300
+450
+Prefill Duration (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0
+250
+500
+750
+End-to-End
+Latency (s)
+0.08 0.10 0.12 0.14 0.16
+RPS
+0.0
+1.5
+3.0
+4.5
+Price (USD/Request)
+KVTether w/o RO
+KVTether w/o LT
+KVTether
+Figure 12. KV cache hit ratio (first column), cumulative prefill time (second column), end-to-end latency (third column), and
+average task pricing (fourth column) of KVTether, KVTether w/o LT, and KVTether w/o RO with Agent-X, Agent-G, and
+Codex.
+fixed by replay. Its reuse advantage thus translates into cost
+savings across load levels.
+8.3
+Ablation Study
+We compare KVTether with two variants to isolate the con-
+tributions of lifecycle tracking and recency optimization.
+KVTether w/o LT disables lifecycle tracking and state-guided
+cache management while retaining MRU. KVTether w/o RO
+retains lifecycle tracking and state priorities but replaces
+MRU with LRU within the Suspended tier. Figure 12 reports
+their performance using the same workloads, RPS settings,
+and cache budgets as in Section 8.2.
+8.3.1
+Lifecycle Tracking. Compared with KVTether w/o
+LT, KVTether achieves an average absolute hit-ratio gain of
+25.6% across the 15 settings, reaching up to 43.4%. It reduces
+prefill time, end-to-end latency, and average task pricing by
+23.2%, 13.1%, and 33.1% on average, with maximum reduc-
+tions of 43.1%, 26.6%, and 53.2%, respectively. MRU alone can
+even underperform LMCache with LRU eviction. For exam-
+ple, at the lowest RPS on Codex, KVTether w/o LT achieves
+a 20.8% hit ratio, compared with 36.1% for LMCache.
+Figure 13 compares zombie-page occupancy under KVTether
+and KVTether w/o LT over one-hour windows from work-
+load replay. Under KVTether w/o LT, zombie pages occupy
+an average of 22.1%, 21.4%, and 38.5% of resident KV on
+Codex, Agent-X, and Agent-G, respectively. KVTether ex-
+hibits only minor zombie occupancy on Codex, averaging
+below 2.5% of resident KV, and no zombie pages on the other
+workloads. Without lifecycle information, MRU can retain
+older zombie pages while evicting newly arrived reusable
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Zombie pages (%)
+Agent-X
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Codex
+0 10 20 30 40 50 60
+Time (minutes)
+0
+30
+60
+Agent-G
+KVTether
+KVTether w/o LT
+Figure 13. Zombie-page occupancy under KVTether and
+KVTether w/o LT.
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Wrong-direction
+eviction (%)
+Agent-X
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Codex
+0 10 20 30 40 50 60
+Time (minutes)
+0
+50
+100
+Agent-G
+KVTether w/o RO
+KVTether
+Figure 14. Wrong-direction eviction ratios under KVTether
+and KVTether w/o RO.
+KV. Changing eviction order alone therefore leaves capacity
+occupied by KV with no future reuse.
+8.3.2
+Recency Optimization. Compared with KVTether
+w/o RO, KVTether achieves an average absolute hit-ratio
+gain of 29.1%, reaching up to 47.0%. It reduces prefill time,
+end-to-end latency, and average task pricing by 26.1%, 14.8%,
+and 35.4% on average, with maximum reductions of 39.8%,
+25.3%, and 52.2%, respectively. Although KVTether w/o RO
+reclaims obsolete KV, its LRU policy can still evict live KV
+that is closer to reuse.
+11
+
+
+Table 5. Code required to integrate KVTether into six agent
+harnesses. “—” indicates that the harness does not provide
+the corresponding function.
+Component
+CDX
+SWE
+OC
+HM
+AG
+OCL
+Context manager
+157
+14
+45
+108
+82
+162
+Semantic functions
+Context append
+8
+7
+6
+15
+9
+2
+Compaction
+3
+5
+2
+2
+4
+10
+Derivation / fork
+4
+—
+2
+2
+6
+11
+Safety guardian
+4
+—
+3
+5
+—
+11
+Deadlock detection
+—
+—
+—
+—
+10
+10
+Long-term memory
+10
+—
+—
+2
+6
+10
+Function subtotal
+29
+12
+13
+26
+35
+54
+Total
+186
+26
+58
+134
+117
+216
+Figure 14 compares wrong-direction eviction ratios un-
+der KVTether and KVTether w/o RO over one-hour win-
+dows from workload replay. Under KVTether w/o RO, wrong-
+direction evictions account for 65.6%, 75.0%, and 92.3% of
+evictions on Agent-X, Agent-G, and Codex, respectively. LRU
+protects newly suspended KV that may still be waiting for
+tools or subagents, while evicting older KV closer to reuse.
+In contrast, KVTether reduces these ratios to 38.7%, 25.7%,
+and 38.6%, respectively. After lifecycle filtering, MRU evicts
+newly suspended KV first, reducing the risk of displacing
+older live KV that may be reused earlier.
+8.4
+Harness Integration
+This section evaluates KVTether’s usability by measuring the
+code changes required for harness integration. We first evalu-
+ate this effort across six agent harnesses, then use Codex as a
+case study to examine two representative semantic functions,
+safety guardian and subagent call.
+Integration effort. Table 5 reports integration code for
+Codex (CDX) [24], SWE-agent (SWE) [30], OpenCode (OC) [1],
+Hermes (HM) [20], Agent-G (AG), and OpenClaw (OCL) [26].
+The counts separate reusable context-manager code from
+hooks and helpers for individual semantic functions. The
+manager encapsulates message operations and SDK calls;
+functions invoke it to report context changes and retention
+intent. Across the six harnesses, the manager requires 14–162
+lines and function integration adds 12–54 lines, for 26–216
+lines in total per harness.
+Codex case study.
+Figure 15 shows a simplified Codex
+integration. Both functions reuse the wrapper in (a), which
+extends the native ContextManager with 11 added lines to
+expose KVTether’s lifecycle primitives.
+Safety guardian. The safety guardian reviews proposed
+tool calls. Its ephemeral review path invokes the manager’s
+one-off annotation through a Session helper before inference
+(Figure 15(b)). This marks the review messages as temporary,
+allowing their exclusive KV to bypass reuse storage. The
+function-specific integration adds 4 lines in the example.
+(a) Context-manager changes
+1 + use kvtether_client::KVTetherClient; // Rust SDK
+2 - let history = ContextManager::new();
+3 + let history = KVTetherContextManager::wrap(
+4 +
+ContextManager::new(), KVTetherClient::local());
+5
+impl KVTetherContextManager {
+6
+// KVTether Rust SDK client stored as self.sdk.
+7 +
+fn mark_current_one_off(&self) {
+8 +
+for msg in self.messages() {
+9 +
+self.sdk.mark_one_off(&self.context_id, msg);
+10 +
+}
+11 +
+}
+12 +
+fn mark_fork_from(&self, parent_id) {
+13 +
+self.sdk.fork_context(parent_id, &self.context_id);
+14 +
+}
+15
+}
+(b) Safety guardian (ephemeral review)
+1
+async fn run_ephemeral_review(...) {
+2
+let review = ...; // Create session; prepare input.
+3 +
+review.set_kvtether_one_off();
+4
+let result = run_review_on_session(&review, ...).await;
+5
+review.shutdown_in_background();
+6
+result
+7
+}
+8 + fn set_kvtether_one_off(&self) { // Session method
+9 +
+self.history.mark_current_one_off();
+10 + }
+(c) Subagent call (fork path)
+1
+// spawn_agent_internal calls this, then send_input.
+2
+async fn spawn_forked_thread(parent, ...) {
+3
+let history = ...; // Snapshot parent history.
+4
+let child = fork_thread_with_source(history, ...).await;
+5 +
+child.mark_kvtether_fork_from(parent);
+6
+child
+7
+}
+8 + fn mark_kvtether_fork_from(&self, parent) { // Session
+9 +
+self.history.mark_fork_from(parent.history.context_id());
+10 + }
+Figure 15. Integrating KVTether into Codex through
+context-manager extensions for safety guardian and sub-
+agent calls. Green + and red - indicate added and replaced
+code.
+Subagent call. A forked subagent inherits its parent’s his-
+tory and executes independently. After child creation, a Ses-
+sion helper registers the parent–child relationship through
+the manager before task submission (Figure 15(c)). This al-
+lows KVTether to track both contexts’ lifetimes indepen-
+dently while preserving shared KV needed by either context.
+The fork path likewise adds 4 lines in the example.
+8.5
+Runtime Overhead
+Primitive recording overhead. KVTether’s in-harness
+framework records primitive invocations synchronously and
+exports events asynchronously, adding less than 100 𝜇s per
+invocation. LLM-call interposition overhead. Before for-
+warding each LLM call, the lifecycle manager notifies the
+cache engine of the call ID and context, adding less than
+50 ms. KV-scope resolution overhead. For every LLM
+call, the lifecycle manager replicates the inference engine’s
+prompt formatting and tokenization to map messages to KV
+ranges. This mapping takes about 350 ms for a 256K-token
+input. For inputs of this size, LLM calls within ReAct rounds
+in our evaluation take 19.96 s on average. The combined
+overhead is estimated at 2.0% of this duration. Resource
+overhead. The lifecycle runtime and cache engine’s control
+12
+
+
+path each run in a Python process with one CPU core and
+less than 2 GB of host memory across our experiments. To
+conclude, KVTether’s runtime and resource overheads are
+negligible relative to LLM call execution time and the serving
+stack’s resource footprint, respectively.
+9
+Conclusion
+We presented KVTether, a lifecycle-aware KV cache manage-
+ment system for ReAct agents that bridges the semantic gap
+between message-level context management and physical
+KV storage. KVTether exposes lifecycle semantics through
+message-level primitives and translates them into KV states
+through an event-driven manager that aggregates retention
+demands across contexts. Guided by these states, its cache
+engine bypasses or reclaims Discarded KV and applies MRU
+within the live-idle tier, addressing both obsolete cache resi-
+dency and premature eviction under uncertain reuse inter-
+vals. Evaluation shows that KVTether lowers estimated task
+pricing by 40.0% and 33.2% on average and end-to-end re-
+quest latency by up to 26.3% and 17.4% relative to LMCache
+and MORI, respectively. Integration into six agent harnesses
+requires at most 216 lines of code per harness.
+References
+[1] Anomaly. 2026.
+OpenCode Source Code.
+https://github.com/
+anomalyco/opencode. Accessed: 2026-09-17.
+[2] Anthropic. 2025. Claude Code: An Agentic Coding Tool by Anthropic.
+arXiv:2506.13772 doi:10.48550/arXiv.2506.13772
+[3] Anthropic. 2026. Prompt Caching. https://docs.anthropic.com/en/
+docs/build-with-claude/prompt-caching. Accessed: 2026-09-14.
+[4] L. A. Belady. 1966. A Study of Replacement Algorithms for a Virtual-
+Storage Computer. IBM Systems Journal 5, 2 (1966), 78–101. doi:10.
+1147/sj.52.0078
+[5] Zhuohang Bian, Feiyang Wu, Zhuoran Li, Teng Ma, and Youwei Zhuo.
+2026. TokenCake: A KV-Cache-centric Serving Framework for LLM-
+based Multi-Agent Applications. arXiv:2510.18586 doi:10.48550/arXiv.
+2510.18586
+[6] Chaokun Chang, Yukun Zhou, Kaihua Fu, Dakai An, Tianyu Feng,
+Hanfeng Lu, Sheng Yao, Pu Guo, Yinghao Yu, Yizhou Shan, et al. 2026.
+From LLM Inference to Agentic Workloads: Characterization and
+Implications for Serving Systems. arXiv preprint arXiv:2608.15127
+(2026).
+[7] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting
+Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang.
+2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale
+LLM Inference. arXiv:2510.09665 doi:10.48550/arXiv.2510.09665
+[8] Esha Choukse, Pratyush Patel, Chaojie Zhang, Aashaka Shah, Íñigo
+Goiri, Saeed Maleki, Rodrigo Fonseca, and Ricardo Bianchini. 2025.
+Splitwise: Efficient generative llm inference using phase splitting. IEEE
+Micro 45, 4 (2025), 54–59.
+[9] DeepSeek. 2026. Models & Pricing. https://api-docs.deepseek.com/
+quick_start/pricing. Accessed: 2026-09-22.
+[10] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic,
+Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-
+Efficient Large Language Model Serving for Multi-turn Conversations
+with CachedAttention. In 2024 USENIX Annual Technical Conference
+(USENIX ATC 24). USENIX Association, Santa Clara, CA, 111–126.
+https://www.usenix.org/conference/atc24/presentation/gao-bin-cost
+[11] Yunfan Gao, Yun Xiong, Xinyu Gao, Kangxiang Jia, Jinliu Pan,
+Yuxi Bi, Yi Dai, Jiawei Sun, Meng Wang, and Haofen Wang. 2024.
+Retrieval-Augmented Generation for Large Language Models: A Sur-
+vey. arXiv:2312.10997 [cs.CL] https://arxiv.org/abs/2312.10997
+[12] In Gim, Zhiyao Ma, Seung seob Lee, and Lin Zhong. 2025. Pie: Pro-
+grammable Inference Engine for LLM Serving. arXiv:2510.24051
+[13] Google. 2026. Gemini API Context Caching. https://ai.google.dev/
+gemini-api/docs/caching. Accessed: 2026-09-23.
+[14] Hao Kang, Ziyang Li, Weili Xu, Xinyu Yang, Yinfang Chen, Junxiong
+Wang, Beidi Chen, Tushar Krishna, Chenfeng Xu, and Simran Arora.
+2026. ThunderAgent: A Simple, Fast and Program-Aware Agentic
+Inference System. arXiv:2602.13692 doi:10.48550/arXiv.2602.13692
+[15] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin
+Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica.
+2023.
+Efficient Memory Management for Large Language Model
+Serving with PagedAttention. In Proceedings of the 29th Symposium
+on Operating Systems Principles (SOSP 23). ACM. doi:10.1145/3600006.
+3613165
+[16] Hanchen Li, Qiuyang Mang, Runyuan He, Qizheng Zhang, Huanzhi
+Mao, Xiaokun Chen, Hangrui Zhou, Alvin Cheung, Joseph Gonzalez,
+and Ion Stoica. 2025. Continuum: Efficient and Robust Multi-Turn
+LLM Agent Scheduling with KV Cache Time-to-Live. arXiv:2511.02230
+doi:10.48550/arXiv.2511.02230
+[17] Chaofan Lin, Zhenhua Han, Chengruidong Zhang, Yuqing Yang, Fan
+Yang, Chen Chen, and Lili Qiu. 2024. Parrot: Efficient Serving of LLM-
+based Applications with Semantic Variable. In 18th USENIX Symposium
+on Operating Systems Design and Implementation (OSDI 24). USENIX
+Association, 929–945.
+https://www.usenix.org/conference/osdi24/
+presentation/lin-chaofan
+[18] Michael Luo, Xiaoxiang Shi, Colin Cai, Tianjun Zhang, Justin Wong,
+Yichuan Wang, Chi Wang, Yanping Huang, Zhifeng Chen, Joseph E.
+Gonzalez, and Ion Stoica. 2026. Agentix: An Efficient Serving En-
+gine for LLM Agents as General Programs. In Proceedings of the 23rd
+USENIX Symposium on Networked Systems Design and Implementation
+(NSDI 26). USENIX Association, 2443–2459. https://www.usenix.org/
+conference/nsdi26/presentation/luo
+[19] Mike A. Merrill, Alexander G. Shaw, Nicholas Carlini, Boxuan Li,
+Harsh Raj, Ivan Bercovich, Lin Shi, Jeong Yeon Shin, Thomas Walshe,
+E. Kelly Buchanan, et al. 2026. Terminal-Bench: Benchmarking Agents
+on Hard, Realistic Tasks in Command Line Interfaces. arXiv:2601.11868
+doi:10.48550/arXiv.2601.11868
+[20] Nous Research. 2026. Hermes Agent Source Code. https://github.com/
+NousResearch/hermes-agent. Accessed: 2026-09-13.
+[21] NVIDIA. 2026. Dynamo Documentation: Agent Hints. https://docs.
+nvidia.com/dynamo/latest/architecture/agentic-overview.html. Ac-
+cessed: 2026-09-14.
+[22] OpenAI. 2025. Deep Research. https://openai.com/index/introducing-
+deep-research/ An agent that uses reasoning to synthesize large
+amounts of online information and complete multi-step research tasks
+for you. Available to Pro users today, Plus and Team next..
+[23] OpenAI. 2025.
+Introducing Codex.
+https://openai.com/index/
+introducing-codex/. Accessed: 2026-09-10.
+[24] OpenAI. 2026. Codex CLI Source Code. https://github.com/openai/
+codex. Accessed: 2026-09-13.
+[25] OpenAI. 2026. Prompt Caching. https://platform.openai.com/docs/
+guides/prompt-caching. Accessed: 2026-09-23.
+[26] OpenClaw contributors. 2026. OpenClaw Source Code. https://github.
+com/openclaw/openclaw. Accessed: 2026-09-16.
+[27] Zaifeng Pan, AJJKUMAR DAHYALAL PATEL, Yipeng Shen,
+Zhengding Hu, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and
+Yufei Ding. 2025. KVFlow: Efficient Prefix Caching for Accelerating
+LLM-Based Multi-Agent Workflows. In Advances in Neural Information
+Processing Systems, D. Belgrave, C. Zhang, H. Lin, R. Pascanu, P. Ko-
+niusz, M. Ghassemi, and N. Chen (Eds.), Vol. 38, Main Conference.
+13
+
+
+Curran Associates, Inc., 126246–126265. doi:10.52202/085713-4208
+[28] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing
+Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake:
+Trading More Storage for Less Computation — A KVCache-centric
+Architecture for Serving LLM Chatbot. In Proceedings of the 23rd
+USENIX Conference on File and Storage Technologies (FAST 25). USENIX
+Association, 155–170.
+[29] Yongliang Shen, Kaitao Song, Xu Tan, Dongsheng Li, Weiming Lu, and
+Yueting Zhuang. 2023. HuggingGPT: Solving AI tasks with ChatGPT
+and its friends in Hugging Face. Advances in Neural Information
+Processing Systems 36 (2023), 38154–38180.
+[30] SWE-agent contributors. 2026. SWE-agent Source Code. https://
+github.com/SWE-agent/SWE-agent. Accessed: 2026-09-13.
+[31] Xin Tan, Yimin Jiang, Yitao Yang, and Hong Xu. 2025. Teola: Towards
+End-to-End Optimization of LLM-based Applications. In Proceedings
+of the 30th ACM International Conference on Architectural Support for
+Programming Languages and Operating Systems (ASPLOS 25). ACM,
+1302–1316. doi:10.1145/3676641.3716278
+[32] Shubham Tiwari, Tapan Chugh, Nash Rickert, Simon Peter, Ratul Ma-
+hajan, and Haiying Shen. 2026. Cachewise: Understanding workloads
+and optimizing kvcache management for efficiently serving llm coding
+agents. arXiv preprint arXiv:2606.16824 (2026).
+[33] Tian Xia, Hanchen Li, Zhifei Li, Xiaokun Chen, Hao Kang, Yifan Qiao,
+Yi Xu, and Ion Stoica. 2026. Idleness is Relative: Exploiting Tool-
+Call Idle Windows for Offloading in Agentic Systems with MORI.
+arXiv:2606.00866 doi:10.48550/arXiv.2606.00866
+[34] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik
+Narasimhan, and Yuan Cao. 2022. React: Synergizing reasoning and
+acting in language models. arXiv preprint arXiv:2210.03629 (2022).
+[35] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and
+Byung-Gon Chun. 2022. Orca: A Distributed Serving System for
+Transformer-Based Generative Models. In 16th USENIX Symposium
+on Operating Systems Design and Implementation (OSDI 22). USENIX
+Association, 521–538.
+https://www.usenix.org/conference/osdi22/
+presentation/yu
+[36] Z.ai. 2025. GLM-4.7. https://huggingface.co/zai-org/GLM-4.7. Model
+card. Accessed: 2026-09-17.
+[37] Qizheng Zhang, Changran Hu, Shubhangi Upasani, Boyuan Ma,
+Fenglu Hong, Vamsidhar Kamanuru, Jay Rainton, Chen Wu, Meng-
+meng Ji, Hanchen Li, et al. 2026. Agentic context engineering: Evolving
+contexts for self-improving language models. In International Confer-
+ence on Learning Representations, Vol. 2026. 86069–86100.
+[38] Haoyu Zheng, Fangcheng Fu, Jia Wu, Binhang Yuan, Yongqiang Zhang,
+Hao Wang, Yuanyuan Zhu, Xiao Yan, and Jiawei Jiang. 2026. Efficient
+Serving for Dynamic Agent Workflows with Prediction-based KV-
+Cache Management. arXiv:2605.06472 doi:10.48550/arXiv.2605.06472
+[39] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff
+Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica,
+Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang:
+Efficient Execution of Structured Language Model Programs. In Ad-
+vances in Neural Information Processing Systems 37 (NeurIPS 2024).
+doi:10.52202/079017-2000
+[40] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-
+anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating
+Prefill and Decoding for Goodput-optimized Large Language Model
+Serving. In 18th USENIX Symposium on Operating Systems Design
+and Implementation (OSDI 24). USENIX Association, 193–210. https:
+//www.usenix.org/conference/osdi24/presentation/zhong-yinmin
+14

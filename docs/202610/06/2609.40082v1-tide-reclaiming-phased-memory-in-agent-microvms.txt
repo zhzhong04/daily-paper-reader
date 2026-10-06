@@ -1,0 +1,732 @@
+Tide: Reclaiming Phased Memory in Agent MicroVMs
+Yiyang Wu, Chengfan Liao, Jinyu Gu
+Institute of Parallel and Distributed Systems, Shanghai Jiao Tong University
+Abstract
+Cloud agents run each task in an isolated MicroVM. The
+trouble is the harness loop inside that guest: the harness is
+nearly idle while it waits on the model, then usage rises on
+a tool whose size is known only at run time, which com-
+plicates the memory management from the host. Existing
+approaches infer reclaim targets from access frequency and
+memory footprint while the guest allocator places the idle
+harness and the short-lived tool on the same pages. There-
+fore, reclamation either selects the wrong pages, fixes on an
+incorrect capacity or partially reclaims a huge page, splitting
+its transparent huge page (THP).
+This paper proposes Tide, a proactive memory recla-
+mation technique for agent MicroVMs. Our key insight
+is that the harness already knows each phase’s memory
+intent—which memory, when, and whether its contents must
+survive—so the guest can report that intent as an exclusive
+guest-physical region for the host to reclaim directly. To real-
+ize this insight, we introduce (1) an abstraction called arena
+and a set of user-space API that can manage memory with
+an exclusive intent. (2) a guest-kernel allocator that places
+the realize the allocation that groups exclusive, huge-page-
+aligned extents; and (3) a hypervisor extension that resolves
+those extents to host backing and applies the reported action,
+leaving guest capacity unchanged. Experiments on recorded
+agent trajectories show that Tide outperforms state-of-art
+mechanism while incuring low overhead.
+1
+Introduction
+Agents are moving into the cloud. Applications such as
+Claude Code [4], OpenCode [24], Codex [22], and Open-
+Claw [23] translate natural-language goals into sequences of
+model interactions and tool executions, and platforms now
+run each task inside an isolated MicroVM [1, 12]. The guest
+hosts the harness—the runtime that assembles context, calls
+the model, and executes tools—together with the processes
+those tools spawn, while model inference stays in a separate
+service. A host serves many tenants, so each agent gets its
+own guest kernel, and the cost of that isolation is physical
+memory held for the life of the task.
+Four properties of memory properties matter for hosting
+agentic MicroVMs. First, demand follows the phase of the
+loop. The guest is nearly idle while the harness waits on the
+model, and usage rises when a tool runs locally. Second, the
+model chooses the next tool only at run time, so the size of
+each resource burst is hard to predict. Third, harness pages
+and tool pages share one guest and follow different lifetimes.
+Harness state stays live for the whole run, while a tool’s pri-
+vate pages last only until its process tree exits. Lastly, host
+backing follows the peaks and stays after guest usage has
+fallen, including memory that can already be reclaimed.
+However, existing memory management techniques still
+miss these properties on different dimensions. Host swap-
+ping ranks pages by access frequency, so it cannot separate
+idle-but-live harness pages from already-freed tool pages and
+may write those freed pages out in unnecessary I/O. Virtio-
+balloon [26] and virtio-mem [10] reclaim by shrinking guest
+capacity to a target, but a target sized for the wait may not fit
+the next burst causing severe direct guest reclaim. On top of
+that, the guest allocator places independent lifetimes in the
+same host huge pages, which causes reclaiming one lifetime
+splits huge-page mappings the other still uses.
+The root cause is that the harness already knows each
+phase’s memory intent from its control flow but the harness
+has no capability to report it. An intent names a scope, a trig-
+ger, and a preservation rule. During a long model wait, the
+scope is the harness and its persistent services, the trigger is
+the wait, and the rule is to page out state that is idle but live.
+When a tool’s process tree exits, the scope is that invocation,
+the trigger is the exit, and the rule is to discard its private state
+sooner, however much memory the tool used. Two gaps keep
+that intent from driving reclamation. On the guest side, every
+phase allocates from the same buddy allocator, so pages of
+different intents are not distinguishable as regions and share
+host huge pages. On the host side, memory intent can only
+be inferred from access frequency and memory footprint and
+the guest has no way to report the intent across the guest–
+host boundary.
+We present Tide, which closes both gaps with one abstrac-
+tion, the arena. Its user-space API places each memory intent
+in its own guest-physical region, and operating on one arena
+leaves the others untouched. Harness state, including persis-
+tent services, lives in a dedicated arena H, and each tool in-
+vocation lives in its own arena T. Huge-page-aligned extents
+from a shared CMA pool give each arena exclusive host huge
+pages. User-space operations then can tell the host how to re-
+claim that region’s backing without shrinking guest capacity.
+Since the harness itself cannot issue arena operations dur-
+ing a model wait or tool invocation, we design Anchor, a
+user-space component that stays outside H and T, delegates
+model requests and tool execution, and issues arena opera-
+tions at each phase boundary. The guest reports the opera-
+1
+arXiv:2609.40082v1  [cs.OS]  30 Sep 2026
+
+
+tion and the arena’s guest-physical ranges to the hypervisor
+over a virtio channel. The hypervisor resolves those ranges
+to host backing through its own translation tables and applies
+the corresponding memory action while the host kernel stays
+unmodified.
+We implement Tide in Linux, Firecracker, and Open-
+Code, OpenClaude, and Codex, with Anchor written in Rust.
+On the longer SkillsBench tasks, Tide stays within 1.7%
+of the baseline. On six Terminal-Bench tasks [19] running
+on OpenCode, OpenClaude, and Codex, Tide reduces total
+backing memory by 45.3%, 41.0%, and 34.2% relative to
+baseline and by 46.8%, 39.3%, and 32.9% relative to Hyper-
+Alloc, with harness-time increases of 5.1%, 1.1%, and 1.9%.
+2
+Background and Motivation
+2.1
+Cloud Agents in MicroVMs
+Agents are moving to the cloud. Model and cloud providers
+now offer hosted agents and agent platforms, including Ope-
+nAI Codex [22], Claude Code [4], Amazon Bedrock Agent-
+Core [2], Google Vertex AI Agent Engine [8], Microsoft
+Foundry Agent Service [20], and Tencent WorkBuddy Man-
+aged Agents [25]. Apart from interactive usage or automatic
+cloud tasks, the appeal of hosting is that it decouples the
+agent from the user’s device. A user can launch many tasks
+at once and let each run for hours, which is impractical on
+a laptop that must stay online; hosted agents keep working
+in the background and deliver results when they finish. The
+platform, in turn, provisions execution environments consis-
+tently at scale and keeps whatever the agent executes inside
+a sandbox instead of on the user’s machine.
+On these platforms, each agent runs in its own MicroVM.
+A host serves agents from many tenants, so the boundary be-
+tween them must be stronger than a shared-kernel container
+can offer. MicroVMs such as Firecracker [1] and Kata Con-
+tainers [12] give each agent a dedicated guest kernel, and
+they are now the sandbox of choice on agent platforms such
+as AgentCore [3] and E2B [6]. The MicroVM hosts the har-
+ness, a dedicated runtime that assembles context, calls the
+LLM service, and executes the tool calls the model requests,
+together with the workspace it operates on and the tool pro-
+cesses it spawns. Model inference itself runs outside the VM
+in a separate LLM service.
+2.2
+Why Reclamation Falls Short in Agent MicroVMs
+A host today can take memory back from a VM in two ways,
+swapping out cold pages, or shrinking the guest’s capacity.
+On an agent VM, swapping and shrinking do reduce the
+host’s footprint but they fail to notice the memory’s lifetime
+and demand burst inside the harness loop, resulting in perfor-
+mance degradation or even service loss. On top of that, even
+if the host knew which memory to reclaim, the placement of
+that memory could still degrade performance.
+Swapping Lacks Lifetime Awareness. Host swapping re-
+claims pages that look cold: Linux LRU [9] and Multi-
+Generation LRU [15] rank pages by access history, and pro-
+grammable eviction policies [30] still work from access sig-
+nals alone. In an agent VM, however, cold pages come in
+two kinds that access history cannot tell apart. Idle-but-live
+pages belong to a harness waiting on the model or to a service
+between queries; their contents will be needed again. Dead
+pages belonged to a tool whose process tree has exited; their
+contents will never be needed. Swapping treats both the same
+way and is wrong for both: preserving dead contents spends
+swap I/O and capacity on data nobody will read, while pag-
+ing out live contents pays off only if the idle interval is long
+enough to amortize the swap-in on the next access. Access
+recency reveals neither when a tool’s lifetime ended nor how
+long an idle interval will last.
+Adjustment Lacks Demand Awareness. Two mechanisms,
+virtio-balloon [26] and virtio-mem [10], shrink a VM’s ca-
+pacity so that the host can reuse the difference, which re-
+quires choosing a target. On an agent VM there is no safe
+static target: a capacity that fits the waiting harness does not
+fit the next tool, and a tool that allocates beyond it drives the
+guest into sustained direct reclaim, stalling or failing. Faster
+or cheaper adjustment [27] does not help: however quickly
+the balloon inflates, the tool still runs in a VM sized for the
+wait. A safe target would have to be raised before each burst
+but not until the tool is actually invoked can the controller
+observe the memory fluctuation.
+Reclamation Lacks Placement Awareness. Suppose the
+host knew exactly which pages were dead and left ample
+capacity, even with that knowledge, ciscarding them could
+still slow down live state as a side effect, because of where
+they sit. Virtualized address translation relies on host Trans-
+parent Huge Pages [16] (THPs, typically 2 MB) to keep
+two-dimensional page walks [5] cheap, yet the guest al-
+locator places pages without regard to lifetime or to host
+huge-page boundaries. A 2 MB host page therefore routinely
+mixes long-lived harness and kernel pages with short-lived
+tool pages, and one tool’s pages scatter across many such
+huge pages. The problem is twofold. On one hand, Hyper-
+Alloc [27] and free-page reporting [26], newer mechanisms
+that proactively report freed guest memory can be blocked
+because scattering leaves those pages only partly free. On
+the other hand, reclaiming the dead pages of a mixed huge
+page forces a bad choice. The host either splits the mapping,
+leaving the live pages on 4 KB mappings until khugepaged
+re-collapses them, or it keeps the dead backing resident so
+the huge-page mapping stays intact. No data is lost either
+way, but reclaiming correctly identified dead memory now
+has a side effect. It either slows live state or leaves dead back-
+ing on the host. Reclaiming lifetimes independently requires
+placing them apart at huge-page granularity, which only the
+guest allocator can do.
+In each case, the missing piece is something the harness
+already has: when it waits, when a tool’s process tree ex-
+its, and which pages were that tool’s. The host also needs a
+2
+
+
+placement that lets it act on this knowledge without side ef-
+fects on the live state around it. This paper bridges this gap.
+3
+Key Ideas: Memory Intents and Arenas
+The three failures in Section 2.2 share a root cause: the
+host has to infer what guest memory means, and the guest
+does not know how to place the memory in the reclamation-
+friendly way. Swapping guesses lifetimes from access his-
+tory and capacity adjustment guesses demand from a foot-
+print, and both may guess wrong because they observe only
+the traces those events leave behind rather than the events
+themselves. The agent harness knowes it from the events di-
+rectly: it knows when it starts waiting on the model, when
+it launches a tool, and when that tool’s process tree exits.
+Our system, Tide, therefore reverses the direction of infor-
+mation. Instead of the host inferring from below, the guest
+reports memory intent from above—which memory can be
+reclaimed, when, and whether its contents must survive—
+and the host acts on it under its own policy.
+The agent loop exposes exactly two such opportunities,
+one for each memory lifetime. When the harness begins a
+model wait, its state is idle but live, and the intent is pageout
+meaning that the harness’s backing can be swapped out, be-
+cause they will only be needed when the response arrives.
+When a tool’s process tree exits, its private memory is dead,
+and the intent is destroy meaning that tool’s backing can be
+discarded soon. Each intent thus names a scope (the harness,
+or one tool invocation), a trigger (the wait begins, the tree
+exits), and a preservation rule. Neither shrinks the guest’s
+capacity: a tool always allocates freely, and reclamation acts
+only on a waiting harness or an exited tool, so the target prob-
+lem of Section 2.2 never arises.
+Carrying these intents from user mode to the host meets
+three gaps. First, nothing in the guest names the memory
+one invocation owns, as its pages are interleaved with ev-
+ery other allocation. Second, the host reclaims guest-physical
+ranges, while a process tree names only virtual addresses, so
+collecting those ranges means a page-table walk over thou-
+sands of scattered pages. Third, those pages share host huge
+pages with other allocation domains, so reclaiming them
+splits mappings that live state still uses.
+Tide closes the gaps with an arena: an exclusive set of ex-
+tents, contiguous 2 MB-aligned guest-physical ranges drawn
+on demand from a shared pool and bound to one lifetime.
+In a VM, untouched extents cost the host nothing, because it
+backs only the pages the guest touches [29], so each lifetime
+can keep its own ranges. Aside from the zero-cost, the gap is
+thus closed with this simple abstraction. First, one arena per
+lifetime names the memory that lifetime owns. The harness
+occupies a persistent arena H, and spawn_with_arena starts
+each tool in its own arena T, so the tree allocates only from
+T and destroying T leaves H untouched. Second, the arena
+allocator records those guest-physical ranges as it allocates
+them, so the report to the host is that extent list and needs no
+Table 1: Guest ABI operations. Parameters shown are the
+principal inputs.
+Operation
+Contract
+create_arena()
+Create an arena.
+spawn_with_arena(fd, elf)
+Start a process with an arena.
+pageout(fd)
+Pageout the arena.
+pagein(fd)
+Pagein the arena.
+destroy_arena(fd)
+Close the arena after checks.
+page-table walk. Third, each extent is exclusive and aligned
+to 2 MB, so discarding T returns whole host huge pages and
+leaves the huge pages that back H intact.
+4
+Design
+4.1
+Arena API
+Table 1 lists the Arena API provided for the userspace ap-
+plications. Each function operates on an arena by its file de-
+scriptor. The spawn_with_arena binds a new process to an
+arena. From then on, supported allocations come from that
+arena and forked children inherit the binding, while alloca-
+tions and cached pages that already exist keep their own-
+ers. The runtime therefore spawns each process into its arena
+before that process initializes, so initialization allocates the
+memory that pageout and destroy_arena can later reclaim.
+The pageout requests a content-preserving swapout of a
+live arena’s host backing, typically during the harness’s long
+waits, until the next harness access swaps them back in on
+demand. The pagein requests a proactive swap-in of a live
+arena’s host backing, typically once the next harness access
+is imminent, so that access does not incur major faults. The
+destroy_arena discards an arena’s host backing after checks
+confirm that nothing remains attached. It is still required after
+process exit, since the latter only unmaps the address space
+and leaves the arena and its backing in place. Once the hyper-
+visor acknowledges the discard, the guest kernel can safely
+reuse its memory.
+4.2
+Architecture and Workflow
+Architecture. Figure 1a organizes Tide into three layers.
+Guest user space contains a long-running harness in arena H,
+tool process trees in separate arenas T, and Anchor, a dae-
+mon that runs outside those arenas. The guest kernel con-
+tains the arena allocator, which manages a shared pool of
+exclusive physical extents, and a virtio interface that reports
+each memory intent together with its affected ranges. The
+hypervisor contains the corresponding virtio backend, which
+resolves those guest-physical ranges to host backing, applies
+the requested reclamation, and reports completion.
+Workflow. The workflow is then built around the observa-
+tion in Section 3. Originally, such outward operations are
+performed by the harness itself, however as we proceed to
+swapping out the harness state, we need a proxy to dele-
+3
+
+
+Remote LLM
+Hypervisor GPA → HVA
+② Request
+②③④ Async. OP + GFN Ranges
+②③④ Completion
+T Extent
+H Extent
+Memory Intent
+Control Path
+MicroVM
+Harness(H)
+Anchor
+Broker
+Tool(T)
+②③ Pageout(H)
+④ Destroy(T)
+②③ RPC
+③ Invoke
+① Bootstrap
+④ Wait
+Kernel Arena Allocator
+(a) System architecture.
+h = spawn(harness);
+while (running) {
+  req = h.create_request();
+  r = llm_call(req);
+  h.deliver(r);
+  cmd = h.route_tool();
+  t=spawn(cmd);
+  out = wait_output(t);
+  h.deliver(out);
+}
+Native Harness
+H = create_arena();
+h = spawn_with_arena(
+      H, harness);
+while (running) {
+  req = h.create_request();
+  pageout(H);
+  r = llm_call(req);
+  h.deliver(r);
+  T = create_arena();
+  cmd = h.route_tool();
+  t=spawn_with_arena(T,cmd);
+  out = wait_output(t);
+  destroy_arena(T);
+  h.deliver(out);
+}
+With Tide
+(b) Harness loop.
+Figure 1. Tide architecture and the harness loop. (a) Anchor in guest user space turns phase and lifetime boundaries into memory
+intents; the guest kernel resolves each intent into the extents of one arena; and the hypervisor acts on their host backing. (b) The
+loop without and with Tide: create_arena establishes H and T; spawn_with_arena starts each process in its arena; pageout(H)
+on each model wait; pagein(H) swaps that backing back in before the harness resumes, so the next access does not fault; and
+destroy_arena(T) after the tool exits.
+gate the outward calls, and we call that proxy Anchor. An-
+chor thus handles RPC from the harness to delegate model
+communication and tool invocation and turns each execution
+phase into an arena operation that notifies the guest kernel.
+Figure 1a shows the guest user-space components that carry
+it with detailed control and intent flow steps while Figure 1b
+shows the same stages on an agent control flow and how Tide
+inserts the arena operations between each step.
+1 Bootstrap. To page out the harness, Anchor must hold
+its arena handle and know when the harness is waiting and
+how to suspend it. In addition to ordinary startup, Tide there-
+fore runs a bootstrap step that supplies these. During boot-
+strap, Anchor creates a persistent arena H and starts the har-
+ness in it with spawn_with_arena while retaining its arena
+handle and its cgroup handle. Once initialization finishes, the
+harness opens a persistent connection to Anchor, and later
+model communication and tool invocation pass through it,
+so Anchor sees each wait as it begins. Anchor itself runs
+outside H, and its communication and result buffering stay
+out of the memory that pageout will affect. Moreover, as the
+control flow of the harness is now partly delegated, the har-
+ness cannot act on user signals such as SIGTERM on itself.
+Therefore Anchor intercept them and decide whether to stop
+the in-flight model or tool call or to stop the harness.
+2 Model request. When the harness delegates a model
+request to Anchor through socket RPC, Anchor forwards
+the request to the remote LLM and waits for the response.
+However, pageout(H) is safe only when every agent that can
+touch H is waiting. Parent and subagents share the same
+arena
+H, and one agent may have several model or tool
+calls in flight. To resolve this, we design a suspension bro-
+ker inside Anchor that can validate the condition. The broker
+records the live agents, and counts how many of each agent’s
+calls have left the harness. Only if the condition is met, the
+broker can safely suspend the harness through its retained
+cgroup handle and allowes pageout(H) so that H’s host back-
+ing can be reclaimed into swap to save host’s memory. To
+avoid unnecessary swapping on short request, Anchor waits
+for a grace period before issuing pageout(H). Each return-
+ing call releases one count and the harness is resumed by the
+Anchor once any response is forwarded from Anchor. As an
+optimization, Anchor requests pagein(H) when the LLM’s
+reasoning stage ends. The hypervisor tracks H’s active ex-
+tents and swaps in only those the next harness access needs,
+so the resume does not incur major faults.
+3 Tool invocation. If the model requests a tool after
+model request, the harness also needs to delegate that tool in-
+vocation to Anchor. Compared with regular tool invocations,
+Anchor creates a separate arena T and starts the tool with
+spawn_with_arena so that its descendants inherit the arena
+binding. This separates the invocation’s allocations from H
+instead of letting a tool forked directly from the harness in-
+herit H. While the tool runs, the harness waits, allowing the
+runtime to issue pageout(H) under the same grace-period
+and suspension conditions. For performance, Anchor applies
+a heuristic split, where short-running, low-cost commands
+such as ls, cd, and pwd skip arena management and are in-
+voked directly by Anchor to avoid the cost of arena binding.
+4 Tool completion. When the tool’s process tree exits,
+this invocation’s private memory is dead, but exit only un-
+maps its address space, so arena T and its host backing re-
+main until Anchor reclaims them. As The harness still needs
+the tool’s output after that reclamation, the tool writes std-
+out and stderr to an anonymous pipe and Anchor buffers
+that output outside T. Anchor, which holds T, then issues
+destroy_arena(T). Once cleanup checks confirm that noth-
+ing remains attached, the guest kernel submits the discard
+of T. After the completion, the harness may steps 2 – 4 until
+the model returns a finish signal or the user intervenes with
+an key-interrupt signal.
+4
+
+
+PDF
+Exoplanet
+OCR
+Mario
+Files
+Quantum
+Finance
+Video
+0
+1
+Performance
+Baseline
+Tide
+HyperAlloc
+Figure 2. SkillsBench ground-truth execution relative to the
+baseline. Higher is better.
+0
+1
+(a) Backing  OpenCode
+0
+1
+(b) Backing  OpenClaude
+schedule
+wal
+finance
+merger
+portfolio
+raman
+0
+1
+(c) Backing  Codex
+vs. baseline
+Baseline
+HyperAlloc
+Tide
+Figure 3. Terminal-Bench backing memory relative to
+the same-harness baseline; lower is better. (a) OpenCode.
+(b) OpenClaude. (c) Codex.
+5
+Evaluation
+5.1
+Methodology
+Testbed. Our testbed uses an Intel Xeon Gold 5317 CPU
+at 3.00 GHz, 256 GB of RAM, and a 512 GB Samsung
+MZQL2960HCJR-00A07 NVMe SSD.
+5.2
+Application Performance
+SkillsBench Ground-Truth Execution. Figure 2 compares
+eight offline solve.sh tasks, counted when the command ex-
+its successfully and the expected outputs are present. These
+are typical agent tasks, spanning document editing, file or-
+ganization, media processing, and numerical or tabular anal-
+ysis. On the six tasks whose baseline median exceeds 1 s,
+Tide stays within 1.7% of the baseline. The largest change is
+Finance, from 15.09 to 14.84 s, 1.7% sooner. Relative to Hy-
+perAlloc, Tide is 1.2–5.3% faster on OCR, Finance, Quan-
+tum, and Mario, and 3.3–5.1% slower on Exoplanet and
+Video. PDF and Files finish in under a second, and their me-
+dian gaps stay within about 50 ms, the runner’s completion-
+polling granularity. PDF’s baseline of 0.364 s rises to 0.414 s
+under HyperAlloc.
+5.3
+Agentic Memory Efficiency
+Figure 3 reports the backing memory integral and harness
+time on six Terminal-Bench tasks [19], one trajectory each
+on OpenCode, OpenClaude, and Codex. They range from
+calendar scheduling and log recovery to document extrac-
+tion, table merging, and numerical fitting: Schedule, WAL,
+Finance, Merger, Portfolio, and Raman. Backing memory is
+the harness’s share of host memory after removing the floor
+present at the start of replay. The baseline and Tide run in
+Firecracker, with free-page reporting on the baseline; Hy-
+perAlloc runs in QEMU. Relative to baseline, total backing
+memory is 45.3%, 41.0%, and 34.2% lower and harness time
+is 5.1%, 1.1%, and 1.9% longer. Relative to HyperAlloc, the
+reductions are 46.8%, 39.3%, and 32.9%, and harness time
+is 2.7% longer on OpenCode, 1.5% shorter on OpenClaude,
+and 0.2% shorter on Codex. The added time is demand pag-
+ing: synchronous pageout bypasses the swap cache, so every
+fault goes through the I/O stack. These tools consume little
+memory, so HyperAlloc stays near the baseline, 2.9% higher,
+2.8% lower, and 1.9% lower. The duration-weighted average
+falls by 47.9%, 41.7%, and 35.4%.
+6
+Related Work
+Memory Elasticity in Virtualized Systems. A VM provi-
+sioned for its peak leaves memory idle whenever the foot-
+print falls. Vertical elasticity adjusts the allocation to mea-
+sured demand [21]. Squeezy returns gigabytes from a server-
+less VM in under a second [14]. HyperAlloc lets the hy-
+pervisor reclaim guest frames that are already free [27].
+Puffer scales a function MicroVM by resizing its mem-
+ory in blocks [7]. Each of them reacts to a runtime signal,
+such as the footprint or the set of free frames. Tide acts on
+an application-reported intent, which names the region and
+whether its contents must survive.
+Semantic-Aware Memory Management. Applications and
+the OS evolve separately, so the OS sees little of what
+a workload’s memory means. M3 coordinates application-
+specific reclamation across software layers [17]. TierVM
+delegates fine-grained tiering to the guest, using knowl-
+edge available only inside the VM [28]. Demeter and vtism
+likewise drive tiering from guest- or VM-level informa-
+tion [11, 18]. Disaggregated memory chooses a transfer size
+from observed spatial locality [13]. These systems guide
+reclamation, placement, or movement from what they ob-
+serve. Tide reports the lifetime itself: which region, when,
+and whether its contents must survive.
+7
+Conclusion
+We propose Tide, a proactive memory reclamation technique
+for agent MicroVMs that reclaims idle harness backing dur-
+ing a model wait and dead tool backing after the tool ex-
+its. The key insight is that the harness already knows each
+phase’s memory intent, so the guest can report that intent as
+an exclusive guest-physical region, thereby letting the host
+reclaim the region directly. The design spans the harness, the
+guest kernel, and the hypervisor, and end-to-end replay re-
+duces backing memory substantially at low overhead.
+5
+
+
+References
+[1] A. Agache, M. Brooker, A. Iordache, A. Liguori, R. Neuge-
+bauer, P. Piwonka, and D.-M. Popa. Firecracker: Lightweight
+virtualization for serverless applications.
+In 17th USENIX
+Symposium on Networked Systems Design and Implementa-
+tion (NSDI 20), pages 419–434, Santa Clara, CA, Feb. 2020.
+USENIX Association.
+[2] Amazon Web Services. Amazon Bedrock AgentCore. https:
+//aws.amazon.com/bedrock/agentcore/. Accessed September
+20, 2026.
+[3] Amazon Web Services.
+Host agent or tools with Ama-
+zon
+Bedrock
+AgentCore
+Runtime.
+https://docs.aws.
+amazon.com/bedrock-agentcore/latest/devguide/agents-
+tools-runtime.html. Accessed September 22, 2026.
+[4] Anthropic. Claude Code. https://claude.com/product/claude-
+code. Accessed September 17, 2026.
+[5] R. Bhargava, B. Serebrin, F. Spadini, and S. Manne. Acceler-
+ating two-dimensional page walks for virtualized systems. In
+Proceedings of the 13th International Conference on Archi-
+tectural Support for Programming Languages and Operating
+Systems, ASPLOS XIII, pages 26–35. Association for Com-
+puting Machinery, 2008.
+[6] E2B. E2B: The AI agent cloud. https://e2b.dev/. Accessed
+September 22, 2026.
+[7] H. Fan, K. Wang, Z. Huang, X. Zhang, H. Mi, S. Wu, and
+C. Yu. Puffer: A serverless platform based on vertical mem-
+ory scaling. IEEE Transactions on Parallel and Distributed
+Systems, 37(1):184–197, 2026.
+[8] Google Cloud. Vertex AI Agent Engine. https://cloud.google.
+com/vertex-ai/generative-ai/docs/agent-engine/overview.
+Accessed September 20, 2026.
+[9] M. Gorman. Understanding the Linux Virtual Memory Man-
+ager. Prentice Hall, 2004.
+[10] D. Hildenbrand and M. Schulz. virtio-mem: Paravirtualized
+memory hot(un)plug. In Proceedings of the 17th ACM SIG-
+PLAN/SIGOPS International Conference on Virtual Execu-
+tion Environments, VEE ’21. Association for Computing Ma-
+chinery, 2021.
+[11] J. Hu, Z. Hu, C.-F. Wu, and M.-C. Yang. Demeter: A scal-
+able and elastic tiered memory solution for virtualized cloud
+via guest delegation.
+In Proceedings of the ACM SIGOPS
+31st Symposium on Operating Systems Principles, SOSP ’25,
+pages 169–185. Association for Computing Machinery, 2025.
+[12] Kata Containers. Kata Containers: Open source container run-
+time software. https://katacontainers.io/. Accessed September
+22, 2026.
+[13] K. Koh, K. Kim, S. Jeon, and J. Huh. Disaggregated cloud
+memory with elastic block management. IEEE Transactions
+on Computers, 68(1):39–52, 2019.
+[14] O. Lagkas Nikolos, C. Alverti, S. Psomadakis, G. I. Goumas,
+and N. Koziris.
+Squeezy: Rapid VM memory reclamation
+for serverless functions. In Proceedings of the 21st European
+Conference on Computer Systems, EuroSys ’26, pages 1467–
+1482. Association for Computing Machinery, 2026.
+[15] Linux Kernel Documentation.
+Multi-gen LRU.
+https:
+//docs.kernel.org/admin-guide/mm/multigen lru.html.
+Ac-
+cessed September 22, 2026.
+[16] Linux Kernel Documentation. Transparent hugepage support.
+https://docs.kernel.org/admin-guide/mm/transhuge.html. Ac-
+cessed September 22, 2026.
+[17] D. Lion, A. Chiu, and D. Yuan. M3: End-to-end memory man-
+agement in elastic system software stacks.
+In Proceedings
+of the Sixteenth European Conference on Computer Systems,
+EuroSys ’21, pages 507–522. Association for Computing Ma-
+chinery, 2021.
+[18] Z. Lu, Y. Ou, L. Wu, Z. Wang, M. Lai, X. Ge, Z. Song, and
+M. Xie. vtism: Efficient tiered memory management for vir-
+tual machines with CXL. In Proceedings of the 18th ACM
+International Systems and Storage Conference, SYSTOR ’25,
+pages 92–106. Association for Computing Machinery, 2025.
+[19] M. A. Merrill, A. G. Shaw, N. Carlini, et al. Terminal-Bench:
+Benchmarking agents on hard, realistic tasks in command line
+interfaces. In International Conference on Learning Repre-
+sentations, 2026.
+[20] Microsoft. Microsoft Foundry Agent Service. https://learn.
+microsoft.com/en-us/azure/ai-foundry/agents/overview. Ac-
+cessed September 20, 2026.
+[21] G. Molt´o, M. Caballer, and C. de Alfonso.
+Automatic
+memory-based vertical elasticity and oversubscription on
+cloud platforms. Future Generation Computer Systems, 56:1–
+10, 2016.
+[22] OpenAI.
+Introducing Codex.
+https://openai.com/index/
+introducing-codex/, May 2025.
+Accessed September 17,
+2026.
+[23] OpenClaw.
+OpenClaw: Open-source AI assistant.
+https:
+//openclaw.ai/. Accessed September 17, 2026.
+[24] OpenCode.
+OpenCode: The open source AI coding agent.
+https://opencode.ai/. Accessed September 22, 2026.
+[25] Tencent Cloud. WorkBuddy Managed Agents. https://cloud.
+tencent.com/product/workbuddy-managed-agents. Accessed
+September 22, 2026.
+[26] M. S. Tsirkin and C. Huck.
+Virtual I/O device (VIR-
+TIO)
+version
+1.2.
+OASIS
+Committee
+Specification
+01, https://docs.oasis-open.org/virtio/virtio/v1.2/cs01/virtio-
+v1.2-cs01.html, July 2022.
+[27] L.
+Wrenger,
+K.
+Albes,
+M.
+Wurps,
+C.
+Dietrich,
+and
+D. Lohmann. HyperAlloc: Efficient VM memory de/inflation
+via hypervisor-shared page-frame allocators. In Proceedings
+of the Twentieth European Conference on Computer Systems,
+EuroSys ’25, pages 702–719, New York, NY, USA, 2025. As-
+sociation for Computing Machinery.
+[28] T. Xing, J. Yang, J. Picorel, and A. Barbalace. Rethinking
+tiered memory management in cloud data centers. In Pro-
+ceedings of the 2025 ACM Symposium on Cloud Computing,
+SoCC ’25, pages 74–87. Association for Computing Machin-
+ery, 2025.
+[29] P. Zeng, H. Huang, Y. Pan, W. Xia, D. Yang, J. Chen, and
+N. Zhang. Compaction-Free memory defragmentation for vir-
+tualization via infinite guest physical address space. In 20th
+USENIX Symposium on Operating Systems Design and Im-
+plementation (OSDI 26), pages 1731–1747, Seattle, WA, July
+2026. USENIX Association.
+[30] T. Zussman, I. Zarkadas, J. Carin, A. Cheng, H. Franke, J. Pf-
+efferle, and A. Cidon. cache ext: Customizing the page cache
+with eBPF. In Proceedings of the ACM SIGOPS 31st Sympo-
+6
+
+
+sium on Operating Systems Principles, SOSP ’25, pages 462–
+478, New York, NY, USA, 2025. Association for Computing
+Machinery.
+7

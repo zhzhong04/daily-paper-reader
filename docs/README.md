@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-04</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-06</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 14 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-04 22:45:31 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-06 00:43:43 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读6篇、速读6篇共12篇，聚焦多智能体LLM的KV Cache共享与跨家族迁移。最值得看的是两篇9分工作：Prefill-Free跨家族KV Cache传输，以及PReCache用低秩预计算实现多LoRA智能体的高效缓存共享。普通读者可先读这两篇精读，再按兴趣跟进KV Cache卸载与稀疏推理等速读方向。</p>
+<p>今日完成14篇推荐（精读6、速读8），聚焦多LoRA智能体与多智能体系统的KV缓存共享和纠错。最值得看的是两篇9.0分工作：PReCache用低秩预计算与中性重建实现KV缓存共享，KVCMAS针对共享上下文做KV缓存纠错。普通读者可先读这两篇精读，再按需扫速读中的AvoKV-E了解长推理场景的缓存淘汰思路。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -74,9 +74,9 @@
     <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs">Prefill-Free Cross-Family KV Cache Transfer for Heterogeneous Multi-Agent LLMs</span></li><li><span class="dpr-home-dashboard-paper-title" title="PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction">PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction</span></li><li><span class="dpr-home-dashboard-paper-title" title="KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems">KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction">PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction</span></li><li><span class="dpr-home-dashboard-paper-title" title="KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems">KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Capture the lifecycle: KV Cache management in ReAct Agents with KVTether">Capture the lifecycle: KV Cache management in ReAct Agents with KVTether</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>4</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">6 篇</strong>
+    <strong class="dpr-home-dashboard-count">8 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="EfficientAgent: What Makes KV Cache Offloading Work for Concurrent Agents?">EfficientAgent: What Makes KV Cache Offloading Work for Concurrent Agents?</span></li><li><span class="dpr-home-dashboard-paper-title" title="SparseEngine: Sparse-First Inference Engine">SparseEngine: Sparse-First Inference Engine</span></li><li><span class="dpr-home-dashboard-paper-title" title="LAM: Efficient Lossy Agent Memory Framework With A Retrieval-Score Error Bound">LAM: Efficient Lossy Agent Memory Framework With A Retrieval-Score Error Bound</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning">AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning</span></li><li><span class="dpr-home-dashboard-paper-title" title="SparseEngine: Sparse-First Inference Engine">SparseEngine: Sparse-First Inference Engine</span></li><li><span class="dpr-home-dashboard-paper-title" title="Coda: Exploiting Admission Flexibility for Coding-Agent Serving">Coda: Exploiting Admission Flexibility for Coding-Agent Serving</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>6</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
 </section>
 </div>
 

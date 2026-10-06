@@ -1,0 +1,1679 @@
+SERVING A REVISABLE WORLD:
+VERSIONED EXECUTION FOR INTERRUPTIBLE AGENTS
+Yanxin Zhang 1
+Rahul Sharma 1
+Nitin Vegesna 1
+Zheyu Fu 1
+Chang Liu 1
+Trivikram Krishnamurthy 1
+1NVIDIA Corporation, Santa Clara, CA, USA
+ABSTRACT
+LLM agents revise running tasks when users change instructions, tools fail, or new information changes a plan.
+Today’s servers express a revision as aborting old requests and submitting replacements. Yet the old execution’s
+buffered output and outstanding work must stop affecting the application, while completed KV state may still be
+useful to its replacement. Handling these obligations separately can leave obsolete effects publishable and force
+the successor to rebuild valid state.
+We present RETIRE, a serving control-plane redesign around versioned execution. Requests own scheduling and
+memory resources; execution versions own authority, the permission to publish output or install state for the
+current execution. RETIRE first revokes obsolete work, then bounds its remaining execution and certifies the
+completed prefix its successor can inherit. The successor runs from that state while isolated old resources are
+reclaimed asynchronously. This unifies fast invalidation and selective preservation in one version transition.
+We implement RETIRE in vLLM across output publication, GPU execution, KV handoff, tiered recovery, and
+distributed and multi-tenant serving. Correctness experiments verify current-version output and valid state
+inheritance across these paths. Combining invalidation with inheritance reduces revision-to-successor time-to-
+first-token by a median 17.1% in controlled paired experiments. A replay of recorded coding-agent interruption
+arrivals emits no obsolete output and keeps every final version progressing through repeated revisions. RETIRE
+turns abort-and-restart into a coordinated handoff that stops obsolete work quickly and preserves useful work for
+its successor.
+1
+INTRODUCTION
+Consider a coding agent implementing an API change.
+While the model is processing repository context, the user
+asks it to keep the existing API and change only the imple-
+mentation. The agent runtime replaces the plan. Output
+buffered for the abandoned plan must no longer reach the
+user, and its remaining model work has become obsolete.
+Yet the repository context shared by both plans still has
+value: its completed KV prefix can accelerate the revised
+execution. One interruption therefore asks the server to stop
+obsolete work and preserve useful work at the same time.
+Such revisions are a normal part of agent execution. A tool
+failure can invalidate a plan, and a fresh observation can
+replace the assumptions behind ongoing reasoning. The
+agent runtime chooses the response and constructs the re-
+vised context. Here, authority means permission for output
+or state updates to affect the application or the successor.
+Once the runtime decides to replace live work, the server
+must carry out one decision:
+Corresponding author: Yanxin Zhang
+<yanxinz@nvidia.com>.
+Revoke the old execution’s authority and let its
+successor take over from the state that remains
+valid.
+We call the replacement of a live execution an agent in-
+terruption. Figure 1 shows the division of responsibility:
+the runtime selects what replaces the old execution; the
+server enforces that selection across output, computation,
+and memory. This requires a serving abstraction that repre-
+sents both the authority change and the state shared across
+it.
+Requests allocate resources; versions determine author-
+ity.
+A request tells the server what to schedule and which
+resources to account for. An execution version tells it which
+results may still become visible. A scope groups the work
+that the runtime replaces together, including multiple re-
+quests when they belong to the same abandoned plan. Once
+that plan is replaced, its requests can still own buffers and
+GPU allocations even though their results have lost author-
+ity. Conversely, their completed common-prefix state can
+remain useful to the successor.
+arXiv:2610.01160v1  [cs.DC]  1 Oct 2026
+
+
+Serving a Revisable World
+User
+Tool
+State
+Planner
+Agent runtime
+chooses X′
+SUPERSEDE(s, e, e+1, X′, C)
+agent / serving
+RETIRE: authority switch
+e: revoked −→e+1: current
+GPU
+Scheduler
+Output
+KV
+Memory
+Figure 1. The runtime selects the revised context. One execution-
+version authority then governs its effects across the serving stack.
+The request-centric serving stack couples these roles. It
+admits, schedules, streams, and accounts for KV ownership
+by request or sequence. PagedAttention makes the resource
+unit concrete: each active sequence has a logical block table,
+even when physical blocks are shared (Kwon et al., 2023).
+Aborting a request changes its scheduling status, but the
+revision also has to reach output already queued for delivery,
+GPU work already issued, and state registered for reuse or
+transfer. Caching and tiering extend those objects’ lifetimes
+and increase the value of coordinating their handoff (Zheng
+et al., 2024; Gao et al., 2024; Yu et al., 2025; Gao et al.,
+2025; Qin et al., 2025).
+A revision can pay twice.
+Coarse abort-and-restart spends
+time on work that has become obsolete, then repeats useful
+work when the successor starts cold. Figure 2 shows the
+two delays: waiting for the predecessor to reach a stopping
+boundary, and rebuilding the shared prefix. Faster retirement
+reduces the first delay; keeping a valid prefix reduces the
+second. Reusing that prefix requires a writer and ownership
+boundary so old work cannot subsequently alter it. The serv-
+ing system must coordinate cancellation and preservation
+around the same version decision.
+The consequences appear at multiple boundaries in vLLM.
+Across 18 request-abort trials, consumers receive 170 prede-
+cessor tokens in aggregate after supersession. A long-prefill
+replacement waits 3.21 seconds for the next server boundary.
+State handoff adds a third obligation: selecting the com-
+pleted prefix whose contents and ownership remain valid.
+Together, these observations motivate a control plane that
+makes one version decision govern publication, retirement,
+and inheritance.
+A versioned handoff.
+We present RETIRE, a redesign of
+the serving control plane around versioned execution. RE-
+TIRE first makes obsolete work unable to publish new effects,
+then hands its successor only state that satisfies the reuse
+contract. Its organizing rule is revoke first, preserve sec-
+ond. ADVANCE revokes the old version; FENCE bounds
+its remaining work and closes writers; ALIGN certifies
+the reusable prefix; RESUME launches the successor; and
+RECLAIM releases isolated old resources asynchronously.
+Reclamation stays off the successor’s critical path because
+those resources no longer determine its output or state.
+We implement this authority boundary throughout vLLM,
+from output publication and GPU execution to KV instal-
+lation, state transfer, and reclamation. The evaluation first
+establishes correct publication, inheritance, and tenant isola-
+tion. Combining fast invalidation with certified inheritance
+then lowers paired revision-to-successor TTFT by a median
+17.1% over native abort and cold restart. Under interven-
+ing HBM churn, certified retention accelerates post-churn
+recovery by up to 6.87×/5.07× on H100 PCIe/GB200.
+Finally, replaying recorded coding-agent interruption bursts,
+RETIRE publishes no obsolete output, advances every final
+version, and delivers 5.53× the current-version output per
+second of the best tested native quantum. Distributed and
+co-tenant experiments extend the same boundary across
+workers and shared resources. Versioned execution supports
+both faster handoff and continued progress when another
+revision arrives before cleanup ends.
+This paper makes three contributions:
+• Workload abstraction. We define revisable execution
+through version transitions and characterize their pressure,
+retirement horizon, reusable state, and scope width.
+• Serving redesign. We separate request resource own-
+ership from execution-version authority and coordinate
+fast invalidation, certified inheritance, and asynchronous
+reclamation in RETIRE.
+• Implementation and evidence. We realize the design
+across the vLLM serving lifecycle and establish cor-
+rectness, faster recovery, and sustained progress under
+recorded bursts, distributed execution, and tenant sharing.
+2
+CONVERGING TRENDS AND RELATED
+WORK
+Agent control, stateful serving, and KV management are
+converging on executions that change while their work and
+state remain live. Together, they motivate a serving abstrac-
+tion that coordinates which work loses authority and which
+state remains useful.
+
+
+Serving a Revisable World
+Native abort
+RETIRE
+SUPERSEDE e→e+1
+authoritative e
+obsolete tail
+cold prefill
+valid prefix recomputed
+e+1 execution
+old-version output
+predecessor delay
+repeated valid work
+first current token
+authoritative e
+FENCE
+ALIGN
+certified prefix
+e+1 execution
+RECLAIM (async)
+first current token
+obsolete work
+repeated valid work
+inherited valid state
+Figure 2. Abort followed by a cold restart pays for both the obsolete tail and prefix recomputation. RETIRE shortens the tail with FENCE,
+preserves the certified prefix through ALIGN, and reclaims old resources asynchronously.
+Agents revise live work.
+Benchmarks and control stud-
+ies treat changing instructions, goals, and stop decisions
+as recurring execution events (Wu et al., 2025; Rana et al.,
+2025; Zou et al., 2026; Zhai et al., 2026; Khan, 2026). They
+establish revision as a workload property: after new infor-
+mation arrives, the runtime may select a replacement for
+an already-running execution. The resulting decision must
+reach the serving stack while old computation and output
+are still in flight.
+Servers carry work across time.
+FastServe provides
+iteration-level preemptive scheduling (Wu et al., 2026); In-
+ferCept preserves state across intercepts (Abhyankar et al.,
+2024); Agentix schedules agent programs (Luo et al., 2026).
+Their scheduling decisions span turns, pauses, and persistent
+state. Preemption retains the identity of paused work; revi-
+sion is the complementary transition in which that identity
+loses authority and a different successor may take over.
+State outlives individual requests.
+PagedAttention and
+SGLang provide block and prefix sharing (Kwon et al., 2023;
+Zheng et al., 2024). CachedAttention, Pensieve, HCache,
+and Mooncake retain or restore conversational state across
+memory tiers (Gao et al., 2024; Yu et al., 2025; Gao et al.,
+2025; Qin et al., 2025), while Leyline proposes agentic KV
+directives (Ma et al., 2026). This decoupling makes state
+preservation valuable during revision, but matching tokens
+or bytes alone cannot establish whether an in-flight writer
+or transfer still belongs to the selected execution. Rollback
+consistency exposes the same need to bound admissible
+retained state (Zhang & Yang, 2026).
+Versioned execution connects these developments through
+one authority boundary. The runtime’s replacement decision
+governs publication and retirement, and determines which
+retained state the successor may adopt. RETIRE unifies
+revocation, writer closure, state handoff, and asynchronous
+reclamation in one lifecycle.
+3
+REVISABLE EXECUTION AS A SERVING
+WORKLOAD
+The coding-agent example has two execution versions: the
+abandoned API change and the revised implementation
+change. The runtime chooses between them; the server
+must make that choice effective for every affected request
+and state object. We define the serving event around this
+transfer of authority.
+Definition. An agent interruption at the serving
+boundary replaces a runtime-selected scope at
+execution version e with version e+1. Version
+e loses permission to publish output or install
+state; version e+1 runs from the revised context
+supplied by the runtime.
+3.1
+The runtime selects the replacement
+A scope is the work replaced together. It can contain one
+model request, several requests for an abandoned branch,
+or their distributed workers. An execution version is one
+attempt to execute that scope. Other scopes in the same
+batch keep their own authority. The runtime submits
+SUPERSEDE(s, e, e+1, X′, C),
+where s identifies the scope, e is its current version, e+1 is
+the replacement, and X′ is the revised context. The execu-
+tion contract C specifies when inherited state is acceptable,
+including the numerical mode and required successor-output
+equivalence against clean execution. After the switch, e+1
+owns publication authority and can adopt certified prede-
+cessor state. A pause retains the same authority; a terminal
+cancellation has no successor.
+3.2
+A taxonomy of agent interruptions
+Table 1 gives representative reasons for replacing live work.
+A failed tool call, for example, induces a transition when the
+
+
+Serving a Revisable World
+Table 1. Representative interruptions.
+Every runtime decision
+shown here becomes the same serving-level version transition.
+Source and example trigger
+Runtime decision
+User steering: correction or
+new request
+Revise goal, context, or branch
+Tool/service: failed call or
+expired credential
+Replace dependent work and
+retry
+Environment/validation: stale
+state or rejected result
+Re-observe, repair, or roll back
+Planning/operation: winning
+branch or changed deadline
+Switch branch or execution
+policy
+runtime abandons work dependent on that call and selects
+a new plan. The server receives the replacement decision
+and revised context, regardless of the original trigger. Ap-
+pendix A.1 expands this mapping.
+3.3
+The workload exposed to the server
+The same transition can impose very different costs. Four
+dimensions expose those costs to the server:
+Revision pressure: arrival rate and burstiness. Another
+correction may arrive before the previous version finishes
+draining.
+Retirement horizon: outstanding work before a safe
+boundary. A long prefill or speculative step can delay its
+replacement.
+Successor overlap: state shared with the revised context.
+A retained repository prefix can save most of a successor’s
+prefill.
+Scope width: requests, cache groups, transfers, and work-
+ers replaced together. A distributed execution requires coor-
+dinated closure.
+These dimensions determine the value of finer execu-
+tion boundaries, retained state, and coordinated retirement.
+Across them, a successful transition has three outcomes:
+1. Current output: revoked work cannot publish new ef-
+fects.
+2. Valid inheritance: the successor receives only state that
+satisfies its execution contract.
+3. Efficient handoff: useful work survives the switch, ob-
+solete work leaves its critical path, and unrelated tenants
+remain isolated.
+The next section follows these obligations through a request-
+centric server to show why resource lifetime and execution
+authority need separate units.
+4
+FROM REQUEST-CENTRIC TO
+VERSIONED SERVING
+Return to the coding agent when the user changes the plan.
+The runtime sends an abort for the model request represent-
+ing the old plan. The scheduler can remove its future work,
+but a token batch may already be waiting for a slow con-
+sumer, a GPU step may still be processing the old context,
+and completed repository-prefix blocks may be registered
+in the cache. All belong to the abandoned execution, yet
+they require different actions: suppress the output, bound
+the computation, and preserve the useful prefix.
+A request ID identifies resources; a version determines
+whether their output or state may still affect the user or the
+successor. Table 2 follows the decision through the stack.
+Versioned serving makes the distinction explicit: requests
+own schedulable work and allocations, while the current
+scope version determines which effects can become visible.
+A replacement can then revoke old publication before all
+old resources are released, and inherit useful state without
+keeping the predecessor authoritative.
+Two costs on one critical path.
+For a coarse abort fol-
+lowed by cold prefill, the dominant sequential costs are the
+predecessor’s remaining time to a server-visible boundary,
+Ttail, and the successor’s full prefill, Tfull:
+Tabort = Ttail + Tfull.
+A versioned transition can replace that tail with time to a
+bounded safe point, Tsafe, certify inherited state in Talign,
+and prefill the remaining suffix in Tsuffix:
+Tversioned = Tsafe + Talign + Tsuffix.
+These decompositions expose the two levers: shorten obso-
+lete work and avoid repeating valid work. When a native
+prefix hit already removes recomputation, the remaining
+opportunity lies in retirement and coordination. To com-
+bine the levers, the server must control the following three
+boundaries.
+4.1
+Obsolete results can escape
+Removing a request from the scheduler does not retract to-
+kens already queued between a worker, EngineCore, and a
+slow consumer. Request completion and API publication
+are different moments. The server must check the current ex-
+ecution version again when delivering output, so a buffered
+result from an abandoned plan cannot reach the application
+after the switch.
+4.2
+Obsolete work can delay the replacement
+Host-side cancellation cannot retract work already submit-
+ted to a model worker. A long prefill, speculative step,
+
+
+Serving a Revisable World
+Table 2. A request is a useful resource unit but an insufficient authority unit once an execution scope has been replaced.
+Moment
+Request/resource view
+Scope/version authority view
+Runtime decision
+Cancel one or more request IDs
+Revoke the old scope version before any later publication
+Buffered output
+Previously produced frames remain ordinary
+results
+Frames from the revoked version are no longer publishable
+Issued GPU work
+Runs until the next request boundary
+Is bounded, accounted for, and unable to commit stale state
+Cached or tiered KV
+Matching tokens or bytes identify a candidate
+Reuse also closes old writers and validates configuration and
+generation
+Physical cleanup
+Request lifetime determines release
+Cleanup follows the last old writer and need not delay the
+successor
+or distributed group may continue until the next boundary
+recognized by the server. Physical completion and logical
+invalidation have different deadlines: old work may finish
+after a revision, but its output and state commits must lose
+authority immediately. The successor needs writer-closed
+shared state and isolation from old-only state. It need not
+wait for every predecessor allocation to be reclaimed.
+4.3
+State handoff lacks versioned ownership
+The common prompt prefix identifies candidate state for
+reuse. A prefix cache can make its completed blocks avail-
+able, while the transition needs a stable handoff: close pre-
+decessor writers, retain the blocks until adoption, and val-
+idate their ownership generation. A tiered transfer must
+likewise be installed for the intended successor. Token posi-
+tions, model and adapter configuration, cache layout, tenant,
+and execution mode determine which state is compatible.
+Rollback consistency makes the importance of bounding
+retained state explicit (Zhang & Yang, 2026).
+The server therefore needs both an eligibility decision and
+a lifetime decision: which state may be inherited, and how
+it remains available until the successor takes ownership. A
+completed common prefix can be retained; an unfinished or
+incompatible suffix must be recomputed. Releasing the old
+request and later looking for a cache hit leaves this handoff
+opportunistic: intervening requests may evict the blocks
+before the successor arrives.
+RETIRE connects these boundaries through one version life-
+cycle. Revocation decides what may publish; writer closure
+makes inheritance safe; certified handoff preserves useful
+work; and isolation lets reclamation proceed after the suc-
+cessor starts. Together they turn the two performance levers
+into a coordinated serving transition.
+5
+RETIRE: A VERSIONED SERVING
+CONTROL PLANE
+RETIRE organizes serving around a simple rule: revoke first,
+preserve second. The old plan immediately loses authority
+to publish, while its useful state survives through an explicit
+handoff. Resources are released after their last users finish;
+only state the successor will consume must be ready before
+it starts.
+RETIRE assigns authority to (scope, version), with one
+current version per runtime-selected scope. The implemen-
+tation represents the version as a monotonically increasing
+epoch. Each request, output frame, model step, and transfer
+carries that identity, and publication checks it against the
+scope’s current epoch. KV records also carry a generation
+identifying an allocation’s ownership instance. Installation
+checks that generation; writer fences and delayed recycling
+protect the underlying pages.
+5.1
+Three guarantees across the serving lifecycle
+RETIRE enforces three rules at the serving boundaries where
+state becomes visible:
+Current-version publication. Tokens, scheduler results,
+and installed state are visible only if they belong to the
+current scope epoch.
+Versioned handoff. Predecessor state is consumed only
+when its token prefix and execution configuration match, its
+old writer is closed, and its ownership generation remains
+valid. Otherwise the successor recomputes.
+Retired-state isolation. Old work may finish, but it can-
+not overwrite state owned by the successor or an unrelated
+tenant.
+Publication and isolation establish the switch; versioned
+handoff recovers performance through safe inheritance. The
+execution contract selects the required output comparison,
+including batch-invariant execution when numerical equiva-
+lence between cold and reused computation is required.
+The two performance mechanisms share the same authority
+boundary. FENCE shortens the predecessor tail and closes
+writers; ALIGN uses that closure to separate the committed
+common prefix from the obsolete suffix. If no reuse is
+profitable, a cold successor bypasses physical pinning and
+starts under an independent cache generation. If reuse is
+profitable, only certified pages cross the version boundary.
+
+
+Serving a Revisable World
+The transition chooses its state path after establishing which
+work remains useful.
+5.2
+One five-stage transition
+Figure 3 shows how the decision reaches the serving stack:
+ADVANCE changes authority. Publish version e+1 for
+the scope. Queued output and new commits carrying e are
+rejected.
+FENCE bounds obsolete work. Stop
+new
+old-version
+launches and close writers at supported safe boundaries,
+collecting participant receipts.
+ALIGN selects useful state. Match the revised context to
+the completed prefix and certify its configuration, genera-
+tion, and ownership.
+RESUME starts the replacement. Install the certified
+prefix, allocate the new suffix, and admit work under e+1.
+RECLAIM releases isolated resources. After their final
+users drain, free old references and allocations asyn-
+chronously.
+The stages express dependencies: revoke before publication,
+close writers before inheritance, and isolate state before
+recycling it. Successor progress depends on the state it will
+consume, rather than on the release of every predecessor
+allocation.
+5.3
+Resume before reclamation
+In the coding-agent example, the successor adopts the cer-
+tified repository prefix and allocates fresh pages for its
+changed suffix. Old suffix pages and buffered results are
+unreachable from that successor. Their owners can drain
+while the revised plan runs: old publication is revoked, and
+old pages remain isolated until their writers finish.
+The common prefix stays pinned until the successor adopts
+it. Once adoption is verified, handoff pins are released and
+the successor’s references keep those pages live. Only im-
+mutable, writer-closed pages cross this boundary, allowing
+preservation and cleanup to proceed under the same author-
+ity decision.
+6
+A VERSIONED VLLM SERVING STACK
+We implement RETIRE in vLLM 0.13.0 by carrying
+(scope, epoch) through request admission, scheduling,
+model execution, output publication, KV installation, and
+memory transfer. Request IDs index local resources; the
+scope epoch determines whether their results can become
+visible.
+Three changes enforce the lifecycle: publication gates reject
+obsolete output, model safe points bound obsolete computa-
+tion, and versioned KV ownership controls which state the
+successor adopts.
+6.1
+Redesigning the execution lifecycle
+Version-governed publication.
+Every native request
+maps to (scope, epoch). The server checks that authority
+at scheduling and model completion, when output enters
+the streaming queue, and again when the API consumer re-
+ceives it. The delivery check rejects a frame whose version
+was superseded while it waited in the queue.
+Bounded retirement inside model execution.
+An epoch
+update reaches workers outside ordinary request traffic. A
+safe point is a model boundary where the worker can stop
+launching additional old-version work. Writer receipts es-
+tablish the completed-state frontier, while KV and output
+gates reject stale commits. Short decode steps already reach
+model-step boundaries frequently. Long steps arm addi-
+tional device predicates and bounded checks, avoiding per-
+layer checking costs on short steps while shortening the tail
+of a long prefill.
+Versioned KV-cache transition.
+FENCE snapshots the
+predecessor block table before releasing its request and pins
+its completed prefix. ALIGN finds the longest common
+token prefix, limits it to the minimum writer-complete fron-
+tier across participants, and rounds it to a block boundary
+shared by every KV group. It then checks model and cache
+configuration, tenant, generation, transfer identity, and nu-
+merical mode. This produces the only prefix that may cross
+the version boundary.
+At RESUME, the successor table aliases those physical
+HBM pages and allocates its changed suffix under e+1.
+The old suffix loses cache reachability and is reclaimed
+after its last writer; the shared prefix stays pinned through
+adoption (Figure 4). Keeping this state in place avoids
+copying, eviction, restoration, and recomputation. When
+HBM capacity must be returned before the successor arrives,
+the same certificate governs DRAM offload and restoration.
+A failed certificate selects a cold, fresh-generation successor.
+A restored object is installed only if its target version and
+generation still match, rejecting transfers that complete after
+their intended execution has been retired.
+The contract extends across speculation, multiple KV
+groups, memory tiers, tenants, and distributed participants;
+their adapters and failure evidence appear in Appendix A.
+
+
+Serving a Revisable World
+Runtime / API
+Scheduler
+GPU execution
+KV / Memory
+ADVANCE
+FENCE
+ALIGN
+RESUME
+RECLAIM
+publish (s, e+1)
+gate output
+revoke commit
+block old launch
+mailbox epoch
+retire old
+generation
+reject buffered e
+collect participant
+receipts
+reach safe point
+close writers
+supply revised X′
+LCP + reuse plan
+report writer
+frontier
+verify prefix
+generation / tenant
+open stream e+1
+admit successor
+execute e+1
+install certified
+pages
+close version e
+release old refs
+drain issued work
+free old blocks
+successor critical path
+physical cleanup may overlap successor execution
+Figure 3. RETIRE is one cross-layer version transition: ADVANCE changes authority, FENCE closes old publication and writers, ALIGN
+certifies inherited state, RESUME opens the successor, and RECLAIM releases isolated state off the critical path.
+old e
+new e+1
+A
+A
+B
+B
+C
+C
+D
+E
+F
+G
+certified prefix
+old-only suffix
+new-only suffix
+async reclaim
+alias
+Figure 4. The successor table aliases the certified physical HBM
+prefix, allocates a new suffix, and leaves the unreachable old suffix
+to reclamation.
+7
+EVALUATION
+The evaluation follows the handoff from its guarantees to its
+benefits. First, does the successor receive valid state while
+obsolete effects are suppressed? Second, how much time is
+saved by shortening old work and preserving useful state,
+separately and together? Finally, can the same transition
+sustain progress through recorded interruption bursts, dis-
+tributed execution, and tenant sharing? Performance results
+come from runs that pass the corresponding correctness
+checks.
+7.1
+Experimental method
+Integrated runs use vLLM with H100 PCIe GPUs for the
+main and distributed paths; the state-handoff campaign re-
+peats the same design on H100 PCIe and GB200. Qwen3-
+32B in BF16 is the primary configuration; GPT-OSS-20B
+supplies heterogeneous KV groups and trace replay. Single-
+GPU retirement paths use three pairs, active speculative
+decode and distributed topologies use five, and state handoff
+uses four paired quartets at each of nine pressure points per
+platform. Co-tenant isolation uses three seeds.
+Each pair shares a predecessor, revision, and execution
+Table 3. Baseline and versioned state paths. The composition ex-
+periment separately enables invalidation and inheritance.
+Path
+Enabled mechanisms
+Native+cold
+Request abort; cold successor prefill
+Native+prefix
+Tuned abort and chunked prefill; reuse
+available native-cache blocks
+RETIRE HBM
+Versioned handoff; pin certified blocks until
+successor adoption
+RETIRE DRAM
+Versioned handoff; offload certified state,
+release HBM, then restore
+mode. The checker compares current-version output, KV
+ownership and transfer digests, and distributed receipts
+against a clean reference before admitting performance data.
+We report medians and compute speedups before display
+rounding. Appendix A gives the complete configurations
+and trace construction.
+Comparisons and metrics.
+Table 3 identifies the mech-
+anisms enabled in each comparison. Single-handoff TTFT
+spans the version-switch signal to the first authoritative suc-
+cessor token. FENCE latency isolates the predecessor’s
+writer closure. State-recovery TTFT starts after intervening
+HBM churn and ends at that successor token. Current-
+version goodput counts authoritative tokens per second over
+the replay window. Thus the composition measures a com-
+plete handoff, the retirement and recovery measurements
+explain its costs, and the burst replay measures sustained
+useful output.
+7.2
+Correctness: closing the version lifecycle
+We first test the two obligations created by the coding-agent
+example: discard the old plan’s effects and preserve only
+valid context. Across 18 native publication trials, consumers
+receive 170 predecessor tokens after abort because those
+
+
+Serving a Revisable World
+frames have crossed internal queues. RETIRE’s publication
+boundary suppresses them. For inherited state, we hold the
+successor, reuse length, and execution shape fixed while
+changing the source of its pages. Completed-predecessor
+and clean-prefix pages agree in all ten seed–LCP configura-
+tions, controlling for batch-dependent numerical variation.
+An injected page-content fault leaves the cache count and
+physical IDs unchanged but changes the successor in 3/3
+trials; restoring the certified bytes recovers exact output in
+3/3.
+The publication control tests revocation across internal
+queues; the page-fault control tests inherited contents with
+block identity and execution shape held fixed. Together they
+establish the output and state boundaries of a valid handoff.
+We then cross buffered output, long prefill, draft–verify
+prefill, active speculative decode, two heterogeneous KV
+groups, and co-tenant execution with one version transi-
+tion. These cases cover publication, scheduler commit, KV
+installation, and independently retiring participants.
+Table 4. Correctness closure across the version lifecycle. Successor comparisons use the declared clean execution mode; the faulted-page
+row is an injected positive control.
+Lifecycle surface
+Request-local behavior
+RETIRE closure
+Observed result
+Output publication
+170 obsolete tokens across 18 trials
+Gate API dequeue by current
+authority
+Zero predecessor output
+Long prefill
+Old work drains to request boundary
+Reject stale launch, KV, and
+scheduler commit
+3/3 successors exact
+Draft–verify / active
+decode
+Old speculative work remains live
+Fence draft and target work under
+one version
+3/3 and 5/5 exact
+Two KV groups
+Independent participant state
+Fence both groups at one authority
+coordinate
+3/3 successors exact
+Faulted aligned pages
+Same cache count and block IDs; 3/3
+diverge
+Restore certified bytes or reject reuse
+3/3 successors exact
+Tenant isolation
+A changes while B decodes
+Scope authority and cache ownership
+by tenant
+A exact; B’s audited KV
+unchanged in 3/3
+Table 4 follows the authority boundary through these paths.
+In every integrated prefill, speculative, and heterogeneous-
+cache trial, no predecessor output is published and the suc-
+cessor matches its clean reference. The active speculative
+case waits until draft work is observed before issuing SU-
+PERSEDE, so the transition occurs inside speculation. The
+publication and commit gates also reject late completions
+independently of when the native request object disappears.
+Output, page digests, ownership generations, and participant
+receipts thus validate one authority boundary across the
+serving lifecycle. These accepted runs provide the basis for
+measuring its performance.
+7.3
+Performance: removing both transition costs
+Once correctness is established, the performance question
+has two parts. Native replacement can wait for the obsolete
+predecessor to reach a request boundary and then rebuild
+state that remains valid for the successor. FENCE shortens
+the obsolete tail; ALIGN and RESUME preserve the valid
+prefix.
+Combined handoff latency.
+We first measure both mech-
+anisms on the same revision-to-successor critical path: na-
+tive abort plus cold restart, fast invalidation alone, certified
+inheritance alone, and both mechanisms together.
+Table 5. Fast invalidation and inheritance compose. TTFT is me-
+dian [min, max]; reductions are medians of paired changes against
+native abort plus cold restart.
+Arm
+TTFT (ms) Paired reduction Reuse
+Native+cold 1127 [1124,1178]
+—
+0
+Invalidate
+1068 [1064,1114]
+5.6%
+0
+Inherit
+1011 [1004,1033]
+10.3%
+4096
+Combined
+951 [928,976]
+17.1%
+4096
+Table 5 uses an 8192-token prompt, a 4096-token prefill
+quantum, 90% overlap, and a revision 1.1 seconds into pre-
+fill. The combined path reduces paired successor TTFT by
+17.1% (15.4–17.6%) and adopts 4096 certified tokens in
+every trial. The two mechanisms address different terms: in-
+validation shortens the predecessor tail; inheritance shortens
+successor reconstruction. Their combination exceeds either
+mechanism alone.
+Where the time is saved.
+The obsolete tail grows with
+execution granularity: 4K, 8K, and 16K active prefill units
+take 714.9, 1541.2, and 3886.7 ms to return to the ordinary
+EngineCore boundary. Prefix reconstruction grows with
+shared context: a successor with a certified 4080-token
+prefix takes approximately 3965 ms to prefill cold in batch-
+invariant mode and 117 ms when it inherits that prefix. This
+isolated inheritance experiment reduces successor TTFT by
+
+
+Serving a Revisable World
+33.8×.
+Fast retirement generalizes across execution structures.
+FENCE improves by 24.9× for long prefill, 51.3× for draft–
+verify prefill, 9.99× during active speculative decode, and
+7.01× across two heterogeneous KV groups. The corre-
+sponding interruption-to-successor gains are 1.12–1.48×
+after including useful successor computation. For long pre-
+fill, FENCE falls from 3213 to 129 ms and total transition
+time from 14.6 to 9.86 seconds. Appendix A.4 gives every
+path.
+State availability under pressure.
+A full-hit control gives
+native prefix caching every reusable block, submits the
+successor immediately, and introduces no HBM pressure.
+Across both GPUs and three interruption offsets, versioned
+handoff stays within 2% of that strong baseline. We next
+increase the state churn between interruption and successor
+admission.
+RETIRE
+H100 PCIe
+GB200
+.5
+.9
+1.1
+2
+4
+6
+Churn / capacity
+Speedup
+(a) Recovery speedup
+.5
+.9
+1.1
+0
+3.6K
+7.2K
+Churn / capacity
+Prefix tokens
+(b) State available
+Figure 5. State handoff after intervening HBM churn. Recovery
+is measured against tuned native abort with prefix caching; RE-
+TIRE retains the certified 7168-token common prefix. Points are
+medians of four paired quartets; whiskers span the four paired
+measurements.
+Figure 5 compares RETIRE with native abort plus vLLM
+prefix caching on the same 8192-token predecessor and
+7168-token common prefix. Each trial issues the switch,
+runs identical concurrent unique-prefix churn, and then ad-
+mits the successor. H100 exposes two capacity steps: native
+caching falls from 6560 to 2464 tokens at 0.85× churn
+and to zero at 0.95×; recovery speedup rises to 4.82× and
+6.87×. GB200 retains the full prefix through 0.95×; at
+1.00–1.10×, native caching loses it and RETIRE speeds re-
+covery by 5.05–5.07×. Certified retention keeps all 7168
+tokens throughout. A capacity-returning DRAM path safely
+releases the source blocks and reaches up to 3.84×/2.75×
+recovery on H100/GB200.
+All 288 arm executions produce the same greedy successor
+tokens. Every RETIRE transition preserves the certified
+448-block prefix, rejects retired ownership, and reclaims
+only after writer closure. The curve therefore connects the
+authority abstraction to its conditional payoff: versioned
+handoff matches a successful native cache and preserves
+fast recovery when request-local cache ownership loses the
+successor’s state.
+No-revision cost.
+Selective guards add 1.05% median de-
+code overhead (95% bootstrap interval: 0.87–1.34%) and
+0.70% for 4K prefill; the mixed eight-request test has no
+measurable slowdown. A fresh interruption in the same cam-
+paign retains a 24.0× FENCE reduction. Selective place-
+ment also lowers the earlier always-armed decode overhead
+from 5.25% to 1.05% and reduces guarded safe points from
+35,190 to 1,080. Appendix A reports the full matrix.
+7.4
+Repeated revisions, distributed execution, and
+isolation
+We now move from one handoff to a sequence of revi-
+sions, preserving the timing and burst structure of recorded
+agent interruptions. A fixed one-month coding-agent trace
+contains 751 explicit turn aborted→task started
+transitions across 345 scopes. We replay its densest 120 sec-
+onds: 24 transitions across three concurrent scopes in three
+bursts, with inter-arrival coefficient of variation 3.57. The
+serving state uses a controlled 8192-token prompt and zero
+prefix overlap, isolating retirement behavior from content
+and cache reuse.
+This replay asks whether a transition that works once can
+keep making progress when another revision arrives before
+its predecessor has drained. Such bursts create chains of ver-
+sions in which several intermediate executions may become
+obsolete before emitting a token. Current-version goodput,
+final-version progress, obsolete publication, and cleanup la-
+tency jointly capture whether the server follows the moving
+authority boundary.
+Figure 6 makes the accumulating consequence of repeated
+revision visible. Native abort reaches 22 concurrently live
+obsolete executions, delivers 40,499 obsolete tokens, leaves
+three streams at the 180-second cleanup limit, and advances
+only 3/9 final versions. RETIRE confines obsolete exe-
+cutions to millisecond-scale burst-local intervals, so they
+appear as narrow spikes at this time scale; it emits no obso-
+lete output, closes cleanup in 1.08 ms, and advances all 9
+final versions. Current-version goodput is 54.0 versus 9.77
+token/s, or 5.53×, because service is redirected toward the
+surviving versions. Their median TTFT is 405 ms, com-
+pared with 87.0 s for the three native final versions that
+produce output. The full trace extraction and policy matrix
+appear in Appendices A.2.1 and A.2.2.
+Distributed scopes and tenant sharing.
+The remaining
+experiments widen the authority scope and add unrelated
+work. We first repeat retirement and inheritance across
+tensor- and pipeline-parallel participants, testing whether
+one transition closes every participating worker.
+
+
+Serving a Revisable World
+0
+8
+16
+24
+×8
+×8
+×8
+Live executions
+Native request abort
+obsolete
+current
+0
+20
+40
+60
+80
+100
+120
+0
+8
+16
+24
+Time in recorded 120-second replay (s)
+Live executions
+RETIRE
+Obsolete output
+40,499 →0
+Final progress
+3/9 →9/9
+Cleanup
+> 180 s →1.08 ms
+Figure 6. Recorded 120-second replay. Identical axes show representative median trials. Band thickness is current (green) or obsolete
+(red) live executions; the upper envelope is total live execution. Orange lines mark three eight-revision bursts; summaries are medians of
+three trials.
+Table 6. Repeated distributed closure. Each row reports separate
+five-pair retirement and inheritance campaigns.
+TP PP FENCE Int.-to-succ. Inheritance
+2
+1
+12.19×
+1.83×
+5.78×
+4
+1
+10.57×
+1.77×
+5.27×
+2
+2
+6.04×
+1.70×
+7.08×
+Every
+distributed
+retirement
+reconstructs
+the
+full
+TP×PP×KV-group participant set, publishes no obsolete
+output, and matches its clean oracle. Every inheritance
+run adopts the same 4080-token certified physical prefix
+and matches its mode-matched reference. Across the three
+topologies in Table 6, FENCE improves by 6.04–12.19×,
+interruption-to-successor completion by 1.70–1.83×, and
+inherited TTFT by 5.27–7.08×. In a TP=4 co-tenant run,
+superseding Tenant A leaves Tenant B’s KV digest and
+block IDs unchanged across all three seeds; B’s median
+runtime changes by 1.0% and its cross-interrupt frame
+gap by 1.8%. Thus the same version boundary that closes
+the controlled single-GPU lifecycle continues to hold
+under recorded bursts, distributed participation, and shared
+serving resources.
+8
+IMPLICATIONS FOR REVISABLE
+SERVING
+Invalidation and preservation are complementary.
+A
+revision changes which work is useful, not just which re-
+quest should run next. Fast invalidation stops spending
+resources on the abandoned plan; inheritance reduces the
+work required by its replacement. Their shared authority
+boundary lets the server optimize both together. This is
+the central consequence of treating revision as a serving
+workload.
+Authority spans objects with different lifetimes.
+Out-
+put queues, issued computation, and reusable state do not
+finish together. A common version decision gives them one
+logical boundary while allowing physical cleanup to pro-
+ceed independently. Correctness depends on enforcing that
+boundary wherever effects become visible, rather than on
+making every object disappear at once.
+Policies optimize within the invariant.
+Revision pressure
+changes the value of execution granularity and speculation;
+prefix overlap and admission delay change the value of re-
+tention. Schedulers and memory policies can respond to
+these inputs while the same authority checks govern publi-
+cation and handoff. Appendix A.2.2 explores this separation
+through rate sweeps.
+The runtime chooses; serving carries out the handoff.
+The runtime selects the successor context and handles ex-
+ternal actions. Serving determines when that successor can
+run and which state it can inherit. This boundary lets agent
+behavior evolve while publication, isolation, and efficient
+handoff remain systems responsibilities.
+9
+CONCLUSION
+Agent revisions invalidate executions but leave useful work
+behind. RETIRE redesigns serving accordingly: requests
+own resources, versions own authority, and one protocol
+coordinates fast invalidation, certified inheritance, and asyn-
+chronous reclamation. Combining invalidation and inheri-
+tance reduces paired revision-to-successor TTFT by a me-
+dian 17.1%. Recorded-burst replay emits no obsolete output
+and advances 9/9 final versions; distributed and co-tenant
+tests preserve the same authority boundary. Versioned exe-
+cution makes a change of plan a coordinated handoff: retire
+obsolete work and preserve useful state.
+
+
+Serving a Revisable World
+REFERENCES
+Abhyankar, R., He, Z., Srivatsa, V., Zhang, H., and Zhang, Y.
+InferCept: Efficient intercept support for augmented large
+language model inference. In Proceedings of the 41st
+International Conference on Machine Learning, volume
+235 of Proceedings of Machine Learning Research, pp.
+81–95. PMLR, 2024. URL https://proceedings.
+mlr.press/v235/abhyankar24a.html.
+Gao,
+B.,
+He,
+Z.,
+Sharma,
+P.,
+Kang,
+Q.,
+Jevd-
+jic,
+D.,
+Deng,
+J.,
+Yang,
+X.,
+Yu,
+Z.,
+and Zuo,
+P.
+Cost-efficient large language model serving for
+multi-turn conversations with CachedAttention.
+In
+2024 USENIX Annual Technical Conference (USENIX
+ATC 24), pp. 111–126. USENIX Association, 2024.
+URL https://www.usenix.org/conference/
+atc24/presentation/gao-bin-cost.
+Gao, S., Chen, Y., and Shu, J.
+Fast state restora-
+tion in LLM serving with HCache.
+In Proceedings
+of the Twentieth European Conference on Computer
+Systems, pp. 128–143. ACM, 2025.
+doi: 10.1145/
+3689031.3696072.
+URL https://doi.org/10.
+1145/3689031.3696072.
+Khan, S.
+Stop means stop:
+Measuring and repair-
+ing the enforcement gap in agent-framework control
+primitives, 2026. URL https://arxiv.org/abs/
+2607.14166. arXiv:2607.14166.
+Kwon, W., Li, Z., Zhuang, S., Sheng, Y., Zheng, L.,
+Yu, C. H., Gonzalez, J. E., Zhang, H., and Stoica,
+I.
+Efficient memory management for large language
+model serving with PagedAttention.
+In Proceedings
+of the 29th Symposium on Operating Systems Prin-
+ciples, pp. 611–626. ACM, 2023.
+doi:
+10.1145/
+3600006.3613165.
+URL https://doi.org/10.
+1145/3600006.3613165.
+Luo, M., Shi, X., Cai, C., Zhang, T., Wong, J., Wang, Y.,
+Wang, C., Huang, Y., Chen, Z., Gonzalez, J. E., and Sto-
+ica, I. Agentix: An efficient serving engine for LLM
+agents as general programs. In 23rd USENIX Sympo-
+sium on Networked Systems Design and Implementation
+(NSDI 26), pp. 2443–2459. USENIX Association, 2026.
+URL https://www.usenix.org/conference/
+nsdi26/presentation/luo.
+Ma, B., Eitzinger, J., and K¨ostler, H. Leyline: KV cache
+directives for agentic inference, 2026. URL https://
+arxiv.org/abs/2606.01065. arXiv:2606.01065.
+Qin, R., Li, Z., He, W., Cui, J., Ren, F., Zhang, M.,
+Wu, Y., Zheng, W., and Xu, X.
+Mooncake: Trad-
+ing more storage for less computation—a KVCache-
+centric architecture for serving LLM chatbot. In 23rd
+USENIX Conference on File and Storage Technologies
+(FAST 25), pp. 155–170. USENIX Association, 2025.
+URL https://www.usenix.org/conference/
+fast25/presentation/qin.
+Rana, M., Man, C., Msiiwa, A. E., Paine, J., Zhu, K., Dev,
+S., Sharma, V., and R, A. M. AgentChangeBench: A
+multi-dimensional evaluation framework for goal-shift
+robustness in conversational AI, 2025. URL https://
+arxiv.org/abs/2510.18170. arXiv:2510.18170;
+NeurIPS 2025 Workshop on Multi-Turn Interactions in
+Large Language Models.
+Wu, B., Zhong, Y., Zhang, Z., Liu, S., Liu, F., Sun,
+Y., Huang, G., Liu, X., and Jin, X.
+FastServe:
+Iteration-level preemptive scheduling for large lan-
+guage model inference.
+In 23rd USENIX Sympo-
+sium on Networked Systems Design and Implementa-
+tion (NSDI 26), pp. 57–74. USENIX Association, 2026.
+URL https://www.usenix.org/conference/
+nsdi26/presentation/wu-bingyang.
+Wu, T.-H., Miroyan, M., Chan, D. M., Darrell, T., Norouzi,
+N., and Gonzalez, J. E. Are large reasoning models inter-
+ruptible?, 2025. URL https://arxiv.org/abs/
+2510.11713. Accepted at ICML 2026.
+Yu, L., Lin, J., and Li, J.
+Stateful large language
+model serving with Pensieve.
+In Proceedings of the
+Twentieth European Conference on Computer Systems,
+pp. 144–158. ACM, 2025.
+doi:
+10.1145/3689031.
+3696086.
+URL https://doi.org/10.1145/
+3689031.3696086.
+Zhai, Z., Li, M., and Wang, X.
+Revisable by de-
+sign:
+A theory of streaming LLM agent execution,
+2026.
+URL https://arxiv.org/abs/2604.
+23283. arXiv:2604.23283.
+Zhang, G. and Yang, H. Aborted but not forgotten: KV-
+cache retention breaks rollback consistency in language
+agents, 2026.
+URL https://arxiv.org/abs/
+2608.15939. arXiv:2608.15939.
+Zheng, L., Yin, L., Xie, Z., Sun, C., Huang, J., Yu, C. H.,
+Cao, S., Kozyrakis, C., Stoica, I., Gonzalez, J. E., Barrett,
+C., and Sheng, Y. SGLang: Efficient execution of struc-
+tured language model programs. In Advances in Neural
+Information Processing Systems 37, pp. 62557–62583,
+2024. doi: 10.52202/079017-2000.
+Zou, H. P., Miao, C., Huang, W.-C., Chen, Y., Zhou, Y.,
+Zhang, H., Wu, Y., Fang, L., Gu, Z., Zhang, Z., Zheng,
+K., Wang, F., Nian, Y., Li, S., Fan, W., He, L., Zhang,
+W., Liu, X., and Yu, P. S.
+When users change their
+mind: Evaluating interruptible agents in long-horizon
+web navigation, 2026. URL https://arxiv.org/
+abs/2604.00892. arXiv:2604.00892.
+
+
+Serving a Revisable World
+A
+METHODOLOGY AND SUPPLEMENTARY
+EVIDENCE
+The appendix records the information needed to interpret
+and reproduce the main results.
+A.1
+Scope, Contract, and Integration
+The agent runtime resolves why an interruption occurred;
+serving receives one version transition. Table 7 maps rep-
+resentative runtime replacement decisions to that serving
+event.
+Table 7. Interruption sources at the agent/serving boundary.
+Source
+Serving transition
+User steering
+Replace execution under revised goals or con-
+text
+Tool or service
+Invalidate work dependent on a failed or expired
+call
+Environment
+Replace work derived from a stale observation
+Validation and
+control
+Retire rejected output and dependent state
+Planning and
+concurrency
+Retire abandoned or losing branches as one
+scope
+Resource and
+operation
+Restart or migrate execution under a new policy
+For scope s, the runtime supplies revised context X′
+and advances a monotonic epoch.
+Every request, out-
+put, KV block, transfer, and worker operation carries
+(tenant, s, epoch, generation). The checker requires: cur-
+rent epoch at publication; writer closure and matching gener-
+ation before inheritance; complete participant agreement for
+distributed transitions; and isolation of retired completions.
+It records the authority linearization point (ADVANCE),
+last old launch and writer receipts (FENCE), certified to-
+ken and block ranges (ALIGN), first successor publication
+(RESUME), and released pins (RECLAIM).
+In the vLLM implementation, EngineCore propagates the
+tag through scheduling, worker metadata, attention, KV in-
+stallation, and API output. Long prefills poll at bounded
+model boundaries; tensor-parallel participants retire collec-
+tively. ALIGN intersects the logical common prefix with
+writer frontiers, fingerprints, generations, tenants, numeri-
+cal mode, and KV-group block boundaries. The successor
+aliases certified physical blocks and allocates its changed
+suffix under a fresh generation. DRAM objects use the same
+identity and digest checks.
+A.1.1
+Coverage of prior systems
+Table 8 locates prior mechanisms in the transition. A filled
+circle is their primary locus; an open circle is a capability
+consumed at that stage.
+A.2
+Workloads and Reproducibility
+Single-GPU experiments use H100 PCIe and GB200 sys-
+tems with CUDA 13.1. Unless stated otherwise, results are
+paired trials summarized by medians; speedups are com-
+puted before display rounding. Correctness trials compare
+the authoritative successor with a clean execution under the
+declared numerical mode. Timing begins at the version-
+switch signal and ends at the named successor event; identi-
+cal churn or arrival schedules are replayed across arms.
+A.2.1
+Recorded agent trace
+The extractor identifies a transition when turn aborted
+is followed by task started in the same thread within
+one hour. A fixed one-month trace contains 751 transitions
+across 345 scopes. Its densest 120-second window has 24
+transitions across three scopes and three eight-transition
+bursts (inter-arrival coefficient of variation 3.568). Replay
+preserves these times and uses an 8192-token controlled
+state with zero prefix overlap, so this experiment isolates
+repeated retirement from cache reuse.
+Table 9. Recorded-trace replay; medians of three trials.
+Path
+Quantum Goodput Obsolete
+(tokens) (token/s)
+tokens
+Native abort
+1024
+9.77
+40,499
+Native abort
+8192
+8.18
+40,123
+Always armed
+4096
+54.6
+0
+Selective guards
+1024
+54.5
+0
+Selective guards
+8192
+54.0
+0
+Rate-only selector
+8192
+53.9
+0
+Both native configurations hit the 180-second cleanup limit
+and allow 3/9 final versions to publish. Every versioned con-
+figuration completes cleanup, advances 9/9 final versions,
+and publishes zero obsolete tokens.
+A.2.2
+Revision-rate matrix
+The supplementary sweep crosses revision rates 0, 0.05, and
+0.2 per scope per second with concurrencies 4 and 8, five
+execution policies, and three repetitions per cell (108 audited
+points). The current-goodput-optimal native quantum is
+8192 tokens at zero and moderate revision pressure, but
+moves to 1024 at rate 0.2 for both concurrencies. The rate-
+only selector follows this direction, characterizing how the
+preferred quantum changes with revision pressure.
+A.3
+Correctness Closure
+Integrated
+long-prefill,
+draft–verify
+prefill,
+active
+speculative-decode, and heterogeneous-KV-group trials
+publish zero predecessor output and match their clean
+successors.
+ALIGN crosses five prompt seeds with
+
+
+Serving a Revisable World
+Table 8. Existing mechanisms and version-transition stages. •: primary locus; ◦: consumed capability.
+Line of work
+Upstream
+Advance
+Fence
+Align
+Resume
+Reclaim
+Behavioral interruption and stop enforcement (Wu et al., 2025; Rana
+et al., 2025; Zou et al., 2026; Zhai et al., 2026; Khan, 2026)
+•
+◦
+–
+–
+–
+–
+Agent and preemptive scheduling (Wu et al., 2026; Luo et al., 2026)
+◦
+–
+•
+–
+•
+◦
+Intercept-aware serving (Abhyankar et al., 2024)
+◦
+–
+•
+◦
+•
+◦
+KV paging and prefix sharing (Kwon et al., 2023; Zheng et al., 2024)
+–
+–
+–
+•
+•
+◦
+Stateful caching and tiered restoration (Gao et al., 2024; Yu et al., 2025;
+Gao et al., 2025; Qin et al., 2025; Ma et al., 2026)
+–
+–
+◦
+•
+•
+•
+Rollback-consistent KV retention (Zhang & Yang, 2026)
+◦
+◦
+•
+•
+◦
+–
+RETIRE versioned execution
+◦
+•
+•
+•
+•
+•
+LCPs of 4080 and 4095 tokens, yielding ten seed–LCP
+configurations. Each configuration has three arms—cold,
+clean-prefix,
+and
+completed-predecessor—with
+two
+repetitions per arm:
+60 successor measurements per
+execution mode, or 120 across ordinary and batch-invariant
+modes. Clean-prefix and completed-predecessor sources
+produce identical outputs in all ten configurations in both
+modes. Batch-invariant execution additionally makes cold
+and reuse chosen-token log probabilities identical.
+A positive page-fault control retains block IDs and cache
+counts while zeroing adopted GPU pages. It changes output
+in 3/3 trials; restoring the certified bytes recovers exact
+output in 3/3. This separates physical-state dependence
+from batch-dependent floating-point variation.
+Distributed
+retirement
+reconstructs
+the
+complete
+TP×PP×KV-group participant set. All 15 retirement trials
+publish zero obsolete output and match clean oracles; all
+15 inheritance trials adopt the same 4080-token physical
+prefix and match mode-matched references. In three TP=4
+co-tenant seeds, superseding Tenant A leaves Tenant B’s
+KV digest and block IDs unchanged. Tenant B’s median
+runtime and cross-interrupt frame gap change by 1.0% and
+1.8%, respectively.
+Bounded retention and quota fallback.
+Pins are ac-
+counted for by tenant and released after successor adoption
+is verified; successor references then keep the shared pages
+live. Both three-seed isolation campaigns also exercise a
+zero-block pin quota. Every case selects cold recovery with
+zero inherited tokens, matches its clean successor, publishes
+no obsolete output, and safely reclaims the predecessor.
+A.4
+Supplementary Performance Results
+Table 10 reports the complete integrated retirement matrix.
+The H100 runs use an 8192-token prompt, a 4096-token
+active unit, and a 5-ms injection delay. Qwen3-32B uses
+BF16; the speculative arm enables three n-gram draft tokens,
+and GPT-OSS-20B supplies sliding and full-attention KV
+groups.
+Table 10. Integrated retirement results.
+Path
+Pairs FENCE Int.-to-succ.
+Long prefill
+3
+24.9×
+1.48×
+Draft–verify prefill
+3
+51.3×
+1.42×
+Active spec. decode
+5
+9.99×
+1.12×
+Two KV groups
+3
+7.01×
+1.22×
+The no-revision campaign uses six loaded burn-in groups,
+two warmups, and ten paired groups per arm. Selective
+arming reduces the earlier always-armed decode overhead
+from 5.25% to 1.05% and safe points from 35,190 to 1,080.
+Table 11. Selective-path no-revision cost; paired 95% bootstrap
+intervals.
+Workload
+Change
+95% interval
+1K prefill, concurrency 1
++0.140%
+[−3.27, +4.76]%
+4K prefill, concurrency 1
++0.697%
+[+0.198, +1.46]%
+128-token decode, concurrency 1
++1.05%
+[+0.873, +1.34]%
+Mixed, concurrency 8
+−0.646% [−1.74, +0.381]%
+KV recovery and tiering.
+The strong-baseline control
+uses a fully computed 4096-token shared prefix, zero pres-
+sure, immediate successor submission, and tuned native can-
+cellation with prefix caching. Five trials at each of three in-
+terruption offsets produce 45 accepted executions per GPU.
+Native caching and versioned retention both reuse exactly
+4096 tokens; versioned execution adds 1–2% latency across
+H100 PCIe and GB200.
+The pressure campaign uses an 8192-token predecessor, a
+block-aligned 7168-token common prefix, and four paired
+trials at each pressure point. Each quartet runs native cold
+restart, native abort with prefix caching, versioned HBM
+retention, and capacity-returning DRAM offload under iden-
+tical concurrent churn. Table 12 reports both successor
+recovery and the full interruption interval. Recovery begins
+when the churn phase completes; the full interval begins at
+the version switch. Speedups use the corresponding native-
+prefix execution in the same trial.
+
+
+Serving a Revisable World
+Table 12. State-handoff policy under HBM churn; medians of four paired quartets. Recovery and full-interval speedups are relative to
+native abort with prefix caching.
+GPU
+Churn
+Native prefix
+Recovery speedup
+Full-interval speedup
+retained
+HBM
+DRAM
+HBM
+DRAM
+H100 PCIe
+0.50×
+7168
+0.998×
+0.798×
+1.001×
+0.948×
+H100 PCIe
+0.75×
+6560
+1.58×
+0.786×
+1.015×
+0.927×
+H100 PCIe
+0.80×
+6560
+1.59×
+0.699×
+1.021×
+0.942×
+H100 PCIe
+0.85×
+2464
+4.82×
+2.29×
+1.139×
+1.061×
+H100 PCIe
+0.90×
+2464
+4.93×
+2.31×
+1.147×
+1.067×
+H100 PCIe
+0.95×
+0
+6.87×
+3.27×
+1.190×
+1.118×
+H100 PCIe
+1.00×
+0
+6.51×
+3.84×
+1.176×
+1.117×
+H100 PCIe
+1.05×
+0
+6.79×
+3.25×
+1.189×
+1.121×
+H100 PCIe
+1.10×
+0
+6.79×
+3.23×
+1.172×
+1.113×
+GB200
+0.50×
+7168
+0.993×
+0.500×
+0.999×
+0.985×
+GB200
+0.75×
+7168
+0.986×
+0.532×
+1.000×
+0.990×
+GB200
+0.80×
+7168
+0.989×
+0.521×
+0.996×
+0.989×
+GB200
+0.85×
+7168
+0.991×
+0.500×
+1.000×
+0.988×
+GB200
+0.90×
+7168
+0.990×
+0.518×
+1.000×
+0.991×
+GB200
+0.95×
+7168
+0.988×
+0.517×
+1.000×
+0.994×
+GB200
+1.00×
+0
+5.06×
+2.65×
+1.019×
+1.011×
+GB200
+1.05×
+0
+5.07×
+2.75×
+1.018×
+1.012×
+GB200
+1.10×
+0
+5.05×
+2.67×
+1.017×
+1.011×
+All 288 executions produce identical greedy successor to-
+kens. HBM retention and DRAM offload recover the com-
+plete 7168-token prefix in every trial. The offload path re-
+turns all 512 predecessor blocks to the allocator; churn over-
+writes their former slots, after which restoration allocates
+and conditionally publishes the 448 certified blocks under
+the successor’s generation. Median D2H/H2D times span
+221–273/270–308 ms on H100 PCIe and 95.7–117/126–
+147 ms on GB200. Integrity, generation, ownership, and
+physical remapping checks pass in every trial.
+Distributed timing.
+The three five-pair TP×PP cam-
+paigns use a 16,384-token retirement prompt and a 4080-
+token aligned inherited prefix.
+For 2×1, 4×1, and
+2×2, baseline/RETIRE FENCE medians are 2638.7/216.5,
+1381.2/130.6, and 2680.0/443.6 ms.
+Corresponding
+pinned/cold inherited TTFTs are 44.8/258.7, 27.9/146.9,
+and 35.3/249.7 ms.
+The accompanying artifact contains the implementation,
+trace and workload generators, paired-run harnesses, con-
+tract checker, normalized summaries, and machine-readable
+measurements used in the paper.
