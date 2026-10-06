@@ -1,0 +1,527 @@
+Title: EdgeAgent: Orchestrating On-Device LLM inference for End-User Multi-Agent Systems on CPU-GPU Unified Memory Architectures
+
+URL Source: https://arxiv.org/pdf/2610.03394v1
+
+Published Time: Mon, 05 Oct 2026 01:21:30 GMT
+
+Number of Pages: 15
+
+Markdown Content:
+# EdgeAgent: Orchestrating On-Device LLM inference for End-User Multi-Agent Systems on CPU-GPU Unified Memory Architectures 
+
+## Yuhai Long 
+
+longyh27@mail2.sysu.edu.cn Sun Yat-sen University School of Computer Science and Engineering Guangzhou, China 
+
+## Yuanxin Wei 
+
+weiyx25@mail2.sysu.edu.cn Sun Yat-sen University School of Computer Science and Engineering Guangzhou, China 
+
+## Kai Wu 
+
+wukai6@cmic.chinamobile.com China Mobile Internet Company Ltd. Guangzhou, China 
+
+## Jinhui Wei 
+
+weijh28@mail2.sysu.edu.cn Sun Yat-sen University School of Computer Science and Engineering Guangzhou, China 
+
+## Dan Huang 
+
+huangd79@mail.sysu.edu.cn Sun Yat-sen University School of Computer Science and Engineering Guangzhou, China 
+
+## Jiangsu Du ∗
+
+dujiangsu@mail.sysu.edu.cn Sun Yat-sen University School of Computer Science and Engineering Guangzhou, China 
+
+## Abstract 
+
+Emerging multi-agent LLMs demand privacy-preserving edge deployment, yet current inference systems struggle with these collaborative workflows. Specifically, the memory-bound decode phase causes severe bus contention on unified memory architectures (UMA), paralyzing naive CPU-GPU co-execution. Furthermore, speculative decoding in multi-agent workloads faces extreme variance in drafting difficulty, al-ternating between complex reasoning and predictable struc-tured generation. Compounded by frequent tool-induced stalls, this highly fragmented execution severely underuti-lizes hardware and defeats traditional static batching. We present EdgeAgent, a cross-layer inference system explicitly co-designed for edge UMA and multi-agent work-loads. At the micro-architectural level, it bypasses rigid graph-compiler constraints to enable zero-copy UMA-aware tensor parallelism, utilizing asymmetric memory layouts to fully saturate both CPU and GPU compute units. At the sched-uling level, it dynamically allocates draft budgets based on real-time sequence predictability to bound bandwidth waste. Concurrently, an asynchronous suspend-and-yield mech-anism actively evicts stalled agents, ensuring continuous hardware saturation during unpredictable tool invocations. 
+
+> ∗
+
+Corresponding author. 
+
+This work is licensed under a Creative Commons Attribution 4.0 Interna-tional License. 
+
+ASPLOS ’27, Heraklion, Greece 
+
+© 2027 Copyright held by the owner/author(s). ACM ISBN 979-8-4007-3012-2/2027/04 
+
+https://doi.org/10.1145/3845814.3850072 
+
+Extensive evaluations on an Apple M4 SoC demonstrate that the UMA-aware execution alone contributes a 1.29× speedup over batched speculative decoding. Adding the agent-aware scheduling lifts the full EdgeAgent system to a 1.77× speedup under extreme tool-use latencies. 
+
+CCS Concepts: • Computer systems organization →
+
+Heterogeneous (hybrid) systems ; • Software and its en-gineering → Scheduling ; • Computing methodologies 
+
+→ Multi-agent systems .
+
+Keywords: On-device LLM inference, Multi-agent systems, Unified memory architectures, Speculative decoding 
+
+ACM Reference Format: 
+
+Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du. 2027. EdgeAgent: Orchestrating On-Device LLM inference for End-User Multi-Agent Systems on CPU-GPU Unified Mem-ory Architectures. In Proceedings of the 32nd ACM International Conference on Architectural Support for Programming Languages and Operating Systems, Volume 1 (ASPLOS ’27), April 11–15, 2027, Heraklion, Greece. ACM, New York, NY, USA, 15 pages. https: //doi.org/10.1145/3845814.3850072 
+
+## 1 Introduction 
+
+The application of large language models [8, 11, 14] (LLMs) is increasingly shifting from monolithic chat interfaces to-ward coordinated multi-agent systems. In recent agent frame-works, such as LangGraph [18] and OpenClaw [29], a com-mon design choice is to decompose complex tasks into spe-cialized roles and coordinate them through explicit orches-tration mechanisms. With the enhanced capability of multi-agent systems, they start to take over more system access privileges, raising growing privacy and security concerns. arXiv:2610.03394v1 [cs.DC] 2 Oct 2026 ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 
+
+This trend makes on-device LLM inference deployment in-creasingly important. However, existing LLM inference sys-tems can hardly handle such multi-agent workloads on end-user devices efficiently. Most existing LLM inference systems [17, 30, 41] are pri-marily designed for cloud environments and multi-user work-loads. These systems process hundreds of concurrent re-quests across multiple discrete GPUs, targeting high-through-put batching and multi-tenant isolation. Lacking awareness of fine-grained, intra-node memory contention, their hard-ware and workload assumptions render them highly inef-ficient when ported directly to edge devices. Conversely, existing edge frameworks (e.g., Llama.cpp [14], MLX [4]) pri-marily target single-user, single-request sequential inference. When confronted with collaborative multi-agent workloads which dynamically generate concurrent, highly fragmented requests on a single device, these monolithic edge systems lack the necessary orchestration, leaving available compute resources severely underutilized. The more balanced CPU-GPU computing capability on modern edge devices enables effective use of tensor paral-lelism (TP) to coordinate heterogeneous execution and fully utilize on-chip compute resources [10, 16, 23, 37, 38]. Modern edge systems-on-chip (SoCs) typically integrate powerful mobile GPUs and highly capable CPUs with advanced matrix extensions, such as ARMv9 Scalable Matrix Extension [5] (SME) in the Apple M4 [3], forming a well-proportioned het-erogeneous computing platform. TP [28], as a mainstream model parallelism technique, partitions LLM workloads (e.g., matrix multiplications) across multiple devices, making it suitable for distributing computation between CPUs and GPUs to speed up inference. During the compute-bound prefill phase, heterogeneous TP can fully exploit aggregated floating-point throughput by engaging both processing units simultaneously. However, during the decode phase, such CPU-GPU parallelism brings little performance gain under the shared unified memory architecture (UMA), since the de-coding process is inherently memory-intensive and severely bounded by memory bandwidth. To mitigate the memory bound in the decode phase, recent systems improve arithmetic intensity through speculative de-coding (SD) [9, 21]. SD decouples generation into two stages: a lightweight draft model first proposes multiple candidate tokens, and the target model then verifies them in parallel, accepting the longest matching prefix. By amortizing target-model weight loading across multiple token verifications, SD reduces per-token bandwidth pressure and improves decode throughput. However, integrating these hardware-aware optimizations for multi-agent workflows into existing graph-based edge frameworks, such as MLX, exposes three critical systemic bottlenecks. First, implementing CPU-GPU lock-free TP on shared memory exposes the limitations of modern graph compilers [2, 19]. Standard directed acyclic graph (DAG) executors cannot safely express asynchronous, orthogonal memory mutations to a single shared tensor, forcing run-times into eager synchronization which severely disrupts the graph optimization pipeline and explicit memory copies that negate the zero-copy benefits of UMA. Second, differ-ent agent tasks exhibit extreme variance in the difficulty of drafting (e.g., highly structured code synthesis vs. deliberate reasoning). As this drafting difficulty is related to the real-time context, traditional SD systems allocate a static draft length uniformly across all tasks. This inevitably results in the waste of limited memory bandwidth, which is frequently used to process rejected drafts. Third, agents frequently ex-ecute external tool calls [25, 40] that incur out-of-system stall. When an agent stalls on a tool call, the runtime can-not dynamically redistribute its idle speculative budget to remaining active agents, failing to fully exploit the available compute capacity and degrading overall system performance on edge devices. To address these challenges, we propose EdgeAgent, a co-designed inference system explicitly tailored for edge UMA and concurrent multi-agent workflows. EdgeAgent adopts a cross-layer architecture featuring an agent-aware scheduling layer, which tightly couples real-time agent states and task predictability directly with the underlying UMA-aware execution layer. In summary, this paper makes the following contributions: 
+
+• We design a UMA-aware execution layer with a zero-copy TP graph that adopts symmetric memory layouts to elim-inate compiler overhead, together with optimized SME micro-kernels to jointly saturate heterogeneous edge com-pute units. 
+
+• We design an agent-aware scheduling layer that dynami-cally allocates draft budgets based on real-time drafting dif-ficulty, and employs an in-place suspend-and-yield mech-anism to instantly reclaim computation slots during tool-induced stalls. 
+
+• We implement and evaluate EdgeAgent on modern edge architectures using trace-driven, concurrent multi-agent workflows. Experimental results demonstrate that our sys-tem delivers substantial improvements in both global con-current throughput and end-to-end task makespan com-pared to state-of-the-practice inference frameworks. 
+
+## 2 Background and motivation 
+
+2.1 LLM Inference Process 
+
+As illustrated in Figure 1, LLM inference proceeds in an au-toregressive manner, generating tokens sequentially until an end-of-sequence (EoS) token is reached. To improve ef-ficiency, the key and value representations from previous steps are cached in memory (i.e., the KV cache), allowing subsequent steps to avoid recomputing them. Based on this mechanism, the inference process can be divided into two stages: prefill and decode. The prefill stage processes the EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yo u are an agent that uses tool prompt that uses tool Transformer Model kv cache Compute-Bound Memory-Bound decode prefill 
+
+Figure 1. LLM autoregressive decoding process. Task Dispatch Reasoning Structured Output Tool Execution (Blocked)         
+
+> Orchestrator Worker1
+> Planning glob block(network) Results Return code gen reasoning summary
+> Time
+> request
+> grep read bash bash bash grep bash fetch summary Worker2 Worker3 fetch explored read read
+
+Figure 2. Multi-Agent workload. input prompt and constructs the initial KV cache. Since the prompt usually contains multiple tokens, this stage exhibits substantial parallelism. In contrast, during the decode stage, the model generates one token at a time. Each step consumes the existing KV cache, produces a new token, and appends the corresponding KV entries. In end-user settings, infer-ence is typically performed on a single request, where each decoding step processes only one token. As a result, the de-code stage becomes largely memory-bandwidth-bound, lim-iting hardware utilization. Furthermore, because decoding proceeds token by token, it often constitutes the dominant portion of the overall inference latency. 
+
+2.2 Multi-Agent Inference Workloads 
+
+Unlike traditional LLM applications functioning as chatbots for sequential queries, the adoption of LLMs is rapidly shift-ing to a collaborative, multi-agent system. This shift starts from ReAct [40], which integrates LLM’s internal reasoning with external tools to solve complex tasks. In such a para-digm, completing a single user request requires coordination among multiple specialized agents, each exhibiting different workload characteristics, as illustrated in Figure 2. For in-stance, an Orchestrator agent serves as the central planner, processing extensive historical contexts to formulate strate-gies via complex reasoning. As these open-ended reasoning traces lack rigid structures, they are difficult to draft specula-tively. In contrast, Worker agents handle concrete execution by translating these plans into structured executable code or rigid tool-use instructions. Driven by fixed syntactic tem-plates, their outputs are highly structured and consequently much easier to draft. Moreover, as Worker agents must wait for responses from external tools (e.g., executing scripts or querying APIs), they 1 2 4 6 8 12 16 24 32 48 64  
+
+> Draft Length L
+> 1.0 1.2 1.4 1.6
+> Speedup
+> 1.10× 1.69×
+> Reasoning Task Structured Output Task τ (dashed) 1234
+> Accepted Tokens (τ)
+
+Figure 3. Task-dependent non-linear speedup of speculative decoding on edge UMA: accepted tokens ( 𝜏 ) increase sub-linearly with draft length 𝐿 , while the end-to-end speedup increases first and then degrades due to rejection overhead. incur severe execution stalls. Ultimately, the multi-agent workload exposes the inference engine to a highly frag-mented execution mode, characterized by significant dif-ferences in drafting difficulty and unpredictable temporal blocking. This fundamentally differs from the assumption of continuous, homogeneous processing in traditional LLM serving [17, 41], posing challenges for efficient execution of inference systems. 
+
+2.3 Speculative Decoding 
+
+To mitigate the memory bandwidth bottleneck of autore-gressive generation, speculative decoding (SD) decouples inference into a lightweight drafting phase and a parallel verification phase. In this paradigm, a small draft model predicts candidate token sequences that the massive target model subsequently verifies in a single forward pass. This design effectively amortizes the high memory latency associ-ated with loading target model weights from main memory, as the memory-intensive target model is invoked only once per draft batch rather than sequentially for each token. However, the speedup achieved by SD scales non-linearly with draft length 𝐿 , and this pattern varies significantly across different tasks. As illustrated in Figure 3, we con-duct a pre-experiment on an Apple M4 SoC, deploying the DeepSeek-R1-Distill-Llama-8B model. We evaluate the accel-eration profiles across two highly contrasting multi-agent workloads: deliberate reasoning (sampled from LongBench [7]) and highly predictable structured generation (sampled from MBPP [6]). Empirically, the speedup initially surges as mem-ory traffic is amortized across more accepted tokens. The ac-cepted token rate 𝜏 increases sub-linearly with 𝐿 , and the end-to-end speedup peaks at 𝐿 = 16 with a maximum speedup of 1.69 × on the Structured Output Task. Beyond this optimal length, the speedup diminishes rapidly and even degrades, driven by the surging probability of consecutive draft rejec-tions. Critically, this non-linear behavior is task-dependent. Tasks with low drafting difficulty (e.g., structured output generation) tolerate longer draft lengths and achieve higher ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 
+
+Table 1. Memory wall on Apple M4 UMA for a uniform read payload: CPU–GPU co-run speedup diminishes as the matrix scales.                                             
+
+> Matrix ( 𝐾 ×𝑁 )Bandwidth (GB/s) Speedup CPU GPU Co-run vs CPU vs GPU
+> 4096 ×4096 66.1 54.3 73.9 1.12 ×1.36 ×
+> 4096 ×14336 68.9 80.3 91.3 1.32 ×1.14 ×
+> 14336 ×4096 68.8 80.6 90.8 1.32 ×1.13 ×
+> 4096 ×28672 71.5 88.9 93.4 1.31 ×1.05 ×
+> 4096 ×128256 72.0 96.7 95.4 1.32 ×0.99 ×
+
+peak speedups, while hard reasoning tasks experience dimin-ishing returns at shorter 𝐿 due to frequent token rejections. This implies that different sub-agents require distinct opti-mal draft lengths to maximize acceleration, as their drafting difficulties and token predictability vary significantly. Unfortunately, existing SD frameworks enforce a uniform draft length across all requests within a batch to simplify ker-nel execution, which further leads to resource misallocation. Driven by the significant differences in drafting difficulty across various multi-agent tasks (§2.2), this one-size-fits-all budget allocation brings two critical issues. On one hand, gen-erating deep drafts for hard-to-draft reasoning tasks wastes shared memory bandwidth, as many candidate tokens are ul-timately rejected. On the other hand, batch-level constraints truncate highly predictable tool instruction generation, lim-iting their maximum theoretical token-acceptance rates. 
+
+2.4 The Edge UMA Memory Wall 
+
+Modern SoCs (e.g., Apple M4, Snapdragon X [31]) feature unified memory architectures (UMA) and advanced tensor extensions. By abandoning discrete topologies, UMA allows the CPU and GPU to share a single physical memory pool and bus interface. Simultaneously, equipped with extensions like ARMv9 SME, modern CPUs now rival mobile GPUs in dense computation, even outperforming them at small batch sizes. Though this convergence supports zero-copy sharing of model weights across heterogeneous cores, it triggers memory contention. Specifically, during the prefill phase, high arithmetic intensity keeps the system compute-bound, allowing heterogeneous tensor parallelism (TP) to effectively aggregate compute power. However, in the decode phase, extremely small batch sizes shift the bottleneck entirely to memory bandwidth, fundamentally degrading the efficiency of hardware concurrency. As in Table 1, empirical micro-benchmarks on the Apple M4 SoC confirm the severe UMA bandwidth constraint. A strong scaling test shows that for small matrices, CPUs out-perform GPUs and the co-run achieves a speedup of 1 .36 ×
+
+over GPU on the 4096 × 4096 matrix. However, as the matrix size scales, GPUs approach the UMA’s effective bandwidth ceiling (utilizing over 80% of the 120 GB/s peak). Therefore, CPU-GPU co-run suffers from destructive bus arbitration, re-sulting in a speedup of 0 .99 × over GPU on the 4096 × 128256 matrix. This bandwidth wall explains why heterogeneous TP during the decode phase yields negligible end-to-end speedup, necessitating an agent-aware global co-scheduling paradigm to bypass the bottleneck. 
+
+2.5 Graph Compiler Limitations 
+
+Beyond the hardware memory wall, realizing fine-grained device coordination is obstructed by existing software in-frastructure. The modern deep learning ecosystem relies heavily on graph compilation as the foundational software for high-performance inference. This paradigm manifests through distinct paths across frameworks: PyTorch intro-duced ExecuTorch [27] for ahead-of-time (AOT) static graph serialization, whereas Apple’s native MLX defaults to global lazy evaluation to dynamically construct computation graphs at runtime. Despite these divergent implementations, both approaches transparently construct a global directed acyclic graph (DAG) of the program. Leveraging this intermediate representation, backend compilers can execute aggressive operator fusion and in-place memory lifecycle reuse, dras-tically reducing the framework overhead associated with per-operator scheduling. While graph compilation has achieved tremendous suc-cess in optimizing for standalone hardware backends, its underlying DAG abstraction exposes severe system-level lim-itations for fine-grained, heterogeneous TP across the CPU and GPU on edge devices. The core deficiency of modern graph compilers lies in their coarse, tensor-level dependency tracking, which inherently struggles to safely express the lock-free, concurrent mutation of a single shared physical buffer. Within edge UMA architectures, avoiding exorbitant memory copy overheads requires the CPU and GPU to per-form orthogonal writes to different offset regions of a con-tiguous memory block. However, because the DAG tracks data hazards strictly at a tensor-level granularity, it is seman-tically blind to these disjoint sub-tensor boundaries and flags these orthogonal writes as severe data conflicts. Unable to semantically guarantee the safety of such non-overlapping mutations, the state machine of the graph executor resorts to a conservative over-protection strategy. It forcibly inserts coherence hardware fences across device boundaries, com-pelling the local graph execution to fall back into an eager synchronization mode. This semantic gap within the DAG implementation induces severe interleaved blocking among heterogeneous instruction sequences, significantly diminish-ing the parallel speedups gained from underlying operator partitioning. 
+
+## 3 EdgeAgent Design and Implementation 
+
+As shown in Figure 4, EdgeAgent acts as a cross-layer infer-ence system that couples the multi-agent workflows with the EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Reasoning Coding  
+
+> I/O blocked Suspended Queue Scheduler (HAL) Draft Budget
+> latency draft length (M)
+> Weight Packing CPU GPU Profiling UMA-Aware Execution Layer
+> xw1 w2 **concat logical
+> out1 out2
+> UMA
+> Tool exec
+> budget size zero-copy TP engine Agent-Aware Scheduling Layer Reclaim offline
+
+Figure 4. The architecture overview of EdgeAgent hardware-level physical constraints of edge UMA. Instead of processing requests uniformly, EdgeAgent disaggregates each request’s resource scheduling from overall execution to prioritize resource allocation to demand-critical requests and improve overall resource utilization. The architecture is organized into two collaborative layers, i.e. execution layer and scheduling layer. The UMA-aware execution layer (Section 3.1) provides a unified heterogeneous backend to maximize hardware sat-uration via: (1) A zero-copy TP computation graph, which features asymmetric memory layouts for heterogeneous pro-cessors, plus custom DAG barriers that bypass compiler overheads to enable lock-free tensor parallelism (Section 3.1.1). (2) SME micro-kernel optimizations, which combine instruction-level pipelining, cache-aware tiling, and dynamic work-stealing to maximize CPU efficiency (Section 3.1.2) . The agent-aware scheduling layer (Section 3.2) employs a dynamic global scheduler to maintain optimal hardware saturation via two mechanisms. First, to maximize through-put with limited draft slots, it dynamically allocates budgets toward highly predictable sequences using the Historical Accepted Length (HAL) as an indicator of drafting diffi-culty (Section 3.2.1). Second, to mitigate tool-induced stalls, EdgeAgent employs a cooperative suspend-and-yield mech-anism to detect external tool calls and reclaim idle compute capacity for other active requests. By promptly decoupling stalled agents from the active batch pool and backfilling their execution slots with pending tasks, the scheduler keeps the hardware well utilized (Section 3.2.2). 
+
+3.1 UMA-Aware Execution Layer 3.1.1 Zero-Copy TP. We design a UMA-aware heteroge-neous computation graph that maximizes TP performance on edge devices through two key structural optimizations. First, to bridge the micro-architectural gap between processors, the graph enforces an asymmetric weight layout (Figure 5). GPU shards retain a standard linear layout for SIMT, while CPU GPU 
+
+> E-cores  P-cores
+
+SME SME L1 L1 L2 EU EU EU EU EU EU EU EU EU L1 L2 UMA Bandwidth: 120 GB/s UMA - LPDDR5X 
+
+> K64 N
+
+weights 
+
+> 128 2
+
+Figure 5. Asymmetric weight layouts in EdgeAgent for zero-copy heterogeneous TP on the Apple M4 SoC. CPU shards are pre-packed into 16×64 FP16 tiles to maximize SME utilization, while GPU shards retain a linear SIMT layout. CPU shards are offline pre-packed into 2D tiles for SME, sat-isfying the memory stride constraints of both units. Second, to eliminate memory copy overhead, we allow both devices to concurrently write their partial output results directly into a single shared physical buffer. 
+
+Model partitioning and weight residency. EdgeAgent partitions each transformer block with two patterns, both fixed at load time. (1) Every linear projection, including the MLP gate/up/down projections and the attention Q/K/V/O projections, is column-parallel along the output (N) dimen-sion. A weight matrix 𝑊 ∈ R𝐾 ×𝑁 is split along its N (output-column) dimension into 𝑊 𝑐𝑝𝑢 ∈ R𝐾 ×𝑛 and 𝑊 𝑔𝑝𝑢 ∈ R𝐾 × ( 𝑁 −𝑛 ) ,where 𝑛 = 𝛼 · 𝑁 and each layer’s split ratio 𝛼 is computed from its K/N dimensions to equalize CPU and GPU compute time. Both devices read the same activation from shared memory and write disjoint column ranges of one preallo-cated output buffer, so no cross-device reduction is ever needed. (2) The attention core is partitioned by heads: the GPU runs a fused SDPA over its head range while the CPU runs a grouped matmul over the remaining heads, with the per-head score/softmax/context computation entirely device-local. The two head-group contexts are then recombined by a single concat along the head axis before the column-parallel O projection. Weights are stored once: GPU shards keep their native SIMT layout, and only CPU shards are repacked offline at initialization into the SME 16 × 64 tile layout, af-ter which the temporary unpacked CPU copies are freed; ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 
+
+EdgeAgent therefore holds exactly one copy of the model weights (Figure 5). However, realizing this zero-copy, in-place mutation fun-damentally conflicts with the functional semantics of modern lazy computation graphs. In standard ML compilers, graph abstractions inherently conflate logical data dependence with physical memory materialization. Merging CPU and GPU sub-tensors strictly requires a concat operator, which is lowered into explicit memory allocations and copy kernels, thereby wasting the hardware benefits of UMA. Conversely, performing a naive in-place write into a shared buffer vio-lates the DAG’s tensor-level dependency tracking. Without explicit data-flow edges, the instruction scheduler cannot guarantee execution order, leading to severe data hazards (e.g., downstream operators reading stale data) unless penal-ized by conservative, eager synchronization. To safely merge CPU and GPU results without triggering memory copies or breaking data dependencies, we modify the graph execution via two lightweight mechanisms: (1) Log-ical Dependency Barrier: We replace the standard concat 
+
+operator with a custom barrier node. Logically, it acts as a synchronization point in the DAG, ensuring downstream operators wait for both processors to finish. Physically, it allocates zero memory, simply aliasing the output pointer to the underlying shared buffer. (2) Heterogeneous Fast Path: As the logical barrier handles the graph dependencies, we can execute this specific subgraph outside the framework’s generic scheduling loop. This dedicated fast path issues con-current tasks directly to the CPU and GPU without inserting conservative cross-device hardware fences, achieving a truly lock-free, zero-copy concurrent execution. 
+
+Coherence and memory-model assumptions. EdgeAgent does not introduce a new coherence protocol. It relies on the coherence already provided by the UMA SoC: the CPU and GPU share a single physical address space and are kept coherent through the system-level cache, so a write issued by either device to a shared buffer is visible to both devices without explicit cache flushes or host–device copies. This single coherence domain is exactly the property that the concat-based path in stock MLX discards, since concat ma-terializes a new contiguous array and copies both halves into it. Consistency, however, is weak rather than sequen-tial: Metal follows a weak, relaxed memory model, where cross-device visibility is not guaranteed without explicit syn-chronization. Our Heterogeneous Fast Path therefore estab-lishes only the producer–consumer happens-before relation the design actually needs. The MLP projections and the at-tention Q/K/V/O projections are all column-parallel, so the CPU and GPU write disjoint column ranges: no address is ever written by both devices, so there is no data race and no fine-grained per-line coherence is required. The Logical De-pendency Barrier encodes the remaining ordering as a graph dependency, a zero-copy node that aliases the shared buffer, so MLX’s lazy evaluation orders downstream operators after both producers finish, with no explicit hardware fences or eager synchronization. 
+
+3.1.2 SME Micro-kernel Optimization. Maximizing the efficiency of the CPU requires saturating the SME units. The system achieves this saturation through a tightly coupled hierarchy of micro-optimizations. At the single-core instruction level, we partition the matrix workloads into 16 × 64 micro-tiles. This specific dimension is purposefully chosen to simultaneously saturate the memory bandwidth using continuous multi-vector loads ( svld1_x4 )and to keep all four 2D ZA register tiles maximally occupied. By aggressively unrolling loops along the K dimension, the kernel physically overlaps these continuous memory loads with the outer-product accumulation. This software pipelin-ing effectively masks memory access latencies. To ensure these saturated compute pipelines are not abruptly starved by cache thrashing, we systematically tune the macro-tiling parameters. By strictly confining the active memory foot-print within the 8MB effective L2 working set, the system avoids sharp bandwidth degradation and maintains continu-ous data ingestion. However, scaling to full SoC utilization exposes load im-balance. The asymmetric multiprocessing (AMP) topology of modern edge chips, which mixes high-throughput P-cores with slower E-cores, as illustrated in Figure 5, inevitably in-duces straggler effects under traditional static task binding. To mitigate these straggler effects, we deploy a lock-free dy-namic work-stealing mechanism. Built entirely upon relaxed-consistency atomic operations, this decentralized queue al-lows heterogeneous worker threads to autonomously steal compute micro-tiles based on their real-time physical execu-tion rates. This achieves optimal fine-grained load balancing across the asymmetric hardware topology without ever in-curring lock contention overheads. 
+
+3.2 Agent-Aware Scheduling Layer 
+
+The scheduling layer acts as the bridge between multi-agent workflows and the physical hardware constraints. We first determine the optimal global drafting budget 𝑀 from hard-ware profiling results. As shown in Figure 6, the SME ma-trix multiplication kernel exhibits a strict stage performance behavior. Driven by 16 × 64 micro-tiles, the matmul per-formance scales in discrete jumps at batch size multiples of 16, with efficiency plateauing between these thresholds. Critically, beyond a draft length of 16, the performance de-grades sharply, establishing an upper bound for efficient batch processing. Furthermore, Figure 3 also validates this choice through end-to-end speculative decoding profiling. For high-acceptance-rate tasks (Structured Output Task), the maximum speedup of 1.69 × is achieved at a draft length of 16, after which performance begins to degrade due to rising EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece 0 20 40 60 80 100 120 
+
+M size 
+
+> 2000 4000 6000
+> Average time (us)
+> 1364us 2156us 3110us 4049us 4865us 5750us 6620us 7482us SME matmul ([M, 14336] * [14336, 4096])
+
+Figure 6. The stage performance of SME matmul. rejection overhead. Therefore, to align with the hardware effi-ciency of both CPU and GPU units, we set the global drafting budget to 𝑀 = 16 token slots. Given this fixed hardware-aligned capacity, the scheduling layer employs two dynamic mechanisms to maximize the utility of these slots. 
+
+3.2.1 Dynamic Drafting Budget Allocation. To reliably saturate these 16 hardware slots without forcing a single re-quest to over-expand its speculative tree (which suffers from diminishing returns in acceptance yield), the system pools multiple concurrent agents into a unified physical batch. However, uniformly dividing this fixed 16-token budget fails to account for the extreme variance in the difficulty of draft-ing across streams. Static allocation strategies inherently bottleneck parallel efficiency by over-provisioning execution slots to difficult tasks while under-resourcing highly produc-tive ones. To dynamically allocate draft length based on these runtime characteristics, we propose an agent-aware sched-uler . By introducing the Historical Accepted Length (HAL) as an objective proxy for the underlying drafting difficulty, this scheduler seamlessly captures the real-time generation state of each concurrent stream. The HAL tracks the absolute number of accepted tokens rather than the acceptance rate. Relying on percentages ob-scures an agent’s true throughput contribution, as a shallow draft tree might exhibit a perfect acceptance rate while yield-ing minimal tokens. HAL is therefore a lightweight heuristic rather than a globally optimal metric: it steers the fixed 
+
+𝐿 𝑡𝑜𝑡𝑎𝑙 = 16 slots toward agents that yield more accepted tokens per verification step. After the 𝑡 -th verification step, the scheduler applies an exponential moving average (EMA) to update the HAL for each active agent 𝑖 :
+
+𝐴 𝑖 (𝑡 ) = 𝛾 · 𝑘 𝑖 (𝑡 ) + ( 1 − 𝛾 ) · 𝐴 𝑖 (𝑡 − 1)
+
+where 𝑘 𝑖 (𝑡 ) represents the absolute count of accepted tokens in the current step. The decay factor 𝛾 dictates the respon-siveness to sudden shifts in drafting difficulty within the generative stream. In practice, we perform an exhaustive grid search over candidate hyperparameters using profiling data from heterogeneous multi-agent workloads. The decay factor 𝛾 = 0.3 and initial prior of 𝐴 𝑖 (0) = 4.0 are selected as the optimal combination that maximizes end-to-end system throughput, effectively balancing responsiveness to work-load variations and noise robustness. For the subsequent decoding step 𝑡 + 1, the scheduler must partition the global drafting budget 𝐿 𝑡𝑜𝑡𝑎𝑙 = 16 across 𝑁 
+
+concurrent agents. To structurally guarantee starvation-free forward progress, the system provisions a non-preemptible baseline capacity, 𝐿 𝑚𝑖𝑛 , for each agent. The residual budget is then dynamically allocated using a temperature-scaled softmax distribution over the agents’ HAL: 
+
+𝐿 𝑖 (𝑡 + 1) = 𝐿 𝑚𝑖𝑛 +
+
+$
+
+(𝐿 𝑡𝑜𝑡𝑎𝑙 − 𝑁 · 𝐿 𝑚𝑖𝑛 ) · exp (𝐴 𝑖 (𝑡 )/ 𝜏 )
+
+Í𝑁 𝑗 =1 exp (𝐴 𝑗 (𝑡 )/ 𝜏 )
+
+%
+
+This agent-aware control loop autonomously skews the draft length allocation toward high-yield agents. Consequently, it physically truncates the speculative draft trees of difficult-to-draft workloads, strictly bounding non-productive compute exploration and memory overheads based purely on em-pirical acceptance signals. Allocation is bounded on both sides by this formula. Because every agent reserves the non-preemptible 𝐿 𝑚𝑖𝑛 first, the softmax only distributes the resid-ual 𝐿 𝑡𝑜𝑡𝑎𝑙 − 𝑁 ∗ 𝐿 𝑚𝑖𝑛 , so even the highest-HAL agent cannot capture the full 𝐿 𝑡𝑜𝑡𝑎𝑙 = 16 budget. Because HAL is recom-puted through the EMA at every verification step, a transient burst cannot permanently lock out other agents. 
+
+3.2.2 Cooperative Suspend-and-Yield Mechanism. Ex-ternal tool invocations inevitably stall individual execution streams. In a strictly hardware-aligned concurrent batch, a stalled agent occupying active token slots will directly degrade global throughput. To explicitly neutralize these latencies, the agent-aware scheduling layer implements an OS-inspired cooperative suspend-and-yield mechanism tied directly to the speculative budgeting system. At the synchronization boundary of each verification step, the scheduler inspects agent execution states. Upon detecting a tool-induced stall, it triggers a cooperative yield, migrating the stalled agent to a suspended queue and instantly relin-quishing its allocated token slots back to the global drafting budget. Relinquishing these slots allows the dynamic alloca-tor (Section 3.2.1) to instantly redistribute the yielded budget across the remaining active agents. By absorbing the vacated budget, active streams dynamically expand their draft trees, broadening their speculative search space without breaking the optimal hardware-aligned 16-token threshold. Crucially, by exploiting the physically shared addressing of the UMA architecture, the system performs an in-place metadata freeze on the suspended agent’s KV cache. Upon resolution of the external tool execution, the scheduler pro-motes the ready agent back to the active queue to request fresh token slots. As the underlying memory pool guarantees in-place KV freezing and hardware-aware offset-remapping compaction, the awakened agent directly resumes specula-tive execution. This tightly integrated memory management ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 
+
+explicitly eliminates the need for expensive context re-prefill phases, achieving strictly zero-overhead state restoration. 
+
+## 4 Evaluation 
+
+EdgeAgent builds upon Apple’s native MLX runtime, funda-mentally restructuring its underlying C++ graph executor to enable zero-copy UMA memory management. Furthermore, it introduces lightweight cross-layer APIs to synchronize multi-agent execution states such as variance in drafting difficulty and tool-induced stalls with the underlying sched-uler. We comprehensively evaluate EdgeAgent using trace-driven multi-agent workflows to demonstrate its end-to-end makespan, concurrent throughput, and resilience to tool-induced execution stalls. 
+
+4.1 Experimental Setup Hardware Testbed. Primary experiments are conducted on an Apple M4 SoC equipped with 32 GB of unified memory and a 120 GB/s UMA bus. The SoC integrates a 10-core CPU (4 performance + 6 efficiency) with the ARMv9 SME2 ex-tension, alongside a 10-core GPU. To verify EdgeAgent’s generalization, the key ablations are additionally evaluated on an Apple M4 Pro SoC with 64 GB of unified memory and a 273 GB/s UMA bus, whose 14-core CPU (10 performance + 4 efficiency) and 20-core GPU shift the compute-to-bandwidth balance relative to the base M4. Since both SoCs share the SME2 extension, the M4 Pro isolates the effect of the band-width balance rather than the micro-kernel backend. To-gether they exemplify the stringent memory-bandwidth and computational constraints of modern edge AI environments. 
+
+Models. We evaluate our system using two represen-tative large language models: DeepSeek-R1-Distill-Llama-8B [12], a reasoning-focused model that exhibits severe draft-ing difficulty (yielding low acceptance rates) during its ex-tensive chain-of-thought (CoT) generation, and Llama-3.1-8B-Instruct [26] for standard instruction-following work-loads. For configurations involving speculative decoding, we uniformly adopt EAGLE-3 [21], a state-of-the-art draft gen-eration and verification framework. All models and tensor operations are executed in FP16 precision. 
+
+Datasets and Workloads. Lacking deterministic multi-agent benchmarks for rigorous micro-architectural evalua-tion, we construct a workload-representative trace synthe-sizer. We first sample real-world prompts to build a hetero-geneous workload pool across three distinct agent domains, whose profiling characteristics are summarized in Table 2: 
+
+• Reasoning Task (LongBench [7]): Features hard-to-draft logical reasoning, such as orchestrator making deci-sions and reading comprehension summaries. 
+
+• Structured Output Task (MBPP [6]): Comprises pro-gramming tasks that generate structured, highly predictable code sequences. 
+
+Table 2. Characteristics of the sampled tasks used to con-struct the steady-state workload pool. We profile the average prompt length and speculative acceptance length for each dataset under a fixed draft length of 𝐿 = 16.              
+
+> Dataset Avg Prompt Length Avg Accept Length ( 𝐿 =16 )LLaMA-3.1-8B DeepSeek-R1-8B
+> LongBench 3950 1.19 1.24 MBPP 36 2.67 6.33 ToolBench 114 2.81 4.98
+
+• Tool Execution Task (ToolBench [15]): Provides tool-use and API invocation prompts, representing the interac-tive behaviors of autonomous agents. To construct the synthetic trace, our workload generator applies three steps. First, we blend the sampled prompts in a 1:2:2 ratio (Reasoning : Code : Tool). This reflects the struc-ture of real agent systems, where a reasoning orchestrator is outnumbered by code- and tool-executing workers. It also avoids the degenerate reasoning-heavy regime: reasoning agents accept few tokens per verification step and there-fore take many steps, so a 1:1:1 mix ends in a long tail in which a single reasoning agent drains the queue alone, the speculative batch is under-filled, and no scheduling head-room remains for HAL to redistribute. Second, we inject log-uniform stochastic pauses into tool-use requests to sim-ulate API latencies. Finally, to evaluate realistic scheduling and makespan, requests are dispatched via a Poisson pro-cess with intra-agent delays; conversely, peak throughput measurements bypass these arrival delays to maintain con-tinuous system saturation. 
+
+Baselines. To systematically isolate our performance con-tributions, we evaluate EdgeAgent against three baseline configurations, all executed strictly on the GPU to represent standard state-of-the-practice deployments: 
+
+• Batch-AR: Vanilla non-speculative baselines for naive continuous batching. 
+
+• Seq-SD (EAGLE-3): State-of-the-art single-stream spec-ulative decoding. It establishes the isolated single-agent performance bound. 
+
+• Batch-SD (Batched EAGLE-3): The strongest concurrent baseline, utilizing GPU-bound continuous batching with a fixed per-request draft budget ( 𝐿 𝑖 = 16). It highlights two critical flaws of standard scheduling: computational waste from static draft lengths, and severe compute stalling during agent tool execution. 
+
+Metrics. We evaluate overall performance across two pri-mary dimensions: user-centric latency and system-centric throughput. To capture the actual user-perceived turnaround time, we first measure the end-to-end makespan, defined as the total wall-clock time required to complete the hybrid EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece 
+
+workload. Complementarily, the system throughput is mea-sured by global throughput, the aggregate token generation rate across all concurrent streams. 
+
+4.2 End-to-End Evaluation 
+
+To evaluate the overall makespan and global throughput of EdgeAgent, we construct a spectrum of concurrent work-loads. As illustrated in Figure 7, we progressively inject task heterogeneity and external tool-induced stalls to expose the scheduling bottlenecks of existing frameworks. This evalua-tion isolates the end-to-end efficiency of the system, while the specific micro-architectural mechanisms driving these re-sults are analyzed in the subsequent subsections (§4.3–§4.5). 
+
+Baseline Inference Performance. We first establish the baseline performance using a continuous, pure code-generation workload without tool-induced stalls (Figures 7(a) and 7(e)). At 𝑁 = 4, where 𝑁 denotes the number of actively decoding agents in the system, EdgeAgent achieves a global through-put of 33.6 tok/s (DeepSeek) and 28.0 tok/s (LLaMA). These metrics represent 1 .29 × speedups over the optimized Batch-SD baseline. This gain reflects our UMA-aware execution layer, which combines the optimized SME kernels with zero-copy TP, prior to enabling HAL scheduling and stall-aware context switching. 
+
+Component ablation. To isolate each contribution, we enable EdgeAgent’s optimizations incrementally on top of the Batch-SD baseline: first the optimized SME kernels, then zero-copy TP, and finally HAL scheduling, measuring the end-to-end makespan for 2, 3, and 4 concurrent agents on both the M4 and the M4 Pro (Figure 8). Each step reduces the makespan. Together, the optimized SME kernels and zero-copy TP constitute our UMA-aware execution layer, which achieves up to a 1 .29 × speedup over Batch-SD. Enabling HAL scheduling provides an additional 1 .05–1 .17 × improvement over the corresponding UMA-aware configuration. Offline packing is included in every bar and is small: 13–16 s on the M4 and 6.2 s on the M4 Pro, under 5% of the makespan. 
+
+Adaptability to Mixed Workload. To evaluate sched-uling efficiency under varying sequence predictability, we introduce a mixed workload combining reasoning and cod-ing tasks without tool-induced stalls (Figures 7(b) and 7(f)). While the overall throughput naturally decreases across all systems due to the hard-to-draft reasoning steps, a static draft-length allocation ( 𝐿 = 16) wastes compute resources generating and verifying unaccepted tokens during low-acceptance reasoning phases. By utilizing dynamic budgeting (§4.4), EdgeAgent mitigates this overhead and achieves a 1.33 × speedup over the Batch-SD baseline, demonstrating the efficiency of predictability-aware resource allocation. 
+
+Sensitivity to Workload Composition. To test whether the 1:2:2 default mix flatters our results, we sweep the rea-soning/code/tool ratio from 1:1:1 to 1:4:4 while holding the arrival process and concurrency settings fixed. HAL sched-uling improves on the fixed-budget baseline across the en-tire sweep, and its gain grows monotonically as the mix shifts toward structured code and tool generation (Figure 9). This is the expected direction: structured-output agents are highly predictable and a static 𝐿 = 16 budget caps the tokens they could otherwise accept, whereas extra budget spent on reasoning-heavy agents is largely wasted on rejected drafts. The 1:2:2 default therefore sits at an interior and conservative operating point of this curve, not a favorable peak. 
+
+Adaptability to Tool Stalls. Real-world agent workflows frequently stall during external tool invocations. To simulate this, we inject log-uniform tool-execution stall durations of 
+
+[1, 10 ] seconds and [1, 100 ] seconds into the mixed workload (Figures 7(c)-(d) and 7(g)-(h)). Under the extreme [1, 100 ]sstall configuration at 𝑁 = 4 (Figure 7d), head-of-line blocking in Batch-SD severely delays execution, inflating its makespan to 213.1 seconds (DeepSeek). In contrast, EdgeAgent lever-ages its asynchronous suspend-and-yield mechanism (§4.5) to evict stalled agents and reclaim verification slots. This effectively hides the stall, compressing the total makespan to just 120.6 seconds and delivering a 1.77 × speedup over the optimized Batch-SD baseline. 
+
+Overall Performance Scaling. Across the evaluated con-figurations, our UMA-aware execution layer, which com-bines the optimized SME kernels with zero-copy TP, achieves up to a 1 .29 × speedup over Batch-SD. The primary systemic gains emerge in stall-intensive environments, where the complete EdgeAgent system reaches a 1 .77 × speedup by combining UMA-aware execution, HAL scheduling, and stall-aware context switching. Furthermore, scaling concurrency from 𝑁 = 2 to 𝑁 = 4 consistently widens this margin, indicat-ing that the system effectively utilizes edge UMA resources under highly irregular execution patterns. 
+
+4.3 Evaluation on Tensor Parallelism 
+
+The foundational execution engine of EdgeAgent is built upon our architecture-aware heterogeneous tensor paral-lelism. This section systematically dissects how the frame-work maximizes the absolute compute capacity of the UMA architecture while mitigating the synchronization overhead typically associated with cross-device execution. We begin by quantifying the macroscopic throughput and latency improvements achieved during the compute-bound prefill phase. Following this, a rigorous latency decomposition demonstrates the elimination of tensor aggregation overhead via our zero-copy synchronization computation graph. The evaluation concludes by isolating the micro-architectural ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 2 3 40.0 0.5 1.0 1.3                
+
+> Speedup vs. Batch-SD  (a)
+> DeepSeek-R1-8B
+> Pure Code-Generation 2340.0 0.5 1.0 1.3
+> (b) Mixed, Stall = 0 2340.0 0.5 1.0 1.5
+> (c) Mixed, Stall ∈[1, 10] s 234012
+> (d) Mixed, Stall ∈[1, 100] s 234
+
+Number of Agents   
+
+> 0.0 0.5 1.0 1.3
+> Speedup vs. Batch-SD  (e)
+> LLaMA-3.1-8B
+> 234
+
+Number of Agents   
+
+> 0.0 0.5 1.0 1.3
+> (f)
+> 234
+
+Number of Agents   
+
+> 0.0 0.5 1.0 1.5
+> (g)
+> 234
+
+Number of Agents            
+
+> 012
+> (h) 23.5 28.7 33.6
+> 8.2 11.0 11.7
+> 7.2 10.3 10.6
+> 0510 tok/s
+> 6.5 9.6 10.0
+> 21.6 26.8 28.0
+> 8.6 11.7 12.3
+> 7.6 10.9 11.0
+> 0510 tok/s
+> 6.5 10.4 10.3
+> Seq-SD Batch-AR Batch-SD EdgeAgent EdgeAgent tok/s
+
+Figure 7. End-to-end evaluation of EdgeAgent against baselines under varying concurrency levels. The left axis (bars) shows the makespan speedup over Batch-SD, while the right axis (line) details the absolute global throughput of EdgeAgent. Top (a-d) and bottom (e-h) rows evaluate DeepSeek-R1-8B and LLaMA-3.1-8B. Columns from left to right transition from pure code-generation to mixed reasoning/code/tool-generation workloads with increasing tool-induced stall durations. 2 3 4  
+
+> Number of Agents
+> 0200 400
+> Time (s) (a) M4
+> 234
+> Number of Agents
+> 0200 400
+> (b) M4 Pro baseline +HAL scheduling +optimized kernels Offline packing +zero-copy TP
+
+Figure 8. Component ablation of the end-to-end makespan on both the M4 and the M4 Pro. efficiency of our custom SME kernel, confirming its capac-ity to sustain hardware-saturating utilization across highly skewed inference workloads. 
+
+4.3.1 Accelerating Compute-Bound Prefill. To evalu-ate the prefill performance of our heterogeneous tensor par-allelism, we adopt two metrics. The primary latency metric is time to first token (TTFT), which measures the end-to-end duration required to process the input prompt and gener-ate the initial token. To quantify overall system capacity, we measure prefill throughput, defined as the number of prompt tokens processed per second. They demonstrate the 
+
+Figure 9. Sensitivity of HAL scheduling to the reason-ing/code/tool workload mix. efficiency of our CPU-GPU co-execution under large contex-tual workloads, or rather the compute-bound workload. The results presented in Figure 10 confirm the compute-bound nature of the prefill phase, where standalone GPU and CPU executions remain stable at 232 and 132 tokens per second. By leveraging heterogeneous tensor parallelism, our system effectively surpasses these isolated hardware ceilings. At a prompt length of 1024, the co-execution engine achieves a peak throughput of 304.5 tokens per second, yielding a 1.31 × speedup over the GPU-only baseline. This compute expansion directly translates to latency improvements for extended contexts. For a 4096 token prompt, our system reduces the TTFT from 21.0 seconds on the standalone GPU EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece 128 256 512 1024 2048 4096 
+
+> Prompt Length
+> 010 20 30
+> TTFT (s) ↓
+> 128 256 512 1024 2048 4096
+> Prompt Length
+> 100 200 300
+> Throughput (tok/s) ↑
+> GPU-only CPU-only Ours (CPU+GPU) CPU-only GPU-only Ours (CPU+GPU)
+
+Figure 10. Prefill performance scaling across varying prompt lengths. The figure illustrates the time to first token (TTFT) and absolute processing throughput for standalone proces-sors versus our heterogeneous co-execution. 1 4 16 64 
+
+Batch size M  
+
+> 012
+> Latency (ms)
+> 0.49
+> 0.33 0.47
+> 0.29
+> 0.58
+> 0.39
+> 0.72
+> 0.25 128 512 1024
+
+Batch size M  
+
+> 010 20
+> Latency (ms)
+> 0.90
+> 0.04
+> 0.27
+> 0.17
+> 0.64
+> 0.39 Parallel compute Concat overhead Barrier (Ours)
+
+Figure 11. Latency decomposition of UMA co-execution across varying batch sizes 𝑀 on a 4096 × 14336 projection. EdgeAgent replaces the Concat memory copy shown in orange with a lightweight zero-copy barrier shown in green. 1416 64 256 1024 4096       
+
+> Batch size M
+> 012
+> Throughput (TFLOPS)
+> SME2 peak (2.3 TFLOPS)
+> K= 4096, N= 14336
+> 1416 64 256 1024 4096
+> Batch size M
+> 012SME2 peak (2.3 TFLOPS)
+> K= 14336, N= 4096
+> SME2 (prepacked) Accelerate BNNS
+
+Figure 12. Performance comparison measured in TFLOPS between Apple’s BNNS library and our custom SME kernel across varying batch sizes 𝑀 . The SME kernel consistently approaches the hardware’s theoretical peak of ∼2.3 TFLOPS. to 16.2 seconds. These measurements demonstrate that our architecture successfully aggregates physical compute units without triggering shared memory bus contention during dense matrix operations. 
+
+4.3.2 Zero-Copy Synchronization. Standard UMA co-execution relies on explicit tensor concatenation Concat ,triggering expensive O( 𝑀 · 𝑁 ) memory copies that bot-tleneck the shared bus. EdgeAgent eliminates this via a zero-copy computation graph, pre-allocating a single mem-ory block for in-place, simultaneous writes and reducing aggregation to a lightweight barrier. Figure 11 decomposes the end-to-end latency. In the memory-bound decode phase ( 𝑀 ∈ { 1, 4, 16 }), baseline memory copies (Concat ) inflate the sub-millisecond pure compute time by >50%. EdgeAgent’s zero-copy architecture eliminates this bottleneck, yielding a consistent ∼1.14 × speedup. At micro-batch 𝑀 = 128, the overhead remains severe (+0.90 ms on top of ∼2.8 ms compute), which EdgeAgent compresses to just +0.04 ms, delivering a 1.31 × speedup. Conversely, during massive prefill ( 𝑀 = 1024), the dense O( 𝑀 · 𝐾 · 𝑁 ) compute surges past 20 ms, naturally amortizing the O( 𝑀 ·𝑁 ) synchro-nization overhead to < 3%. This confirms that EdgeAgent introduces negligible synchronization delays across all batch scales. 
+
+4.3.3 Custom SME Kernel efficiency. To maximize CPU utilization during co-execution, relying on general-purpose libraries like Apple’s BNNS is suboptimal for the highly skewed tensor shapes of LLM inference. We address this by implementing a custom GEMM kernel strictly optimized for ARM’s SME. Unlike stateless BLAS libraries that redun-dantly repack static weights upon invocation, our kernel pre-packs model weights offline during initialization. This eliminates data-layout transformation overheads from the runtime critical path. We evaluate our kernel against BNNS on standard MLP projections, specifically the 4096 × 14336 up-projection and the 14336 × 4096 down-projection. Measuring pure online inference throughput exclusive of offline packing time, the empirical results presented in Figure 12 demonstrate ma-jor architectural advantages across both decoding and pre-fill regimes. During autoregressive decoding for 𝑀 ≤ 16, BNNS suffers from significant dispatch overheads. For a batch size of 𝑀 = 1 on the down-projection layer, BNNS yields only 19.0 GFLOPS. By circumventing these framework overheads, our custom kernel delivers 85.0 GFLOPS, achiev-ing a 4.47 × speedup. Conversely, under massive prefill work-loads for 𝑀 ≥ 2048, BNNS exhibits severe throughput degra-dation, dropping to 639.3 GFLOPS on the down-projection at 𝑀 = 4096. In contrast, our SME kernel maintains asymp-totic stability with a peak throughput of 2.07 TFLOPS. This represents over 90% of the 2.3 TFLOPS theoretical hardware limit, outperforming BNNS by 3.24 × and ensuring the CPU effectively matches the GPU’s computational pace. 
+
+4.4 Dynamic Speculative Scheduling 
+
+Traditional speculative decoding frameworks inherently un-derutilize resources by rigidly partitioning compute among ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 0 8 16 24 32 40 48 56 64 72        
+
+> Verification Step
+> 010
+> Draft Budget
+> Agent A Agent B Agent C Accept. history 0510
+> Accept. History
+> 0100 200 300 400
+> Wall Time (s)
+> 0500
+> Cumulative Tokens
+> Target: 881 tokens
+> HAL: 388s Uniform: 434s
+> HAL (dynamic) Uniform (draft=16)
+
+Figure 13. Evaluation of the HAL dynamic scheduler for concurrent multi-agent workloads. The upper panel shows per-agent HAL histories guiding drafting budget allocation. The lower panel demonstrates that the dynamic drafting budget allocation enables a higher throughput of a 1 .12 ×
+
+speedup over the static scheduling. agents, regardless of their actual generation predictability. To expose this inefficiency, we evaluate the dynamic sched-uler with three concurrent agents, where each agent’s task is randomly sampled from the mixed dataset, thereby ex-hibiting differences in drafting difficulty. As shown in the execution trace of Figure 13, the system continuously moni-tors each agent’s Historical Accepted Length (HAL) using an exponential moving average. When an agent exhibits a sustained high acceptance trend, the scheduler reduces the draft budgets of low-acceptance agents and reallocates re-claimed hardware budgets to accelerate the most predictable ones. This highly responsive mechanism ensures that the au-toregressive drafting phase perfectly mirrors the underlying workload dynamics. Under the static and uniform budget allocation, hard-ware budgets are frequently wasted generating deep draft sequences for unpredictable, hard-to-draft workloads, which are ultimately rejected during the parallel verification phase. By preemptively suppressing these unproductive drafts and allocate draft budget to high-yield targets, our scheduler maximizes the effective accepted tokens per verification step. The lower panel of Figure 13 illustrates this efficiency gain by plotting cumulative generated tokens against wall-clock time. By eliminating speculative computational waste, the dy-namic policy achieves a strictly steeper generation trajectory compared to the baseline. For an identical workload output of 881 target tokens, this continuous reallocation reduces the total execution time from 434 seconds to 388 seconds. This translates to a 1 .12 × end-to-end speedup, demonstrating that HAL-guided dynamic budget allocation is fundamentally critical for optimizing concurrent multi-agent inference. 
+
+4.5 Stall-Aware Context Switching 
+
+To evaluate system resilience against tool-induced stalls, we benchmark our asynchronous yielding mechanism using three concurrent agents. Under standard synchronous ex-ecution, tool invocations critically block active execution streams. As depicted in the upper timeline of Figure 14, wait-ing for external processes (such as script execution and API responses) forces the hardware into extended idle states, clearly illustrated by Agent B suffering a prolonged 53-second stall. These synchronous execution stalls entirely serialize external latency and tensor computation, severely degrading overall system efficiency. Our stall-aware runtime eliminates this computational waste. Upon initiating an external tool request, the active agent suspends its execution context and yields the hard-ware. As shown via the interleaved scheduling paths in the lower timeline of Figure 14, when Agent B blocks, the global scheduler instantly promotes Agent A or Agent C. Allowing companion agents to steal these idle budgets achieves deep overlap between tensor computation and tool execution. As quantified in the right panels of Figure 14, this dense execu-tion packing reduces the end-to-end wall-clock time from 286 to 238 seconds and elevates global throughput from 9.9 to 11.4 tokens per second, ensuring continuous hardware saturation despite highly irregular tool invocations. 
+
+## 5 Related Work 
+
+LLM Serving for Agentic Workloads. The shift to ReAct-style agents [40] shatters the continuous batching assump-tions of traditional runtimes like vLLM [35]. To support complex control flows, SGLang [33] and AgentInfer [24] co-design runtime memory with application semantics, while Continuum [20] and INFERCEPT [1] mitigate tool-induced stalls via cache retention and KV swapping. However, these mechanisms target discrete GPUs. In edge unified memory architectures (UMA), such heavy-handed state management is obsolete. EdgeAgent exploits UMA for in-place KV meta-data freezing, achieving zero-overhead context switching without moving physical bytes. 
+
+Dynamic Speculative Scheduling. Recent algorithms push acceptance rates via training-time testing (EAGLE-3 [21]) and pipelined SSM voting (Smurfs [36]). System-level designs tailor speculation budgets to specific constraints: AdaServe [22] optimizes for cloud SLOs, EdgeLLM [39] adapts draft-tree width for memory-constrained devices, and Ghidorah [37] partitions verification across edge cores. For agents, Dual-Spec [42] utilizes semantic critics, and AgentInfer [24] lever-ages suffix automata. Unlike these coarse-grained or static allocations, EdgeAgent uses the HAL as an effective indi-cator of drafting difficulty to dynamically allocate budgets across concurrent multi-agent streams. 
+
+Heterogeneous Execution on Edge SoCs. To harness dis-parate edge compute units, HeteroInfer [10], Doppeladler [16], EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Agent A Agent B Agent C Without Yield （Tool-Induced Stall ）
+
+Wall Time With Yield （Suspend / Resume ）
+
+00510 100 200 300 Wall Time （s）Tok / s No Yield Yield 9.9 11.4 286 238 Agent A Agent B Agent C Wall Time Draft Budget Tool Stall 
+
+Figure 14. Execution trace of a three-agent workload. The synchronous baseline (upper) indicates the severe hardware idling induced by tool execution, while our asynchronous yielding (lower) allows pending agents to steal idle budgets via microsecond-level context switches, thereby reducing wall-clock time and elevating system throughput (right panels). and earlier vision frameworks [23] predict workload split ratios across heterogeneous processing units. Concurrently, Hello SME! [32] and MPGEMM [13] optimize standalone GEMM micro-kernels for ARM SME architectures. However, the former execution frameworks rely on per-operator run-time heuristics without whole-graph analysis, while the lat-ter isolated libraries lack end-to-end integration. EdgeAgent bridges this gap via a logical DAG topology barrier, enabling lock-free, zero-copy tensor routing to saturate asymmetric cores without runtime restructuring. 
+
+Generalizability beyond UMA. EdgeAgent’s two lay-ers have different portability. The agent-aware scheduling layer is memory-topology-agnostic: HAL-based budget al-location and suspend-and-yield operate on runtime state (drafting difficulty and tool-stall events), which exists in any speculative-decoding system. They therefore transfer un-changed to discrete-GPU datacenters, where tool-induced stalls cause the same slot-wasting and head-of-line blocking problem. The UMA-aware execution layer, in contrast, de-rives its benefit specifically from the coherent shared address space: on a discrete GPU over PCIe the disjoint-write trick cannot remove the host–device transfer, although the same principle, partitioning by device throughput and synchro-nizing only on completion, maps to multi-GPU tensor paral-lelism over high-bandwidth interconnects or to CPU-offload schemes such as FlexGen [34], where the goal becomes min-imizing PCIe traffic and overlapping compute with transfers. Finally, the ARM SME micro-kernels are a backend accel-erator rather than an architectural dependency: they speed up the CPU shard but are not required for correctness, and equivalent tiled kernels exist for x86 AMX and NVIDIA Ten-sor Cores. 
+
+## 6 Conclusion 
+
+We propose EdgeAgent, a cross-layer inference system that tightly couples agent-aware scheduling with hardware-level execution to meet the demands of concurrent multi-agent LLM workflows on edge UMA devices. By leveraging agent-aware dynamic budgeting, stall-aware suspend-and-yield mechanisms, and zero-copy architecture-aware tensor par-allelism, EdgeAgent largely improves hardware utilization even under highly irregular execution patterns. Our design illustrates the necessity of end-to-end co-design across se-mantic and physical layers for efficient, real-time agentic AI, paving the way for future intelligent edge systems. 
+
+## Acknowledgments 
+
+This research was supported by the National Key R&D Pro-gram of China (2025YFB3003701, 2025YFB3003700), the Na-tional Laboratory Special Program of Peng Cheng Laboratory under Grant No. PCL2026A04, the National Natural Science Foundation of China under Grant No.62402534, the Yun-nan Provincial Major Science and Technology Special Plan Projects under Grant No.202502AD080009, the Pazhou Lab Research Project No.PZL2023KF0001, the Guangxi Key Re-search and Development Program (GuikeAB25069495), and the Fundamental Research Funds for the Central Universities, Sun Yat-sen University (23xkjc016). 
+
+## References  
+
+> [1] Reyna Abhyankar, Zijian He, Vikranth Srivatsa, Hao Zhang, and Yiying Zhang. 2024. InferCept: Efficient Intercept Support for Augmented Large Language Model Inference. In Forty-first International Conference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 (Proceedings of Machine Learning Research) , Ruslan Salakhutdinov,
+
+ASPLOS ’27, April 11–15, 2027, Heraklion, Greece Yuhai Long, Yuanxin Wei, Kai Wu, Jinhui Wei, Dan Huang, and Jiangsu Du 
+
+Zico Kolter, Katherine A. Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp (Eds.). PMLR / OpenReview.net, 81–95. 
+
+https://proceedings.mlr.press/v235/abhyankar24a.html 
+
+[2] Jason Ansel, Edward Z. Yang, Horace He, Natalia Gimelshein, Ani-mesh Jain, Michael Voznesensky, Bin Bao, Peter Bell, David Berard, Evgeni Burovski, Geeta Chauhan, Anjali Chourdia, Will Constable, Al-ban Desmaison, Zachary DeVito, Elias Ellison, Will Feng, Jiong Gong, Michael Gschwind, Brian Hirsh, Sherlock Huang, Kshiteej Kalam-barkar, Laurent Kirsch, Michael Lazos, Mario Lezcano, Yanbo Liang, Jason Liang, Yinghai Lu, C. K. Luk, Bert Maher, Yunjie Pan, Christian Puhrsch, Matthias Reso, Mark Saroufim, Marcos Yukio Siraichi, Helen Suk, Shunting Zhang, Michael Suo, Phil Tillet, Xu Zhao, Eikan Wang, Keren Zhou, Richard Zou, Xiaodong Wang, Ajit Mathews, William Wen, Gregory Chanan, Peng Wu, and Soumith Chintala. 2024. Py-Torch 2: Faster Machine Learning Through Dynamic Python Bytecode Transformation and Graph Compilation. In Proceedings of the 29th ACM International Conference on Architectural Support for Program-ming Languages and Operating Systems, Volume 2, ASPLOS 2024, La Jolla, CA, USA, 27 April 2024- 1 May 2024 , Rajiv Gupta, Nael B. Abu-Ghazaleh, Madan Musuvathi, and Dan Tsafrir (Eds.). ACM, 929–947. doi: 10.1145/3620665.3640366 
+
+[3] Apple Inc. 2024. Apple Introduces M4 Chip. Press Release. https: //www.apple.com/newsroom/2024/05/apple-introduces-m4-chip 
+
+[4] Apple Machine Learning Research. 2023. MLX: An Array Framework for Apple Silicon. https://github.com/ml-explore/mlx 
+
+[5] Arm Limited. 2021. Arm Architecture Reference Manual Supplement, The Scalable Matrix Extension (SME), for Armv9-A . https://developer. arm.com/documentation/ddi0616/latest/ 
+
+[6] Jacob Austin, Augustus Odena, Maxwell I. Nye, Maarten Bosma, Hen-ryk Michalewski, David Dohan, Ellen Jiang, Carrie J. Cai, Michael Terry, Quoc V. Le, and Charles Sutton. 2021. Program Synthesis with Large Language Models. CoRR abs/2108.07732 (2021). arXiv:2108.07732 
+
+https://arxiv.org/abs/2108.07732 
+
+[7] Yushi Bai, Shangqing Tu, Jiajie Zhang, Hao Peng, Xiaozhi Wang, Xin Lv, Shulin Cao, Jiazheng Xu, Lei Hou, Yuxiao Dong, Jie Tang, and Juanzi Li. 2025. LongBench v2: Towards Deeper Understanding and Reasoning on Realistic Long-context Multitasks. In Proceedings of the 63rd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers), ACL 2025, Vienna, Austria, July 27 - August 1, 2025 , Wanxiang Che, Joyce Nabende, Ekaterina Shutova, and Moham-mad Taher Pilehvar (Eds.). Association for Computational Linguistics, 3639–3664. https://aclanthology.org/2025.acl-long.183/ 
+
+[8] Tom B. Brown, Benjamin Mann, Nick Ryder, Melanie Subbiah, Jared Kaplan, Prafulla Dhariwal, Arvind Neelakantan, Pranav Shyam, Girish Sastry, Amanda Askell, Sandhini Agarwal, Ariel Herbert-Voss, Gretchen Krueger, Tom Henighan, Rewon Child, Aditya Ramesh, Daniel M. Ziegler, Jeffrey Wu, Clemens Winter, Christopher Hesse, Mark Chen, Eric Sigler, Mateusz Litwin, Scott Gray, Benjamin Chess, Jack Clark, Christopher Berner, Sam McCandlish, Alec Radford, Ilya Sutskever, and Dario Amodei. 2020. Language Models are Few-Shot Learners. In Proceedings of the 34th International Conference on Neural Information Processing Systems (NeurIPS) . Curran Associates Inc., Red Hook, NY, USA, Article 159, 25 pages. https://proceedings.neurips.cc/p aper/2020/hash/1457c0d6bfcb4967418bfb8ac142f64a-Abstract.html 
+
+[9] Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple LLM Inference Acceleration Framework with Multiple Decoding Heads. In Forty-first International Conference on Machine Learning, ICML 2024, Vienna, Austria, July 21-27, 2024 (Proceedings of Machine Learning Research) ,Ruslan Salakhutdinov, Zico Kolter, Katherine A. Heller, Adrian Weller, Nuria Oliver, Jonathan Scarlett, and Felix Berkenkamp (Eds.). PMLR / OpenReview.net, 5209–5235. https://proceedings.mlr.press/v235/cai 24b.html 
+
+[10] Le Chen, Dahu Feng, Erhu Feng, Yingrui Wang, Rong Zhao, Yubin Xia, Pinjie Xu, and Haibo Chen. 2025. Characterizing Mobile SoC for Accelerating Heterogeneous LLM Inference. In Proceedings of the ACM SIGOPS 31st Symposium on Operating Systems Principles, SOSP 2025, Lotte Hotel World, Seoul, Republic of Korea, October 13-16, 2025 , Youjip Won, Youngjin Kwon, Ding Yuan, and Rebecca Isaacs (Eds.). ACM, 359–374. doi: 10.1145/3731569.3764808 
+
+[11] DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. CoRR abs/2405.04434 (2024). arXiv:2405.04434 doi: 10.48550/ARXIV.2405.04434 
+
+[12] DeepSeek-AI. 2025. DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning. CoRR abs/2501.12948 (2025). arXiv:2501.12948 doi: 10.48550/ARXIV.2501.12948 
+
+[13] Chencheng Deng, Weiling Yang, Jianbin Fang, and Dezun Dong. 2025. Demystifying ARM SME to Optimize General Matrix Multiplications. 
+
+CoRR abs/2512.21473 (2025). arXiv:2512.21473 doi: 10.48550/ARXIV.2 512.21473 
+
+[14] Georgi Gerganov. 2023. llama.cpp: LLM Inference in C/C++. https: //github.com/ggerganov/llama.cpp 
+
+[15] Zhicheng Guo, Sijie Cheng, Hao Wang, Shihao Liang, Yujia Qin, Peng Li, Zhiyuan Liu, Maosong Sun, and Yang Liu. 2024. StableToolBench: Towards Stable Large-Scale Benchmarking on Tool Learning of Large Language Models. In Findings of the Association for Computational Linguistics, ACL 2024, Bangkok, Thailand and virtual meeting, August 11-16, 2024 (Findings of ACL) , Lun-Wei Ku, Andre Martins, and Vivek Srikumar (Eds.). Association for Computational Linguistics, 11143– 11156. doi: 10.18653/V1/2024.FINDINGS-ACL.664 
+
+[16] Jiazhi Jiang, Xiao Liu, Jiangsu Du, Dan Huang, and Yutong Lu. 2025. Doppeladler: Adaptive Tensor Parallelism for Latency-Critical LLM Deployment on CPU-GPU Integrated End-User Device. In 34th Inter-national Conference on Parallel Architectures and Compilation Tech-niques, PACT 2025, Irvine, CA, USA, November 3-6, 2025 . IEEE, 57–70. doi: 10.1109/PACT65351.2025.00017 
+
+[17] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serv-ing with PagedAttention. In Proceedings of the 29th Symposium on Op-erating Systems Principles, SOSP 2023, Koblenz, Germany, October 23-26, 2023 , Jason Flinn, Margo I. Seltzer, Peter Druschel, Antoine Kaufmann, and Jonathan Mace (Eds.). ACM, 611–626. doi: 10.1145/3600006.3613165 
+
+[18] LangChain AI. 2026. LangChain: The Agent Engineering Platform. 
+
+https://github.com/langchain-ai/langchain 
+
+[19] Chris Lattner, Mehdi Amini, Uday Bondhugula, Albert Cohen, Andy Davis, Jacques A. Pienaar, River Riddle, Tatiana Shpeisman, Nicolas Vasilache, and Oleksandr Zinenko. 2021. MLIR: Scaling Compiler Infrastructure for Domain Specific Computation. In IEEE/ACM Inter-national Symposium on Code Generation and Optimization, CGO 2021, Seoul, South Korea, February 27 - March 3, 2021 , Jae W. Lee, Mary Lou Soffa, and Ayal Zaks (Eds.). IEEE, 2–14. doi: 10.1109/CGO51591.2021. 9370308 
+
+[20] Hanchen Li, Qiuyang Mang, Runyuan He, Qizheng Zhang, Huanzhi Mao, Xiaokun Chen, Alvin Cheung, Joseph Gonzalez, and Ion Sto-ica. 2025. Continuum: Efficient and Robust Multi-Turn LLM Agent Scheduling with KV Cache Time-to-Live. CoRR abs/2511.02230 (2025). arXiv:2511.02230 doi: 10.48550/ARXIV.2511.02230 
+
+[21] Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2025. EAGLE-3: Scaling up Inference Acceleration of Large Language Models via Training-Time Test. CoRR abs/2503.01840 (2025). arXiv:2503.01840 doi: 10.48550/ARXIV.2503.01840 
+
+[22] Zikun Li, Zhuofu Chen, Remi Delacourt, Gabriele Oliaro, Zeyu Wang, Qinghan Chen, Shuhuai Lin, April Yang, Zhihao Zhang, Zhuoming Chen, Sean Lai, Xupeng Miao, and Zhihao Jia. 2025. AdaServe: SLO-Customized LLM Serving with Fine-Grained Speculative Decoding. 
+
+CoRR abs/2501.12162 (2025). arXiv:2501.12162 doi: 10.48550/ARXIV.2 501.12162 EdgeAgent: On-Device LLM inference for Multi-Agent Systems ASPLOS ’27, April 11–15, 2027, Heraklion, Greece 
+
+[23] Zhuojin Li, Marco Paolieri, and Leana Golubchik. 2025. Accelerating Mobile Inference Through Fine-Grained CPU-GPU Co-Execution. In 
+
+Computer Performance Engineering - 21st European Workshop on Per-formance Engineering, EPEW 2025, Catania, Italy, June 26, 2025, Revised Selected Papers (Lecture Notes in Computer Science) , Laura Carnevali and Josu Doncel (Eds.). Springer, 41–55. doi: 10.1007/978-3-032-16345-5_4 
+
+[24] Weizhe Lin, Hui-Ling Zhen, Shuai Yang, Xian Wang, Renxi Liu, Hant-ing Chen, Wangze Zhang, Chuansai Zhou, Yiming Li, Chen Chen, Xing Li, Zhiyuan Yang, Xiaosong Li, Xianzhi Yu, Zhenhua Dong, Mingxuan Yuan, and Yunhe Wang. 2025. Towards Efficient Agents: A Co-Design of Inference Architecture and System. CoRR abs/2512.18337 (2025). arXiv:2512.18337 doi: 10.48550/ARXIV.2512.18337 
+
+[25] Xiao Liu, Hao Yu, Hanchen Zhang, Yifan Xu, Xuanyu Lei, Hanyu Lai, Yu Gu, Hangliang Ding, Kaiwen Men, Kejuan Yang, Shudan Zhang, Xiang Deng, Aohan Zeng, Zhengxiao Du, Chenhui Zhang, Sheng Shen, Tianjun Zhang, Yu Su, Huan Sun, Minlie Huang, Yuxiao Dong, and Jie Tang. 2024. AgentBench: Evaluating LLMs as Agents. In The Twelfth International Conference on Learning Representations, ICLR 2024, Vienna, Austria, May 7-11, 2024 . OpenReview.net. https://openreview.net/for um?id=zAdUB0aCTQ 
+
+[26] Llama Team. 2024. The Llama 3 Herd of Models. CoRR abs/2407.21783 (2024). arXiv:2407.21783 doi: 10.48550/ARXIV.2407.21783 
+
+[27] Meta PyTorch Team. 2023. ExecuTorch: On-Device AI Across Mobile, Embedded and Edge for PyTorch. https://github.com/pytorch/execu torch 
+
+[28] Deepak Narayanan, Mohammad Shoeybi, Jared Casper, Patrick LeGres-ley, Mostofa Patwary, Vijay Korthikanti, Dmitri Vainbrand, Prethvi Kashinkunti, Julie Bernauer, Bryan Catanzaro, Amar Phanishayee, and Matei Zaharia. 2021. Efficient large-scale language model train-ing on GPU clusters using Megatron-LM. In International Confer-ence for High Performance Computing, Networking, Storage and Anal-ysis, SC 2021, St. Louis, Missouri, USA, November 14-19, 2021 , Bro-nis R. de Supinski, Mary W. Hall, and Todd Gamblin (Eds.). ACM, 58. doi: 10.1145/3458817.3476209 
+
+[29] OpenClaw Team. 2026. OpenClaw: Your Personal, Open Source AI Assistant. https://github.com/openclaw 
+
+[30] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Feng Ren, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: Trading More Storage for Less Computation - A KVCache-centric Architecture for Serving LLM Chatbot. In 23rd USENIX Conference on File and Storage Technologies, FAST 2025, Santa Clara, CA, February 25-27, 2025 , Haryadi S. Gunawi and Vasily Tarasov (Eds.). USENIX Association, 155–170. https://www.usenix.org/conference/fast25/pre sentation/qin 
+
+[31] Qualcomm Technologies, Inc. 2023. Qualcomm Unleashes Snapdragon X Elite: The AI Super-Charged Platform for the PC. Press Note. https: //www.qualcomm.com/news/releases/2023/10/qualcomm-unleashe s-snapdragon-x-elite--the-ai-super-charged-plat 
+
+[32] Stefan Remke and Alexander Breuer. 2024. Hello SME! Generating Fast Matrix Multiplication Kernels Using the Scalable Matrix Exten-sion. In SC24-W: Workshops of the International Conference for High Performance Computing, Networking, Storage and Analysis, Atlanta, GA, USA, November 17-22, 2024 . IEEE, 1443–1454. doi: 10.1109/SCW6 3240.2024.00185 
+
+[33] SGLang Team. 2024. SGLang. https://github.com/sgl-project/sglang 
+
+[34] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: High-Throughput Generative Inference of Large Lan-guage Models with a Single GPU. In International Conference on Ma-chine Learning, ICML 2023 . PMLR, 31094–31116. https://proceedings. mlr.press/v202/sheng23a.html 
+
+[35] vLLM Project. 2024. vLLM: Easy, Fast, and Cheap LLM Serving for Everyone. https://github.com/vllm-project/vllm 
+
+[36] Siqi Wang, Hailong Yang, Xuezhu Wang, Tongxuan Liu, Pengbo Wang, Yufan Xu, Xuning Liang, Kejie Ma, Tianyu Feng, Xin You, Ruihao Gong, Rui Wang, Zhongzhi Luan, Yi Liu, and Depei Qian. 2025. Towards Efficient LLM Inference via Collective and Adaptive Speculative Decoding. In Proceedings of the International Conference for High Performance Computing, Networking, Storage and Analysis, SC 2025, St. Louis, MO, USA, November 16-21, 2025 . ACM, 973–990. doi: 10.1145/3712285.3759834 
+
+[37] Jinhui Wei, Ye Huang, Yuhui Zhou, Jiazhi Jiang, and Jiangsu Du. 2025. Ghidorah: Fast LLM Inference on Edge with Speculative Decoding and Hetero-Core Parallelism. In 43rd IEEE International Conference on Computer Design, ICCD 2025, Richardson, TX, USA, November 10-12, 2025 . IEEE, 253–260. doi: 10.1109/ICCD65941.2025.00043 
+
+[38] Xinming Wei, Jiahao Zhang, Haoran Li, Jiayu Chen, Rui Qu, Mao-liang Li, Xiang Chen, and Guojie Luo. 2025. Agent.xpu: Efficient Scheduling of Agentic LLM Workloads on Heterogeneous SoC. CoRR 
+
+abs/2506.24045 (2025). arXiv:2506.24045 doi: 10.48550/ARXIV.2506.24 045 
+
+[39] Daliang Xu, Wangsong Yin, Hao Zhang, Xin Jin, Ying Zhang, Shiyun Wei, Mengwei Xu, and Xuanzhe Liu. 2025. EdgeLLM: Fast On-Device LLM Inference With Speculative Decoding. IEEE Trans. Mob. Comput. 
+
+24, 4 (2025), 3256–3273. doi: 10.1109/TMC.2024.3513457 
+
+[40] Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R. Narasimhan, and Yuan Cao. 2023. ReAct: Synergizing Reasoning and Acting in Language Models. In The Eleventh International Conference on Learning Representations, ICLR 2023, Kigali, Rwanda, May 1-5, 2023 .OpenReview.net. https://openreview.net/forum?id=WE_vluYUL-X 
+
+[41] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In 16th USENIX Symposium on Operating Systems Design and Implementation, OSDI 2022, Carlsbad, CA, USA, July 11-13, 2022 , Marcos K. Aguilera and Hakim Weatherspoon (Eds.). USENIX Association, 521–538. https://www.usenix.org/confe rence/osdi22/presentation/yu 
+
+[42] Shuzhang Zhong, Baotong Lu, Qi Chen, Chuanjie Liu, Fan Yang, and Meng Li. 2026. DualSpec: Accelerating Deep Research Agents via Dual-Process Action Speculation. CoRR abs/2603.07416 (2026). arXiv:2603.07416 doi: 10.48550/ARXIV.2603.07416
