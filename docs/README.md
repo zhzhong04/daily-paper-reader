@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-06</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-07</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 19 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 12 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>9</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>6</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-06 23:03:54 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-07 23:46:45 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读9篇、速读10篇，KV Cache优化成绝对主线。最值得看PReCache与KVCMAS（均9.0/10）：前者用低秩预计算加中性重建实现多LoRA智能体的KV共享，后者面向多智能体共享上下文做KV校正。普通读者可先读这两篇的摘要与方法图，抓住“共享+校正”思路再决定是否深入公式。</p>
+<p>10月</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">9 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction">PReCache: Efficient KV Cache Sharing for Multi-LoRA Agents via Low-Rank Precomputation and Neutral Reconstruction</span></li><li><span class="dpr-home-dashboard-paper-title" title="KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems">KVCMAS: Efficient KV cache Correction for Shared Context in Multi-Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Capture the lifecycle: KV Cache management in ReAct Agents with KVTether">Capture the lifecycle: KV Cache management in ReAct Agents with KVTether</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="ATTUNER: Recomputation-Free KV Cache Reuse via Query-Side Adaptation">ATTUNER: Recomputation-Free KV Cache Reuse via Query-Side Adaptation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Capture the lifecycle: KV Cache management in ReAct Agents with KVTether">Capture the lifecycle: KV Cache management in ReAct Agents with KVTether</span></li><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>5</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +84,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">10 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning">AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning</span></li><li><span class="dpr-home-dashboard-paper-title" title="Behavior-Preserving KV Cache Compression">Behavior-Preserving KV Cache Compression</span></li><li><span class="dpr-home-dashboard-paper-title" title="Coda: Exploiting Admission Flexibility for Coding-Agent Serving">Coda: Exploiting Admission Flexibility for Coding-Agent Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Serving a Revisable World: Versioned Execution for Interruptible Agents">Serving a Revisable World: Versioned Execution for Interruptible Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Inherit-MAS: Test-Time Evolution of Multi-Agent Systems through Workflow and Execution Inheritance">Inherit-MAS: Test-Time Evolution of Multi-Agent Systems through Workflow and Execution Inheritance</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>9</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 

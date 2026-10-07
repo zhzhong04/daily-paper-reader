@@ -1,0 +1,536 @@
+Title: AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning
+
+URL Source: https://arxiv.org/pdf/2610.03007v1
+
+Published Time: Mon, 05 Oct 2026 00:53:10 GMT
+
+Number of Pages: 16
+
+Markdown Content:
+# AvoKV-E: Payload-Aware KV Cache Eviction for Long Reasoning 
+
+Han Yu 1, Wenhui Zhu 1, Xiwen Chen 2, Zhipeng Wang 1, Hejian Sang 1
+
+Jincheng Cao 1, Yuanda Xu 1, Zhengze Zhou 1, Han Shi 3, Menglin Zhou 1
+
+Xuanzhao Dong 4, Minzhou Huang 1, Rui Cai 1, Hao Wang 2, Alborz Geramifard 11LinkedIn Corporation 2Clemson University 
+
+> 3
+
+Rice University 4Arizona State University 
+
+hanyu@linkedin.com 
+
+Abstract 
+
+Long-output reasoning shifts the KV-cache bottleneck from the fixed prompt to the generated trace. Existing reasoning-cache eviction methods largely treat cached entries as routing objects, estimating whether an old key will still be read, will recur, or can be replaced. This routing-only view overlooks two effects: low-attention entries can carry large value payloads whose removal changes future predictions, and newly generated states can appear stale before later queries have had a chance to read them. We introduce AvoKV-E, a training-free eviction policy that first delays eligibility for recent states and then ranks eligible entries using candidate-normalized read pressure, key redundancy, and value-payload potential. According to empirical evaluation across different models and datasets, AvoKV-E matches or exceeds redundancy-aware, recurrence-based, and thought-adaptive eviction baselines at matched active-KV budgets, with its largest gains in the tightest-cache regime. Component and counterfactual analyses further connect these gains to delayed observation, payload-aware scoring, redundancy, and scale-robust normalization. Together, the results show that long-reasoning KV eviction should preserve not only keys that are likely to be read, but also the value payloads that sustain the reasoning trajectory. 
+
+# 1 Introduction 
+
+Large reasoning models such as DeepSeek-R1 (DeepSeek-AI, 2025) and Qwen3 (Yang et al., 2025) often solve difficult problems by producing long derivations, intermediate calculations, and self-corrections. Every generated token appends a key and a value at every layer, turning the reasoning trace into a growing memory object. Under a tight active-cache budget, an eviction mistake can therefore disrupt the reasoning process itself: the model may revisit completed work, enter a loop, or fail to produce a final answer. Most KV-cache policies decide what to retain by asking whether an entry is likely to be retrieved again. Attention histories, recurrence, redundancy, and thought-level structure provide different signals for answer-ing this question (Liu et al., 2023; Oren et al., 2024; Zhang et al., 2023; Xiao et al., 2023; Li et al., 2024; Chen et al., 2024; Cai et al., 2025; Zhang et al., 2025; Ramachandran et al., 2025; Su et al., 2026; Hu et al., 2025). At a high level, however, these methods primarily evaluate the cache through its keys: will an entry receive future attention, or can a nearby key serve as a substitute? This routing-oriented view misses two properties that matter in long reasoning. First, a KV entry has two distinct roles: its key acts as a retrieval address, while its value contains the vector returned when that address is read. Eviction removes both, so an entry that appears unimportant from its attention pattern can still carry consequential content. Second, a newly generated state may appear unimportant simply because later queries have not yet had an opportunity to use it. A policy that scores such a state immediately can confuse “not yet read” with “not useful.” 1arXiv:2610.03007v1 [cs.LG] 2 Oct 2026 16% n=174 4% n=177 9% n=178 7% n=177 15% n=181                   
+
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Recent-attention rank Nt(QK ⊤)
+> 0.0 0.2 0.4 0.6 0.8 1.0
+> Value-norm rank  Nt(‖ v‖)
+> 17%
+> n=30
+> 5%
+> n=39
+> 7%
+> n=30
+> 10%
+> n=41
+> 8%
+> n=37
+> 14%
+> n=37
+> 3%
+> n=30
+> 4%
+> n=47
+> 4%
+> n=27
+> 20%*
+> n=35
+> 12%
+> n=32
+> 6%
+> n=32
+> 8%
+> n=39
+> 9%
+> n=32
+> 20%*
+> n=41
+> 9%
+> n=32
+> 5%
+> n=39
+> 18%
+> n=34
+> 5%
+> n=39
+> 15%
+> n=33
+> 23%**
+> n=43
+> 0%
+> n=37
+> 11%
+> n=28
+> 8%
+> n=38
+> 14%
+> n=35
+> attention-only blindspot low QK ⊤, high ‖ v‖→ would be evicted but matters
+> 9% n=177 9% n=176 11% n=176 10% n=177 12% n=181
+> 10% baseline 20% 30%
+> high-damage rate (sig. cells)
+> 0510 15 20 25 30
+> decode-step lag tsince token was emitted
+> 0% 25% 50% 75% 100%
+> share of tokens strongly read by lag  t late-read tokens: low attention now, strongly read later → delayed observation high-attention tokens low-attention tokens
+> (a) Oracle high-damage rate per (attention, value-norm) cell (b) Delayed observation rescues late-read tokens
+
+Figure 1: Diagnostic evidence for two failure modes of routing-only eviction. (a) Some low-attention entries with large value payloads are nevertheless high-damage to remove, revealing an attention-only blindspot .
+
+(b) Some low-attention entries receive strong reads only after the initial observation window, so early eviction can confuse “not yet read” with “not useful.” Detailed construction, counts, and statistical tests are given in Appendix D. Figure 1 illustrates both effects in decoded MATH/AIME traces. A leave-one-out replay diagnostic shows that the low-attention/high-payload region is enriched by 2.4 × in entries whose removal substantially changes future predictions. A complementary lag diagnostic shows that some low-attention states receive strong reads only after the initial observation window. Together, these observations suggest that early attention alone provides incomplete evidence for eviction: it can overlook what an entry carries and judge the entry before evidence of its future use has arrived. Appendix D gives the full diagnostic construction, candidate counts, and statistical tests. These observations motivate AvoKV-E, a two-stage, training-free eviction policy that separates when an entry may be judged from how it should be scored. First, delayed causal observation protects newly generated states until subsequent queries have had an opportunity to reveal their utility. The method then ranks eligible entries using three complementary signals: read pressure measures continued retrieval, key redundancy measures whether a nearby substitute exists, and value-payload potential measures the content that would be lost upon eviction. Candidate-relative normalization places these signals on a comparable scale throughout decoding. We evaluate AvoKV-E on MATH-500 and AIME-25 using DeepSeek-R1-Distill-Llama-8B and Qwen3-14B. At matched active-KV budgets, it matches or outperforms redundancy-aware, recurrence-based, and thought-adaptive baselines, with its largest gains in the tightest-cache regime. Component ablations and counter-factual oracle analysis further connect the end-task improvements to delayed observation, payload-aware scoring, redundancy, and candidate-relative normalization. 
+
+Contributions. Our contributions are three-fold: • We identify two limitations of routing-only eviction in long reasoning: it can overlook consequential value payloads and evaluate recent states before their utility becomes observable. • We introduce AvoKV-E, a training-free policy that combines delayed eligibility with candidate-normalized read pressure, key redundancy, and value-payload potential. • We evaluate AvoKV-E across two reasoning models and two mathematical reasoning benchmarks, and analyze its components, oracle ranking quality, and termination behavior. 22 Related Work 
+
+Reasoning-cache compression. Long-output reasoning makes the generated trace itself a dominant KV-cache object. Recent methods adapt compression to this setting using reasoning milestones or current-query importance (Hu et al., 2025; Su et al., 2026), key redundancy (Cai et al., 2025), lagged recurrence of attention importance (Zhang et al., 2025), or thought-adaptive compression across layers (Ramachandran et al., 2025). As an online eviction policy for generated reasoning states, AvoKV-E is closest to R-KV and LazyEviction. R-KV asks whether a key is important and non-redundant, while LazyEviction asks whether attention importance recurs after a lag. In contrast, the delay in AvoKV-E determines when an entry becomes eligible rather than acting as an importance score; once eligible, the entry is evaluated for the risk of discarding both its routing address and its value content. The method therefore requires neither a reasoning-milestone detector nor a thought-regime classifier. 
+
+Attention-based retention and observation. A broader line of KV-cache compression estimates future utility from attention history. Scissorhands exploits the persistence of token importance, H2O preserves attention heavy hitters, StreamingLLM protects attention sinks, and TOVA updates the cache using recent attention (Liu et al., 2023; Zhang et al., 2023; Xiao et al., 2023; Oren et al., 2024). SnapKV and NACL instead aggregate statistics over a short observation window before selecting retained entries (Li et al., 2024; Chen et al., 2024). Although their retention rules differ, these methods primarily evaluate an entry as an attention destination. CAOTE moves closer to the consequence of eviction by estimating attention-output error (Goel et al., 2025). AvoKV-E shares this concern, but uses an online value-norm proxy inside a reasoning-cache loop and delays the scoring of recent states whose future use has not yet become observable. 
+
+Budget allocation and query-aware access. A complementary family decides where limited capacity should be spent across layers, heads, or queries (Ge et al., 2024; Cai et al., 2024; Feng et al., 2024; Fu et al., 2024; Tang et al., 2024; Xiao et al., 2024). These methods change the allocation or access structure of the cache rather than only the score used to rank individual entries under a fixed budget. Our study holds allocation uniform across layers and heads so that it can isolate the token-level eviction decision. Within this controlled setting, AvoKV-E asks which generated reasoning states should remain once the available capacity has been specified. 
+
+Quantization and serving systems. KV-cache quantization reduces the memory occupied by retained states through lower or adaptive precision (Liu et al., 2024; Hooper et al., 2024; Liu et al., 2025; Zandieh et al., 2025), while PagedAttention improves how KV memory is managed by the serving system (Kwon et al., 2023). These techniques address storage precision and memory organization, respectively, and are complementary to the eviction policy studied here. We retain full-precision entries and use a shared decoding harness so that the experiments compare which reasoning states are kept rather than differences in quantization or serving infrastructure. 
+
+# 3 Problem Formulation 
+
+Causal KV-cache compression. Consider an autoregressive decoder at compression checkpoint t. Let It
+
+denote the indices of the KV entries currently stored in the active cache. Each entry i ∈ I t contains a key kℓ,hi
+
+and value vℓ,hi at layer ℓ and head h. Given an active KV budget B, a compression policy selects a keep set 
+
+Kt ⊆ I t, |Kt| ≤ B. (1) Only entries in Kt remain available to subsequent decoding. The selection must be causal: it may use the cached keys and values and attention patterns observed up to checkpoint t, but it cannot inspect future queries or their attention patterns. The utility of a cached entry depends on how it will affect future predictions, yet this evidence is incomplete when the compression decision is made. In particular, a newly generated entry with low observed attention may be genuinely expendable, or it may simply be too recent for later queries to have used it. Moreover, each entry serves two roles: its key determines how it is retrieved, while its value determines what content is 3Symbol Description 
+
+t current decode step / compression checkpoint 
+
+It active cache entries before compression 
+
+L, H number of layers and attention heads 
+
+kℓ,hi , vℓ,hi key/value of entry i at layer ℓ, head haℓ,h
+
+τ,i attention from query τ to entry iWobs observation-window length 
+
+Wdelay protected-delay length, ≥ Wobs 
+
+Ot query positions used for scoring 
+
+Pt protected delay-buffer entries 
+
+Ct old eligible candidate entries 
+
+Ni Ct \ { i}, the other redundancy candidates 
+
+pi, ri, bi read pressure, redundancy, payload potential 
+
+Nt(·) within-candidate percentile-rank normalizer 
+
+Si (t) eviction-risk score of entry i at t
+
+λp, λr, λb score weights 
+
+B active KV budget 
+
+Kt keep set after compression 
+
+DKL 
+
+i oracle leave-one-out KL of entry i
+
+Table 1: Notation used in the problem formulation, method, and analysis. returned. Eviction therefore removes both a routing address and its associated payload. These ambiguities require the policy to answer two separate questions: when has an entry accumulated enough causal evidence to be judged, and how should eligible entries be ranked under the budget? Section 4 describes how AvoKV-E addresses these questions through delayed eligibility and payload-aware eviction risk. Table 1 summarizes the notation used in the problem formulation, method, and analysis. 
+
+# 4 Method 1 Delayed causal observation at checkpoint 
+
+Old cache 
+
+> eligible: score now
+
+Delay buffer 
+
+> protected: not judged yet
+
+Observation window     
+
+> recent queries reveal reads
+> candidate attention reads old candidates
+> score wait observe
+> 2
+
+For each old candidate, ask three preservation questions     
+
+> Read? recent queries point back to
+> many reads: preserve
+> Replaceable? nearby key can route
+> similarly
+> similar key: lower risk
+> Payload? value vector carries content
+> large payload: preserve
+> Combine evidence
+> 3
+
+Keep the most risky-to-evict states within budget     
+
+> budget
+> gate
+> Active cache
+> protected + top-scoring old entries
+> Evict remainder
+> low read, redundant key, or low payload xxx
+
+Figure 2: Overview of AvoKV-E. Recent entries in the delay buffer Pt are temporarily protected. Older eligible candidates in Ct are ranked by a scale-robust score Si(t) that combines read pressure pi, key redundancy ri,and value-payload potential bi. The top-scoring entries are retained under active budget B.4Overview. AvoKV-E resolves this ambiguity by separating when an entry may be judged from how it is ranked once eligible. First, delayed causal observation temporarily protects recent entries, preventing a newly generated state from being evicted before later queries have had an opportunity to read it. Second, a 
+
+payload-aware eviction-risk score ranks older candidates using three complementary signals: read pressure pi,which measures whether later queries still read the entry; key redundancy ri, which measures whether a nearby key can substitute for it and is inspired by (Cai et al., 2025); and value-payload potential bi, which measures whether removal would discard a salient value vector. Figure 2 illustrates these two stages. 
+
+## 4.1 Delayed Causal Observation 
+
+Motivation. A newly generated state may receive little attention simply because only a few subsequent queries have been available to read it. Scoring such a state immediately would conflate “not yet observed” with “unimportant.” AvoKV-E therefore delays the eviction decision until the state has remained in the cache long enough to be observed causally. 
+
+Cache partition. At checkpoint t, let Wobs be the number of recent query positions used to measure read pressure, and let Wdelay ≥ Wobs be the period during which a newly generated entry remains protected. We define 
+
+Ot = {τ : t − Wobs < τ ≤ t}, (2) 
+
+Pt = {i : t − Wdelay < i ≤ t}, (3) 
+
+Ct = {i : i ≤ t − Wdelay }. (4) 
+
+Roles of the three sets. The observation set Ot contains the recent query positions used for scoring. The protected set Pt contains newly generated entries that cannot yet be evicted, whereas the candidate set Ct
+
+contains older entries that are eligible for ranking. Only entries in Ct compete for the remaining cache budget after Pt has been reserved. 
+
+Effect of the delay. Because Wdelay ≥ Wobs , every candidate in Ct predates every query in Ot. An entry is therefore exposed to eviction only after the queries used to measure its read pressure have had a causal opportunity to attend to it. The delay does not itself predict importance, as a recurrence model does (Zhang et al., 2025); it is a measurement rule that controls eligibility. Once an entry leaves Pt, the payload-aware score determines whether a low-read state should nevertheless be retained because it carries a large value payload. 
+
+## 4.2 Payload-Aware Eviction Risk 
+
+Motivation. Once an entry is old enough to be judged, AvoKV-E must estimate how risky it would be to remove. Read pressure describes whether the entry is currently being used, and key redundancy describes whether another key can serve a similar routing role. Neither signal, however, directly reflects the value payload that would be lost if the entry were removed. We therefore combine routing, substitutability, and payload information in a single eviction-risk score. 5Score components. For i ∈ Ct, we average three signals over layers and heads: aℓ,h 
+
+> τ,i
+
+is attention from query 
+
+τ; kℓ,hi , vℓ,hi are cached key/value; and Ni = Ct \ { i}.
+
+pi(t) = 1
+
+|Ot|LH ∑
+
+> τ∈Ot
+
+# ∑
+
+> ℓ,h
+
+aℓ,h 
+
+> τ,i
+
+, (5) 
+
+ri(t) = 1
+
+LH ∑
+
+> ℓ,h
+
+max 
+
+> j∈N i
+
+cos (kℓ,hi , kℓ,hj ), (6) 
+
+bi(t) = 1
+
+LH ∑
+
+> ℓ,h
+
+∥vℓ,hi ∥2
+
+median j∈Ct ∥vℓ,hj ∥2 + ϵ . (7) 
+
+Interpreting the components. Read pressure pi averages the attention received from queries in Ot and is high when the current context continues to read the entry. Redundancy ri compares the entry with its candidate neighborhood Ni in key space and is high when a nearby substitute exists. Payload potential bi
+
+compares the value norm with the per-layer/head median over Ct, providing a candidate-relative proxy for how much value content the entry carries. The three components thus answer different questions: whether the entry is read, whether its key is replaceable, and whether its value payload is salient. Crucially, AvoKV-E does not multiply bi by pi. Such a product would suppress exactly the low-read/high-payload states identified in Figure 1 (a). Keeping the payload term independent allows an unusually large value vector to rescue a candidate even when its recent attention is low. This term is related in spirit to CAOTE’s attention-output error (Goel et al., 2025), but instantiates that intuition as an online value-norm proxy within the delayed reasoning-cache loop. 
+
+Candidate-relative normalization. The three raw components cannot be combined directly because they have different numerical scales. We therefore express each component by its percentile rank among the eligible candidates at the current checkpoint: 
+
+Nt(xi) = rank Ct (xi) − 1
+
+|Ct| − 1 , (8) where rank Ct is ascending and ties are averaged. The smallest candidate value therefore maps to 0, the largest maps to 1, and all three components are placed on the same [0, 1 ] scale. We then combine the normalized components into the eviction-risk score 
+
+Si(t) = λp Nt(pi) − λr Nt(ri) + λb Nt(bi). (9) The signs encode the role of each component. High read pressure and high value-payload potential make eviction riskier and therefore increase Si(t), whereas high key redundancy makes eviction safer and decreases it. An entry can thus be retained because it is actively read, difficult to replace, or carries an unusually salient payload. The protected initial entries remain in Ct but receive Si(t)= + ∞, ensuring that the top-score selection always retains them. We protect the first four cache entries in all experiments. Given active budget B, AvoKV-E first reserves the protected set Pt and fills the remaining B − | Pt| slots with the highest-scoring candidates: Kt = Pt ∪ Top B−| Pt |{Si(t) : i ∈ Ct}. We use λp=0.1, λr =0.9, and λb=0.05 throughout the main experiments and ablate each component in §5.3. 
+
+## 4.3 Online Compression 
+
+Algorithm 1 summarizes one complete eviction checkpoint. Ordinary autoregressive generation remains unchanged between checkpoints. When the active cache is within budget, AvoKV-E returns it unchanged. Otherwise, the method partitions entries into Pt and Ct, computes and normalizes the three signals for every eligible candidate, retains all protected entries, and uses Si(t) to fill the remaining cache slots. Delayed 6Algorithm 1: AvoKV-E eviction at a single compression checkpoint. 
+
+Input: active budget B; windows Wobs , Wdelay ; protected initial entries; weights λp, λr, λb; candidate cache up to step t.
+
+Output: keep set Kt under the active KV budget.  
+
+> 1
+
+Ot ← { τ : t − Wobs < τ ≤ t} // observation window  
+
+> 2
+
+Pt ← { i : t − Wdelay < i ≤ t} // protected delay buffer  
+
+> 3
+
+Ct ← { i : i ≤ t − Wdelay } // old eligible entries  
+
+> 4
+
+if |Pt| + |Ct| ≤ B then  
+
+> 5
+
+return the cache unchanged  
+
+> 6
+
+foreach i ∈ Ct do  
+
+> 7
+
+pi ← avg attention from Ot, averaged over layers/heads  
+
+> 8
+
+ri ← avg cosine of ki to its Ni-best key  
+
+> 9
+
+bi ← avg ∥vi∥2, normalized by the per-layer/head median over Ct 
+
+> 10
+
+ˆpi, ˆ ri, ˆbi ← Nt(pi), Nt(ri), Nt(bi) // percentile-rank normalize  
+
+> 11
+
+Si ← λp ˆpi − λr ˆri + λb ˆbi // eviction-risk score  
+
+> 12
+
+Si ← +∞ for protected initial entries  
+
+> 13
+
+Kt ← Pt ∪ Top B−| Pt |{Si : i ∈ Ct} 
+
+> 14
+
+Drop Ct \ Kt from the layer cache; return Kt
+
+observation and payload-aware ranking therefore act as two consecutive decisions: the former determines which entries may be compared, and the latter determines which of those entries are safest to evict. Every quantity used at checkpoint t is already available in the decoded prefix. Read pressure uses only attention rows from queries in Ot, redundancy compares stored RoPE-transformed keys in Ct, and payload potential uses stored value norms. The method therefore changes the cache-selection rule without altering ordinary generation between compression events. 
+
+Fixed configuration. Compression is triggered every 128 generated tokens. We use Wobs =8, protect the first four cache entries as described above, and apply percentile-rank normalization. The protected tail is budget-dependent: Wdelay =8 for budgets at or above 768 entries and Wdelay =32 for budgets at or below 512, reflecting that tighter caches need more time to absorb late first reads. This single configuration was selected on small MATH-100/MATH-200 pilots before MATH-500 and reused unchanged across models, benchmarks, and budgets. 
+
+# 5 Experiments 
+
+## 5.1 Experimental Setup 
+
+Models, tasks, and metrics. We evaluate DeepSeek-R1-Distill-Llama-8B (DeepSeek-AI, 2025) and Qwen3-14B (Yang et al., 2025) on MATH-500 (Hendrycks et al., 2021) and AIME-25 (Mathematical Association of America, 2025). MATH-500 uses one sample per problem, whereas AIME-25 reports mean accuracy over 16 samples per problem. Both models use sampled decoding with temperature 0.6 and top-p 0.95, subject to a 32K-token maximum length. All methods share the prompts, decoding loop, answer extractor, MATH-style ground-truth parser, and periodic compression checkpoints. Accuracy is our primary metric; we additionally record average output length, max-length hit count, and the maximum measured active KV length across compression events. 
+
+Baselines and matched-budget controls. We compare against FullKV, the uncompressed reference; R-KV (Cai et al., 2025), which uses the public attention × redundancy score with λ=0.1, observation window α=8, and compression interval 128; and LazyEviction (Zhang et al., 2025), which uses lagged attention-activity 7256 512 768 1024 1536 2048                     
+
+> KV budget (tokens)
+> 65 70 75 80 85
+> Accuracy (%)
+> R1-Llama-8B – MATH-500
+> 256 512 768 1024 1536 2048 3072
+> KV budget (tokens)
+> 10 20 30
+> Accuracy (%)
+> R1-Llama-8B – AIME-25 (mean over 16 samples)
+> 256 512 768 1024 1536 2048
+> KV budget (tokens)
+> 40 60 80
+> Accuracy (%)
+> Qwen3-14B – MATH-500
+> 768 1024 1536 2048 3072 4096
+> KV budget (tokens)
+> 020 40 60
+> Accuracy (%)
+> Qwen3-14B – AIME-25 (mean over 16 samples)
+> FullKV R-KV LazyEviction ThinKV (impl.) AvoKV-E
+
+Figure 3: Accuracy versus active KV budget for DeepSeek-R1-Distill-Llama-8B (top row) and Qwen3-14B (bottom row) on MATH-500 (left column) and AIME-25 (right column); AIME-25 reports mean accuracy over 16 samples per problem. FullKV is the dotted uncompressed reference. At matched budgets, AvoKV-E matches or exceeds the redundancy-aware R-KV, recurrence-based LazyEviction, and thought-adaptive ThinKV (impl.) baselines, with the largest gaps at the smallest budgets. tracking with the same window and interval. Because ThinKV (Ramachandran et al., 2025) had no public code release at the time of writing, we implement its published layer-wise, thought-adaptive mechanism using retention schedule {64, 32, 16, 8, 4 } and refresh interval 128 in the same eviction-only harness, and label it ThinKV (impl.) throughout. All compressed methods are compared at matched measured active-KV budgets; AIME-25 uses a larger budget grid because its reasoning traces are longer. To isolate the eviction decision, retained entries remain in full precision, budget allocation is uniform across layers and heads, and no method receives a thought classifier, milestone detector, or serving-kernel modification. 
+
+AvoKV-E configuration. Compression is triggered every 128 generated tokens. We use Wobs =8, protect the first four cache entries, apply percentile-rank normalization, and set (λp, λr, λb)=( 0.1, 0.9, 0.05 ). The protected delay is Wdelay =8 for budgets at or above 768 entries and Wdelay =32 for budgets at or below 512. This deterministic configuration was selected once on small MATH-100/MATH-200 pilots before MATH-500 and then reused unchanged across both models, both benchmarks, and every reported budget; we do not retune it per model or benchmark. 
+
+## 5.2 Accuracy and Termination under Matched Budgets 
+
+Accuracy–budget trade-off. Figure 3 plots accuracy against measured active-KV budget for both tasks and models. Each panel should be read horizontally: at a fixed memory budget, the higher curve represents the better keep set. R-KV and LazyEviction are the closest redundancy- and recurrence-based baselines, respectively, so their comparison with AvoKV-E tests the benefit of adding payload-aware scoring. AvoKV-E is best or tied-best throughout the shared budget range in all four panels. Its largest advantages occur at the tightest budgets, where the routing-only failure modes identified in §1 are expected to be most damaging; as the budget grows, all compressed policies converge toward FullKV. 
+
+Consistency across evaluated settings. Although absolute accuracies and useful budget ranges differ across the four panels, the same budget-dependent pattern appears in each. AvoKV-E separates most clearly from the competing eviction rules when capacity is scarce, then approaches them as the cache grows 8Method 256 512 1024 FullKV – – –R-KV 105 78 60 LazyEviction 112 85 65 ThinKV (impl.) 119 92 70 AvoKV-E 102 55 50                 
+
+> Headline accuracy on MATH-500 / R1-8B (%) FullKV –––R-KV 66.8 76.6 81.2 LazyEviction 67.4 76.4 80.0 ThinKV (impl.) 63.8 75.6 79.4 AvoKV-E 68.4 81.4 82.6
+
+Table 2: Max-length hit counts at the 32K cap (out of 500 MATH-500 problems) and headline accuracy at three representative KV budgets on DeepSeek-R1-Distill-Llama-8B. FullKV terminates well within 32K on essentially every problem. Among compressed methods, AvoKV-E achieves both the fewest max-length hits and the highest accuracy at each budget.                                  
+
+> Score AUROC AP Top-krecall False-safe rate Spearman
+> attention only 0.891 0.369 0.621 0.033 0.322 R-KV-style proxy 0.894 0.372 0.629 0.026 0.303 ThinKV-style proxy 0.892 0.350 0.610 0.022 0.303 attention ×age 0.891 0.362 0.621 0.022 0.268 AvoKV-E (full score) 0.901 0.388 0.658 0.020 0.331
+
+Table 3: Oracle ranking quality against the single-token eviction-KL label on 5,440 candidates. AvoKV-E’s composite score has the strongest ranking metrics across the board while remaining within the same runtime budget as the proxy scores. and fewer consequential choices are forced. The pattern also persists across both reasoning models and both benchmarks despite using the same configuration throughout. This consistency suggests that the improvement comes from the retention rule rather than from a model-, benchmark-, or budget-specific operating point. 
+
+Termination behavior. The accuracy gains are accompanied by more stable completion behavior. The 32K cap is long enough for FullKV to terminate on essentially every prompt, so the remaining cap hits primarily reflect failures introduced by eviction. As Table 2 shows, AvoKV-E obtains both the highest accuracy and the fewest max-length hits at budgets 256, 512, and 1024. The separation is largest at budget 512, where AvoKV-E produces 55 cap hits compared with 78 for the next-best baseline. Thus, preserving value payloads improves not only final-answer accuracy but also the model’s ability to sustain and complete its reasoning trajectory. 
+
+## 5.3 Why Does AvoKV-E Work? 
+
+Counterfactual oracle ranking. To isolate the score from downstream decoding, we evaluate several scoring rules against single-token oracle eviction-KL labels for 5,440 aligned candidate KV entries from 30 DeepSeek-R1 AIME-2024 traces. We report AUROC, average precision (AP), top-k recall, false-safe rate, and Spearman correlation. This analysis complements the leave-one-out KL diagnostic in App. D. The full AvoKV-E score is strongest on every ranking metric. The largest improvement appears in top-k
+
+recall, which most directly measures how many high-damage entries the policy preserves. Because this 9comparison is independent of the decoding loop and uses the same runtime budget for all proxy scores, it links the downstream accuracy gains to the proposed payload-aware ranking rule. The five metrics probe complementary aspects of the same ranking problem. AUROC and Spearman measure global ordering, while AP and top-k recall emphasize the high-damage candidates that should remain near the top of the keep list. The false-safe rate measures the converse error: damaging entries assigned to the apparently safe-to-evict region. AvoKV-E improves all five simultaneously, rather than improving one portion of the ranking at the expense of another. This is particularly relevant to online eviction, where mistakes near the keep–evict boundary become irreversible once an entry is removed. 
+
+Component ablations. The largest ablation loss at every tested budget comes from removing key re-dundancy. This clarifies the role of payload awareness: AvoKV-E does not replace routing evidence, but augments a strong routing backbone where that evidence is incomplete. Removing the payload term still lowers accuracy at every budget, consistent with the low-read/high-payload blindspot in Figure 1. Remov-ing delayed eligibility also consistently hurts, as expected when recent states can be judged before later queries have had an opportunity to read them. Payload awareness and delayed eligibility therefore correct two different limitations of routing-only eviction: what evidence is considered and when that evidence becomes trustworthy. The raw-score ablation shows that candidate-relative normalization is not merely a cosmetic rescaling. Read pressure, redundancy, and payload potential occupy different numerical ranges, so combining them directly changes their effective balance even when the nominal weights remain fixed. The degradation across all three budgets supports the scale-robust construction in Eq. 8. Separately, the in-runner R-KV anchor closely tracks the official R-KV results, making a harness mismatch an unlikely explanation for the improvement of AvoKV-E.                              
+
+> Variant 256 512 1024 AvoKV-E 68.4 81.4 82.6
+> −payload ( λb=0) 66.8 78.8 80.0
+> −delay ( Wdelay =Wobs )66.4 79.6 81.0
+> −rank norm. (raw) 64.2 76.8 78.7
+> −redundancy ( λr=0) 60.5 73.4 76.4 R-KV-style anchor (in-runner) 66.6 76.4 80.2 R-KV (official) 66.8 76.6 81.2
+
+Table 4: Component decomposition of AvoKV-E on MATH-500 with DeepSeek-R1-Distill-Llama-8B. Accuracy is reported at matched active-KV budgets. The in-runner R-KV-style anchor uses the same HuggingFace harness with the R-KV score and tracks the official R-KV row to within ≤ 1 point at every budget. 
+
+# 6 Conclusion 
+
+This paper addresses KV-cache compression for long-output reasoning with AvoKV-E, a training-free policy that separates delayed eligibility from payload-aware eviction risk. Across two reasoning models and two mathematical reasoning benchmarks, AvoKV-E matches or exceeds the tested redundancy-aware, recurrence-based, and thought-adaptive baselines at matched active-KV budgets, with its largest gains under the tightest budgets. The oracle ranking and component analyses connect these gains to preserving high-damage value payloads, allowing late reads to materialize, and normalizing heterogeneous signals within the candidate set. More broadly, the results suggest that reasoning-cache eviction should preserve both retrievable keys and the value payloads that sustain the reasoning trajectory. 10 Limitations 
+
+We evaluate two reasoning models (DeepSeek-R1-Distill-Llama-8B and Qwen3-14B) on two mathematical reasoning benchmarks (MATH-500 and AIME-25); we do not claim broad task coverage and have not tested code or multimodal reasoning. The prototype runs in HuggingFace generation rather than a serving kernel, so we report active KV budgets and decoding behavior, not packed-memory savings or end-to-end throughput. AvoKV-E is an eviction policy; evaluating it alongside low-bit KV quantization and hybrid eviction–quantization allocation is a natural next step. 
+
+# References 
+
+Zefan Cai, Yichi Zhang, Bofei Gao, Yuliang Liu, Yucheng Li, Tianyu Liu, Keming Lu, Wayne Xiong, Yue Dong, Junjie Hu, and Wen Xiao. PyramidKV: Dynamic KV cache compression based on pyramidal information funneling, 2024. Zefan Cai, Wen Xiao, Hanshi Sun, Cheng Luo, Yikai Zhang, Ke Wan, Yucheng Li, Yeyang Zhou, Li-Wen Chang, Jiuxiang Gu, Zhen Dong, Anima Anandkumar, Abedelkadir Asi, and Junjie Hu. R-KV: Redundancy-aware kv cache compression for reasoning models, 2025. Yilong Chen, Guoxia Wang, Junyuan Shang, Shiyao Cui, Zhenyu Zhang, Tingwen Liu, Shuohuan Wang, Yu Sun, Dianhai Yu, and Hua Wu. NACL: A general and effective KV cache eviction framework for LLMs at inference time. In Proceedings of the Annual Meeting of the Association for Computational Linguistics , 2024. DeepSeek-AI. DeepSeek-R1: Incentivizing reasoning capability in llms via reinforcement learning, 2025. Yuan Feng, Junlin Lv, Yukun Cao, Xike Xie, and S. Kevin Zhou. Ada-KV: Optimizing KV cache eviction by adaptive budget allocation for efficient LLM inference, 2024. Yu Fu, Zefan Cai, Abedelkadir Asi, Wayne Xiong, Yue Dong, and Wen Xiao. Not all heads matter: A head-level KV cache compression method with integrated retrieval and reasoning, 2024. ICLR 2025. Suyu Ge, Yunan Zhang, Liyuan Liu, Minjia Zhang, Jiawei Han, and Jianfeng Gao. Model tells you what to discard: Adaptive KV cache compression for LLMs. In International Conference on Learning Representations ,2024. Raghavv Goel, Junyoung Park, Mukul Gagrani, Dalton Jones, Matthew Morse, Harper Langston, Mingu Lee, and Chris Lott. CAOTE: KV cache selection for LLMs via attention output error-based token eviction, 2025. Dan Hendrycks, Collin Burns, Saurav Kadavath, Akul Arora, Steven Basart, Eric Tang, Dawn Song, and Jacob Steinhardt. Measuring mathematical problem solving with the MATH dataset. NeurIPS , 2021. Coleman Hooper, Sehoon Kim, Hiva Mohammadzadeh, Michael W. Mahoney, Yakun Sophia Shao, Kurt Keutzer, and Amir Gholami. KVQuant: Towards 10 million context length LLM inference with KV cache quantization, 2024. NeurIPS 2024. Junhao Hu, Wenrui Huang, Weidong Wang, Zhenwen Li, Tiancheng Hu, Zhixia Liu, Xusheng Chen, Tao Xie, and Yizhou Shan. RaaS: Reasoning-aware attention sparsity for efficient LLM reasoning, 2025. Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. Efficient memory management for large language model serving with pagedattention. In Proceedings of the ACM Symposium on Operating Systems Principles , 2023. Yuhong Li, Yingbing Huang, Bowen Yang, Bharath Venkitesh, Andrea Locatelli, Hanchen Ye, Tianle Cai, Patrick Lewis, and Deming Chen. SnapKV: Llm knows what you are looking for before generation, 2024. 11 Tengxuan Liu, Shiyao Li, Jiayi Yang, Tianchen Zhao, Feng Zhou, Xiaohui Song, Guohao Dai, Shengen Yan, Huazhong Yang, and Yu Wang. PM-KVQ: Progressive mixed-precision KV cache quantization for long-CoT LLMs, 2025. Zichang Liu, Aditya Desai, Fangshuo Liao, Weitao Wang, Victor Xie, Zhaozhuo Xu, Anastasios Kyrillidis, and Anshumali Shrivastava. Scissorhands: Exploiting the persistence of importance hypothesis for LLM KV cache compression at test time, 2023. Zirui Liu, Jiayi Yuan, Hongye Jin, Shaochen Zhong, Zhaozhuo Xu, Vladimir Braverman, Beidi Chen, and Xia Hu. KIVI: A tuning-free asymmetric 2bit quantization for kv cache, 2024. Mathematical Association of America. AIME 2025: American invitational mathematics examination. https: //artofproblemsolving.com/wiki/index.php/AIME_Problems_and_Solutions , 2025. Matanel Oren, Michael Hassid, Nir Yarden, Yossi Adi, and Roy Schwartz. Transformers are multi-state RNNs, 2024. Akshat Ramachandran, Marina Neseem, Charbel Sakr, Rangharajan Venkatesan, Brucek Khailany, and Tushar Krishna. ThinKV: Thought-adaptive kv cache compression for efficient reasoning models, 2025. Yi Su, Zhenxu Tian, Dan Qiao, Yuechi Zhou, Juntao Li, and Min Zhang. LongFlow: Efficient KV cache compression for reasoning models, 2026. Jiaming Tang, Yilong Zhao, Kan Zhu, Guangxuan Xiao, Baris Kasikci, and Song Han. Quest: Query-aware sparsity for efficient long-context LLM inference, 2024. Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. Efficient streaming language models with attention sinks, 2023. Guangxuan Xiao, Jiaming Tang, Jingwei Zuo, Junxian Guo, Shang Yang, Haotian Tang, Yao Fu, and Song Han. DuoAttention: Efficient long-context LLM inference with retrieval and streaming heads, 2024. An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, et al. Qwen3 technical report, 2025. Amir Zandieh, Majid Daliri, Majid Hadian, and Vahab Mirrokni. TurboQuant: Online vector quantization with near-optimal distortion rate, 2025. ICLR 2026. Haoyue Zhang, Hualei Zhang, Xiaosong Ma, Jie Zhang, and Song Guo. LazyEviction: Lagged KV eviction with attention pattern observation for efficient long reasoning, 2025. Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Re, Clark Barrett, Zhangyang Wang, and Beidi Chen. H2O: Heavy-hitter oracle for efficient generative inference of large language models, 2023. 12 A Worked Example 
+
+We illustrate one compression checkpoint with |Ct| = 4 eligible candidate entries, using a single layer/head for brevity. Table 5 lists the raw features pi, ri, bi, their within-candidate percentile-rank normalized values, and the resulting eviction-risk score Si. The example is constructed so that entries 1 and 3 are close under routing-only evidence, but entry 3 carries a much larger value payload.                        
+
+> i1234Icook dinner myself
+> Raw features pi(read pressure) 0.04 0.81 0.02 0.05
+> ri(key redundancy) 0.55 0.41 0.55 0.92
+> bi(value payload) 0.55 0.62 2.10 1.20
+> Percentile-rank normalized
+> ˆpi
+
+= Nt(pi ) 1/3 1 0 2/3 ˆri = Nt(ri ) 1/2 0 1/2 1ˆbi = Nt(bi ) 0 1/3 1 2/3  
+
+> Eviction-risk score (λp
+
+=0.1, λr =0.9, λb=0.05)  
+
+> Si
+
+−0.42 +0.12 −0.40 −0.80  
+
+> Routing-only score for comparison (λb
+
+=0)  
+
+> Sroute
+> i
+
+−0.42 +0.10 −0.45 −0.83 
+
+Table 5: Worked example at one compression checkpoint. The score is Si = λp ˆpi − λr ˆri + λb ˆbi. Scores are rounded to two decimals. The tied redundancy values for entries 1 and 3 are assigned the averaged percentile rank, following the definition of Nt.
+
+Reading the candidates. Entry 2 is read often and is not redundant, so both routing-only and payload-aware scoring preserve it. Entry 4 has the most replaceable key, so its high redundancy lowers its eviction-risk score despite moderate read pressure and payload. Entries 1 and 3 are the informative pair: entry 1 is a generic candidate with slightly higher read pressure, whereas entry 3 is barely read but carries the largest value payload. 
+
+Selection under budget. With B − | Pt| = 2, AvoKV-E keeps the two eligible candidates with the largest eviction-risk scores: 
+
+Kt = Pt ∪ Top 2{Si : i ∈ Ct} = Pt ∪ { 2, 3 }.Thus, AvoKV-E preserves both the strongly read entry and the low-read but high-payload entry. If the payload term is removed, the routing-only scores become 
+
+Sroute = ( −0.42, 0.10, −0.45, −0.83 ),so the top-2 set is instead {2, 1 } and entry 3 is evicted. This illustrates the attention-only blindspot from App. D: a candidate can look slightly less useful under routing evidence while still carrying a value payload whose removal is damaging. 
+
+# B Extended Positioning 
+
+Table 6 summarizes how we position AvoKV-E relative to nearby KV-cache methods. AvoKV-E isolates the eviction decision and changes the score used to decide which active KV entries remain in cache; it does not allocate precision, classify thought regimes, or modify the serving kernel. 13 Family Representative work Main cache signal Relation to AvoKV-E 
+
+Attention retention H2O (Zhang et al., 2023), StreamingLLM (Xiao et al., 2023), Scissorhands (Liu et al., 2023), TOVA (Oren et al., 2024) Recent attention, heavy hitters, sinks, or persistence Also uses attention, but delays eligibility (delayed-read effect) and adds value-payload potential (attention-only blindspot). Observation-window eviction SnapKV (Li et al., 2024), NACL (Chen et al., 2024) Attention statistics over a short observation window Causal observation window applied during generated reasoning rather than only prompt-side selection. Budget allocation FastGen (Ge et al., 2024), PyramidKV (Cai et al., 2024), Ada-KV (Feng et al., 2024), HeadKV (Fu et al., 2024), Quest (Tang et al., 2024), DuoAttention (Xiao et al., 2024) Layer/head/query-aware allocation of limited cache capacity Allocation is held fixed; we study the token-level eviction score, so this axis is orthogonal. Reasoning-cache compression RaaS (Hu et al., 2025), R-KV (Cai et al., 2025), LazyEviction (Zhang et al., 2025), ThinKV (Ramachandran et al., 2025), LongFlow (Su et al., 2026) Reasoning milestones, redundancy, lagged recurrence, thought regimes, or current-query importance Closest baselines. Unlike LazyEviction, delay only defines eligibility while payload-aware scoring drives the keep decision; unlike ThinKV, no thought classifier or quantization. Quantization & serving KIVI (Liu et al., 2024), KVQuant (Hooper et al., 2024), PM-KVQ (Liu et al., 2025), TurboQuant (Zandieh et al., 2025), PagedAttention (Kwon et al., 2023) Lower precision or more efficient cache storage Complementary; we disable quantization in our experiments to isolate the eviction decision. 
+
+Table 6: Positioning of AvoKV-E among related KV-cache methods. Each row groups methods by their primary cache signal; the right-most column states what AvoKV-E adds or holds fixed relative to that family. 
+
+# C Additional Reproducibility Details 
+
+The evaluation protocol, baseline configurations, compression schedule, and fixed AvoKV-E configuration are described in §5.1. Here we record the causal availability of the scoring signals, the pilot observations behind the fixed configuration, and the terms of the models and datasets used in the evaluation. 
+
+Causal scoring. All three signals consume only information already in the prefix at checkpoint t. The read-pressure feature averages attention rows from queries in Ot over layers and heads; the redundancy feature compares RoPE-transformed keys within the candidate set Ct; the payload feature depends only on stored value norms. No future tokens, oracle labels, or auxiliary networks are used. This is what makes the score deployable inside ordinary autoregressive decoding. 
+
+Configuration-selection rationale. The MATH-100/MATH-200 pilot pass yielded three observations that motivated the fixed choices in §5.1. First, the protected tail scales with the budget: at budget 1024, a short delay Wdelay =8 is optimal, whereas at budget 512, a longer delay Wdelay =32 is consistently more stable because tighter budgets evict more aggressively and need a wider window to absorb late first reads. Second, the payload weight is small but non-zero: setting λb=0 costs several points across budgets, while pushing λb
+
+much beyond ∼ 0.05 degrades behavior. The payload term is intended to break ties among similarly routed 14 candidates and rescue the high-payload states identified by the attention-only blindspot, not to dominate the score; the relatively large redundancy weight λr =0.9 keeps the overall score close to the strong R-KV family. Third, percentile-rank and age-bucket-rank normalization are interchangeable in the pilots, whereas the scale-sensitive normalizers we tried (raw, z-score, min–max, max-absolute, and softmax) collapse the score toward attention-only behavior and forfeit 3–11 points depending on budget. Under the same harness, we also compared the full AvoKV-E score against R-KV+payload, a recency-weighted variant, and an R-KV-style anchor; the composite score was consistently best at both pilot budgets. 
+
+Artifacts and terms. We use publicly available pretrained models and math benchmarks only for research evaluation. DeepSeek-R1-Distill-Llama-8B is released by DeepSeek-AI under the MIT license, with the upstream Llama 3.1 license noted by the model provider; Qwen3-14B is released under Apache-2.0; and the Hugging Face version of the Hendrycks MATH dataset is listed under the MIT license. AIME-25 problems are credited to the Mathematical Association of America / public problem sources and are used only for benchmark evaluation. We do not redistribute model weights or benchmark contents. 
+
+# D Empirical foundations of Figure 1 
+
+Two intuitions underlie AvoKV-E: that attention magnitude alone is a lossy summary of a token’s importance because it ignores the size of what the token would actually contribute if read, and that a single recent observation window is too short a horizon to reliably classify reasoning tokens as useful or stale. Figure 1 presents these ideas in takeaway form; this appendix gives the detailed construction behind the figure, including the candidate pool, the oracle high-damage definition, the attention/value-norm bins in panel (a), the strong-read lag statistic in panel (b), and the significance tests behind the reported blindspot. 
+
+Candidate pool. We pool n=892 candidate KV entries from five MATH/AIME traces generated by DeepSeek-R1-Distill-Llama-8B. A candidate is a (trace, position) pair whose remaining horizon supports the longest measurement window required below ( Wfut =8 steps for oracle damage, up to 32 steps for the lag analysis). The candidates are not subsampled within a trace, so the marginals on the panel-(a) heatmap reflect the actual distribution of attention and value-norm ranks under decoded reasoning, not an attention-stratified subset. Each candidate is described by the two within-trace percentile ranks introduced in §4: recent attention Nt(pi), aggregated over the last Wobs decode steps (Eq. 5); and value-norm Nt(bi)= ∥vi∥2,the ℓ2 magnitude of the candidate’s stored value vector — the v from QKV that would be returned via attention if the entry were retained (Eq. 7). 
+
+Oracle damage and the attention-only blindspot (panel a). For each candidate we want a damage signal that does not assume any specific eviction policy. The leave-one-out oracle achieves this directly: we replay the next Wfut =8 decode steps twice from the same context, once with the full cache and once with candidate 
+
+i’s KV entry removed, and measure the average KL between the two next-token distributions, 
+
+DKL  
+
+> i
+
+= 1
+
+Wfut 
+
+> Wfut
+
+# ∑
+
+> τ=1
+
+KL 
+
+
+
+pfull  
+
+> τ
+
+p(−i)
+
+> τ
+
+
+
+. (10) 
+
+DKL  
+
+> i
+
+has very different absolute scales across traces, so we threshold within trace: a candidate is high-damage 
+
+if its oracle damage falls in the top decile of its host trace. This construction guarantees a ≈ 10% baseline across the full candidate pool, against which any cell in the (attention, value-norm) grid can be compared. Out of the 887 candidates for which the future window is complete, the blindspot cell {Nt(pi)≤0.2, 
+
+Nt(bi)≥0.8 } contains 10/43 =23% high-damage states (Wilson 95% CI [13%, 38% ]), against 81/844 =9.6% over the remaining 22 cells. The enrichment is 2.4 × and one-sided Fisher’s exact gives p=0.009. Two further cells survive a per-cell one-sided binomial test against the 9.6% baseline, both in the high-attention column (Nt(pi)≥0.8): 8/41 =20% and 7/35 =20%, both p<0.05. These two cells act as a positive control — they 15 confirm that the analysis recovers the obvious effect (high-attention tokens are damaging to remove) — which makes the blindspot cell stand out all the more strongly: it is the only significantly elevated cell 
+
+outside the high-attention column. The marginal distributions along each axis are individually flat, so neither attention nor value-norm alone discriminates damaging from safe candidates; both features are needed. 
+
+Delayed first reads and the case for delayed observation (panel b). The blindspot exists because attention-only scoring is a snapshot at a single moment. Whether that snapshot is informative depends on how quickly reasoning tokens are read after generation. We define a strong read of candidate i as a future query position τ
+
+whose attention ατ,i reaches at least 0.85 of i’s per-trace peak attention, and the first-strong-read lag of i as the smallest such τ − i. Lags are right-censored at 32 decode steps, and we restrict the analysis to the n=542 candidates whose remaining horizon supports that cap so the distribution is not artificially truncated. The diagnostic quantity is the cumulative read probability F(t)= P(lag ≤t), the fraction of candidates that have been strongly read by lag t. Splitting candidates by attention quartile ( Nt(QK ⊤)≤0.4 vs. Nt(QK ⊤)≥0.6; 
+
+n=218 each), F(4)= 51% vs. 62% and F(16 )= 56% vs. 72%; the high-attention curve dominates throughout and the gap to the low-attention curve widens with t (one-sided Kolmogorov–Smirnov p=0.010). The plateau is informative on its own: 15% of low-attention candidates are never strongly read inside the 32-step horizon at all. Reading this from the eviction side, an attention-only policy that decides at small t is precisely the policy that conflates “not yet read” with “not useful”, and the worst-case lag is concentrated on exactly the low-attention candidates the policy is most eager to discard. Waiting more decode steps before the decision — the delayed causal observation construction in §4 — allows these late reads to materialize, costing only bookkeeping but turning the gap in panel (b) into a reliable keep/evict signal. Together, panels (a) and (b) make a complementary case: the snapshot attention used by prior eviction methods is structurally blind to a high-damage subpopulation (panel a), and it is unreliable at the short lags where those methods operate (panel b). AvoKV-E addresses both by combining a payload-aware score with delayed observation. 16
