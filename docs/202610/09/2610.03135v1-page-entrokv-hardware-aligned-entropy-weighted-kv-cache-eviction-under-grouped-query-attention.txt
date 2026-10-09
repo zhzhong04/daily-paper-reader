@@ -1,0 +1,2156 @@
+Title: Page-EntroKV: Hardware-Aligned, Entropy-Weighted KV-Cache Eviction under Grouped-Query Attention
+
+URL Source: https://arxiv.org/pdf/2610.03135v1
+
+Published Time: Mon, 05 Oct 2026 01:03:08 GMT
+
+Number of Pages: 24
+
+Markdown Content:
+# Page-EntroKV: Hardware-Aligned, Entropy-Weighted KV-Cache Eviction under Grouped-Query Attention 
+
+Inbasekaran S. *
+
+Department of Computer Science and Engineering SRM Institute of Science and Technology, India 
+
+iambruce0012@gmail.com  
+
+> *Corresponding author.
+
+Abstract 
+
+Long-context inference in autoregressive language models is limited by the key–value (KV) cache. The cache grows with context length, and every decoded token streams the full cache through memory. Most dynamic eviction methods score token importance per query head and choose tokens independently. This fits poorly with grouped-query attention (GQA), where several query heads share one physical KV bu ff er: if the heads choose di ff erent tokens, the serving engine must keep the union of their selections, inflating the cache by up to the group ratio 𝑟 . A simple arithmetic average does not fix this—it dilutes the specialized retrieval heads that carry factual recall. We introduce Page-EntroKV , a formal framework for KV-cache eviction that works at the level GQA serving actually uses. Heads in each physical group are pooled with weights derived from sink-isolated collision (Rényi-2) entropy—one inner product per head, computed once at prefill with no calibration—so sink heads cannot be mistaken for retrieval heads. The pooled scores are mapped onto PagedAttention page frames, and eviction runs at the hardware tuple (𝑙, 𝑔, 𝑃 𝑏 ). We formalize the union overhead ratio and intra-group disagreement, prove an exact identity linking them for two-head groups, and give two-sided bounds for general ratios. We prove that group-level pooling preserves the eviction budget exactly, derive a finite-context needle-retention guarantee that arithmetic-mean pooling provably violates, characterize the temperature limits of the entropy-weighted family, and give exact per-layer cross-group page accounting. On a pilot architecture (Qwen2.5-1.5B-Instruct, 𝑟 =6, 28 layers), head-independent replay inflates the cache by up to 5 .1× at a 2% budget—with the theoretical certificate firing in the large majority of measured cells—while Page-EntroKV holds the union overhead at exactly 1 .000 across 1,008 pooled measurements. Across a 1,008-observation head census, sink isolation inverts the sink-to-context weight ordering from a 2 .10 × unearned sink advantage to a 0 .66 × deficit. In pilot-scale needle retrieval, entropy-weighted pooling retains the needle where arithmetic-mean pooling collapses (100% vs. 0% under the pooled-selection criterion at a 20% budget); strict all-layer retention is reported as a limitation. Retained cardinality is exact for every page size, preliminary runs show representative QA and code tasks remain solvable at 20% retention, and the mechanism ablations are certified over all 56 of 56 layer–group pairs with zero skipped layers. Larger-model, long-context, and serving phases are pre-registered and in progress. 
+
+Keywords: Grouped-Query Attention, PagedAttention, KV-cache compression, Attention entropy, Inference serving, Formal analysis 
+
+1. Introduction 
+
+Long-context large language models (LLMs) are now de-ployed for multi-turn agentic workflows, repository-scale code synthesis, and multi-document legal discovery [29, 30, 4]. Con-text windows have grown to match, but long-context use re-mains fragile: reliability degrades with input position [31]. At context lengths of 32k to 128k + tokens, decoding hits a hard-ware boundary: every decoded token streams the entire key– value (KV) cache from GPU high-bandwidth memory (HBM) into on-chip SRAM, so the decode phase is strictly memory-bound and its cost grows linearly with context length [9, 7]. At practical batch sizes the KV cache alone can occupy most of the accelerator’s memory, capping concurrency and decoding throughput. Production architectures respond by sharing KV bu ff ers across query heads. Grouped-query attention (GQA) [3]— adopted by Llama-3.1, Qwen-2.5, and Mistral [4, 5, 6]— partitions 𝐻 𝑄 logical query heads into 𝐻 KV physical KV groups, shrinking the cache by the ratio 𝑟 = 𝐻 𝑄 /𝐻 KV . In serv-ing runtimes such as vLLM [7], these groups are materialized as block-partitioned tensors of shape [𝑁 blocks , 𝐻 KV , 𝐵, 𝐷 head ]:the sharing is the memory layout itself, not an implementation detail. arXiv:2610.03135v1 [cs.LG] 2 Oct 2026 This physical layout breaks a core assumption behind prevailing eviction heuristics. Policies such as H2O [10], SnapKV [11], and Scissorhands [12] compute token importance per query head and select top-𝑘 sets independently. Sibling heads in a GQA group share one physical bu ff er, so the engine must store the union of their selections—up to 𝑟 × the intended budget. We formalize this penalty as the union overhead ratio 
+
+(UOR) and connect it exactly to measurable intra-group dis-agreement (Proposition 1). Arithmetic mean pooling fails from the other direction: it dilutes specialized retrieval heads [24], averaging a needle token attended to with mass 1 − 𝜖 by one head down to (1 − 𝜖 )/ 𝑟 , below eviction thresholds. Page-EntroKV follows three design principles, each cho-sen against a specific alternative. Pooling at the physical-group level rather than the head level preserves GQA’s mem-ory sharing and keeps the budget exact; head-level selection cannot do both, because the engine stores whatever union the heads produce. Discrete attention entropy—one inner product per head—separates sharp retrieval heads from di ff use back-ground heads, so weighting heads by inverse entropy ampli-fies exactly the signals that mean pooling destroys; evaluating that entropy on sink-isolated distributions keeps attention-sink heads from being mistaken for retrieval heads. Projecting im-portance onto discrete PagedAttention page frames before evic-tion, rather than selecting tokens first, makes the compression decision coincide with the hardware allocation tuple (𝑙, 𝑔, 𝑃 𝑏 )
+
+and eliminates internal fragmentation and cache-unrolling over-head. Figure 1 shows the resulting architecture. The contributions of this paper are formal, algorithmic, im-plementational, and pilot-validated: 
+
+• Architectural formulation. We formalize the GQA struc-tural constraint in dynamic KV-cache eviction through two metrics—the union overhead ratio and intra-group disagreement—linked by an exact identity for two-head groups and sandwiched two-sidedly at every ratio (Sec-tion 3). 
+
+• Algorithmic design. We design entropy-weighted group pooling around discrete sink-isolated Rényi-2 attention en-tropy, together with a page-frame mapping that evicts ex-actly at the (𝑙, 𝑔, 𝑃 𝑏 ) tuple (Section 4). 
+
+• Theoretical guarantees. We prove strict budget preserva-tion (UOR ≡ 1), a finite-context needle-retention bound under head specialization with sink isolation, the temper-ature degeneracies of the pooling family, and page-level union accounting (Section 5). 
+
+• Reference implementation and pilot validation. We provide a complete PyTorch reference implementation, an instrumented harness, and a pilot validation on Qwen2.5-1.5B-Instruct confirming the structural core on real text— with every deviation, exclusion, and pending item dis-closed (Section 6). This is a formulation-and-theory paper with a pilot-scale em-pirical tier. The architectural guarantees hold by construction; the pilot of Section 6 validates the structural core on real text at small scale; the full pre-registered sweep—long context, larger models, and serving—is in progress and disclosed item by item in Section 6.5. The remainder of this paper is organized as follows. Sec-tion 2 reviews related work. Section 3 formalizes the problem and its structural metrics. Section 4 presents the Page-EntroKV design. Section 5 develops the theoretical analysis. Section 6 reports the pilot validation and the remaining pre-registered protocol. Section 7 delimits scope and limitations, and Sec-tion 8 concludes. Section Appendix A summarizes notation, Section Appendix B tabulates the guarantee-to-evidence map-ping, Section Appendix C collects the full step-by-step deriva-tions, and Section Appendix D gives the reference implementa-tion. 
+
+2. Related work 
+
+2.1. Attention e ffi ciency and architectural evolution 
+
+Multi-head attention (MHA) [1] pairs every query head with private key–value bu ff ers. Multi-query attention (MQA) [2] collapses all heads onto a single shared bu ff er. GQA [3] in-terpolates between the two, cutting KV memory by the group ratio 𝑟 at negligible quality cost, and is now standard in pro-duction models [4, 5, 6]. A separate line compresses KV states into low-rank latent vectors, as in the multi-head latent atten-tion (MLA) of DeepSeek-V2 [32]. These works fix the static 
+
+allocation of KV memory. Page-EntroKV addresses the com-plementary dynamic problem: deciding at inference time which allocated entries to keep. 
+
+2.2. Inference serving engines 
+
+IO-aware kernel design minimizes HBM tra ffi c. FlashAtten-tion [27] tiles attention computation on-chip; FlashAttention-2 adds flash-decoding, improving parallelism for long sequences and decode workloads [28]. On the systems side, vLLM’s PagedAttention [7] partitions the KV cache into fixed-size blocks managed by a block table and reaches near-zero frag-mentation at high concurrency. Orca raises utilization further through iteration-level scheduling and continuous batching [8]. Roofline analyses [9] establish the memory-bound character of decoding. These engines assume the cache is fully material-ized; they define the physical layout to which any compression policy must conform. Page-EntroKV treats the page table as a first-class citizen and evicts at exactly the granularity the engine allocates. 
+
+2.3. Dynamic KV-cache eviction 
+
+H2O [10] retains tokens with the largest accumulated at-tention scores. StreamingLLM [13] preserves attention sinks and a sliding window. Scissorhands [12] exploits the persis-tence of token importance. SnapKV [11] compresses the pre-fill cache using observation windows. PyramidKV [15] al-locates layer-wise budgets following a pyramidal information funnel. Quest [16] performs query-aware sparse selection. FastGen [14] selects per-head compression policies from ob-served attention patterns, adapting the operator while staying at 2Input context — long-form text ( 𝑇 ∈ [ 32k , 128k +] tokens). 
+
+Transformer layer 𝑙 prefill attention. Produces per-head distributions {A𝑙,ℎ }𝐻 𝑄 −1 
+
+> ℎ=0
+
+.
+
+Sink-isolated entropy estimation & entropy-weighted group pooling. Quantifies head dispersion via sink-isolated 
+
+H sink 2
+
+ A𝑙,ℎ 
+
+ over the observation window; Boltzmann weights 𝑤 𝑙,ℎ ∝ 𝑒 −H sink 2 (A𝑙,ℎ )/𝜏 𝑔 pool heads at the physical GQA group, eliminating union overhead (UOR → 1) and preventing needle dilution. 
+
+Block-max page mapping. Importance scores are aggregated onto physical pages 𝑃 𝑏 , and the top-𝐾 𝑙 pages are selected per group at the hardware tuple (𝑙, 𝑔, 𝑃 𝑏 ).
+
+vLLM PagedAttention engine. Physical layout [𝑁 blocks , 𝐻 KV , 𝐵, 𝐷 head ]; zero internal fragmentation, group-level UOR ≡ 1, strict budget of 𝑘 tokens per group.  
+
+> Figure 1: Page-EntroKV pipeline overview. Sink-isolated entropy-weighted pooling at the physical GQA group level, followed by block-max mapping onto PagedAttention page frames, aligns the eviction decision with the engine’s physical memory layout.
+
+head-level granularity. Ada-KV [17] works on the budget side of the same GQA structure: it reallocates the per-head eviction budgets within a group adaptively, so the union of head-level se-lections respects the group budget instead of a uniform per-head quota 𝑘 . Ada-KV decides how much each head may keep; it does not change which entries survive—selection remains per-head on raw attention scores, with no selection-side guarantee comparable to the needle-retention bound of Theorem 4. All of these methods score importance at the (layer, head) or (layer, token) granularity. Under shared bu ff ers, indepen-dent head-level selections inflate memory by up to 𝑟 × unless a budget allocator compensates—which is the compensation Ada-KV supplies—and per-head scores cannot be materialized without unrolling the cache. Page-EntroKV attacks the inflation at its source: pooling before selection makes the union seman-tics of GQA harmless by construction, and eviction runs at page granularity. A concurrent entropy-based method, EntroKV [18], applies attention entropy at a di ff erent decision point. There, Shannon entropy allocates per-layer compression budgets— how much 
+
+each layer keeps—as a plug-and-play front-end, with o ffl ine calibration of a mean-entropy statistic ¯H . Page-EntroKV ap-plies sink-isolated Rényi-2 entropy on the selection side— 
+
+which pages survive within each physical group—requires no calibration, and carries the guarantees proved here: group-level UOR ≡ 1 (Theorem 3) and finite-context needle retention (Corollary 2). The two mechanisms sit at di ff erent points in the pipeline (budget allocation versus within-group selection); no combination of the two is studied here. Table 1 positions Page-EntroKV against these families, and against channel-dimension and routing alternatives, along the axes that the GQA layout makes salient. 
+
+2.4. Mechanistic head specialization 
+
+Pruning studies showed early that many attention heads are redundant [25, 26]. Retrieval heads carry long-context factu-ality mechanistically [24]. DuoAttention [19] statically classi-fies retrieval versus streaming heads and applies heterogeneous compression—but it classifies o ffl ine, at the granularity of the attention computation, and needs a calibration corpus. Page-EntroKV weights heads within each physical GQA group at runtime, using measured sink-isolated entropy, needs no cali-bration, and preserves the physical sharing structure of GQA. 
+
+3. Problem formulation and background 
+
+We first fix notation (Table A.8 in Section Appendix A), then characterize the decode-phase memory wall, the physical layout of GQA serving engines, and the structural metrics that quantify why head-independent eviction fails. 
+
+3.1. The decode-phase memory wall 
+
+Decoding runs in two distinct execution regimes. Pre-fill processes the input prompt via compute-bound matrix– matrix products. Autoregressive decoding emits one token per step: self-attention over historical tokens streams the key–value (KV) cache from high-bandwidth memory (HBM) into on-chip SRAM, reducing the computation to memory-bound matrix– vector products. Let 𝐵 batch denote batch size, 𝐿 transformer layers, 𝐻 𝑄 logical query heads, 𝐻 KV physical KV heads, 𝐷 head head dimension, 𝑇 
+
+sequence length, and 𝑏 el bytes per element ( 𝑏 el = 2 for FP16). Defining the GQA ratio 𝑟 ≜ 𝐻 𝑄 /𝐻 KV , the computational work per decode step is 𝑊 FLOPs = 4 𝐵 batch 𝐿 𝐻 𝑄 𝐷 head 𝑇 , while HBM data tra ffi c is 𝐷 bytes = 2 𝑏 el 𝐵 batch 𝐿 𝐻 KV 𝐷 head 𝑇 + O( 𝐷 model ).The arithmetic intensity Adecode is derived as: 
+
+Adecode = 𝑊 FLOPs 
+
+𝐷 bytes 
+
+= 4 𝐵 batch 𝐿 𝐻 𝑄 𝐷 head 𝑇 
+
+2 𝑏 el 𝐵 batch 𝐿 𝐻 KV 𝐷 head 𝑇 + O( 𝐷 model ) ≈ 2𝑟 𝑏 el 
+
+,
+
+(1) which yields Adecode = 4.0 FLOP /Byte for 16-bit precision on an 𝑟 = 4 architecture. The hardware ridge point on an 3Table 1: Qualitative structural comparison of KV-cache eviction approaches under physically shared GQA bu ff ers. ✓ = supported; ∼ = partially; × = not supported; n/a = not applicable: the method is not a token-eviction policy (channel-dimension pruning or quantization) or is a context-routing architecture. 
+
+Method Importance GQA-union Eviction Strict budget Calibration granularity aware? granularity guarantee? -free? H2O [10] (𝑙, ℎ, 𝑡 ) × token × (union ≤ 𝑟 ×) ✓
+
+StreamingLLM [13] position ✓ (uniform) token ✓ (static) ✓
+
+Scissorhands [12] (𝑙, ℎ, 𝑡 ) × token × ✓
+
+SnapKV [11] (𝑙, ℎ ) × token × ✓
+
+FastGen [14] per-head policy × token × × (profiling) PyramidKV [15] (𝑙, ℎ, 𝑡 ), layer budget × token ∼ (layer-wise) ✓
+
+Quest [16] query /page × page ∼ (query-dep.) ✓
+
+Ada-KV [17] (𝑙, ℎ, 𝑡 ), adaptive budget ∼ (budget-side) token ✓ (adaptive) ✓
+
+EntroKV [18] (𝑙, 𝑡 ), entropy layer budget × token ∼ (layer-wise) × (o ffl ine) DuoAttention [19] head class ∼ (head-level) head /token × × (o ffl ine) 
+
+Channel-dimension and routing alternatives (included for completeness): 
+
+ThinK [20] channel (query-guided) n/a channel ∼ (fixed ratio) ✓
+
+KIVI [21] n/a (2-bit K /V quant.) n/a n/a n/a ✓
+
+QuaRot [22] n/a (rot. + 4-bit) n/a n/a n/a ✓
+
+InfLLM [23] query–key block routing ∼ (block-level) block ∼ ✓ (training-free) Page-EntroKV (ours) (𝑙, 𝑔 ) group ✓ page ✓ (Theorem 3) ✓(runtime entropy) 
+
+NVIDIA H100 SXM5 accelerator (989 .5 TFLOP /s dense FP16; 3.35 TB /s HBM3 bandwidth) is: 
+
+𝐼 ridge = 989 .5 × 10 12 FLOP /s3.35 × 10 12 Byte /s ≈ 295 .4 FLOP /Byte , (2) demonstrating that decoding operates at < 1.5% of peak com-pute, strictly memory-bandwidth bound. The total physical KV cache capacity required is: 
+
+𝑀 KV (𝑇 ) = 4 · 𝐵 batch · 𝐿 · 𝐻 KV · 𝐷 head · 𝑇 bytes, (3) which for Llama-3.1-70B ( 𝐿 =80, 𝐻 KV =8, 𝐷 head =128) with 
+
+𝐵 batch =8 at 𝑇 =128k reaches ≈ 343 .6 GB. These figures are architectural constants plus arithmetic; they motivate the com-pression problem this paper addresses. 
+
+3.2. GQA mechanics and paged memory layout 
+
+Let X ∈ R𝑇 ×𝐷 model denote token representations. For query head ℎ ∈ { 0, . . . , 𝐻 𝑄 − 1}, mapped to physical group 𝑔 (ℎ) =
+
+⌊ℎ/𝑟 ⌋, the attention probability vector at a given decode step is: 
+
+S𝑙,ℎ = q𝑙,ℎ K⊤
+
+> 𝑙,𝑔 (ℎ)
+
+√𝐷 head 
+
+, A𝑙,ℎ = softmax  S𝑙,ℎ 
+
+ ∈ Δ𝑇 −1, (4) where Δ𝑇 −1 is the probability simplex. MHA corresponds to 
+
+𝑟 = 1 [1], MQA to 𝐻 KV = 1 [2], and GQA to 1 < 𝐻 KV <𝐻 𝑄 [3]. In vLLM, the physical KV cache is partitioned into non-contiguous page blocks 𝑃 𝑏 ∈ P of fixed capacity 𝐵 tokens: Shape  Kphysical 
+
+ = 𝑁 blocks , 𝐻 KV , 𝐵, 𝐷 head 
+
+ . (5) A logical block table maps (𝑙, 𝑔, ⌊𝑡 /𝐵 ⌋) ↦ → 𝑃 𝑏 . Fused CUDA kernels access memory per (𝑙, 𝑔 ) tuple; eviction at sub-page granularity therefore causes internal fragmentation or cache-unrolling overhead. 
+
+3.3. Quantifying the structural breakdown 
+
+Definition 1 (Retention set and union overhead ratio) . Let 
+
+K𝑙,ℎ ≜ argTopK 𝑗 ∈ { 1,...,𝑇 }
+
+ A𝑙,ℎ, 𝑗,, 𝑘  be the set of 𝑘 token in-dices selected by head ℎ under per-head budget 𝑘 ≤ 𝑇 , with ties broken deterministically by token index so that K𝑙,ℎ is a single well-defined set. For physical group 𝑔 , the union overhead ratio under head-independent selection is: UOR (𝑔, 𝑘 ) ≜
+
+Ðℎ∈Group (𝑔 ) K𝑙,ℎ 
+
+𝑘 , 1.0 ≤ UOR (𝑔, 𝑘 ) ≤ 𝑟. 
+
+(6) 
+
+Definition 2 (Intra-group Jaccard disagreement index) . The pairwise disagreement between sibling heads ℎ𝑖 , ℎ 𝑗 ∈
+
+Group (𝑔 ) is: 
+
+DJaccard (ℎ𝑖 , ℎ 𝑗 ) ≜ 1 − |K 𝑙,ℎ 𝑖 ∩ K 𝑙,ℎ 𝑗 ||K 𝑙,ℎ 𝑖 ∪ K 𝑙,ℎ 𝑗 | . (7) The two metrics are not independent. For a two-head group they determine each other exactly; for general 𝑟 , they sand-wich the inflation two-sidedly (Theorem 1). This gives Def-initions 1 and 2 operational content: measured Jaccard dis-agreement among sibling heads implies a quantifiable memory penalty for any head-independent policy. 
+
+Proposition 1 (Exact UOR–disagreement identity, 𝑟 = 2) . Let 
+
+𝑟 = 2 and 𝐷 = DJaccard (ℎ1, ℎ 2). Then: 
+
+UOR (𝑔, 𝑘 ) = 22 − 𝐷 . (8) 
+
+Proof. Let 𝑈 = K𝑙,ℎ 1 ∪ K 𝑙,ℎ 2 and 𝐼 = K𝑙,ℎ 1 ∩ K 𝑙,ℎ 2 . By inclusion–exclusion, |𝑈 | = 2𝑘 − | 𝐼 |. By definition 𝐷 =
+
+1−| 𝐼 |/| 𝑈 |, so |𝐼 | = (1−𝐷 )| 𝑈 |. Thus |𝑈 | = 2𝑘 −( 1−𝐷 )| 𝑈 | =⇒(2 − 𝐷 )| 𝑈 | = 2𝑘 . Dividing by 𝑘 yields Eq. (8). □
+
+4Remark 1 (Response curve of the identity) . The map 𝜙 (𝐷 ) ≜
+
+2/( 2 − 𝐷 ) from disagreement to overhead is strictly increas-ing, 𝜙 ′ (𝐷 ) = 2/( 2 − 𝐷 )2 > 0, and strictly convex, 𝜙 ′′ (𝐷 ) =
+
+4/( 2 − 𝐷 )3 > 0, on [0, 1]: the memory penalty accelerates as sibling selections diverge. Reference points: 𝐷 = 0 (complete consensus) gives UOR = 1.0; 𝐷 = 0.5 gives UOR = 1.33; 
+
+𝐷 = 2/3 gives the exact 1 .5× budget overshoot; 𝐷 = 1 (or-thogonal attention) gives the worst case UOR = 2.0 for 𝑟 = 2. 
+
+Corollary 1 (Elementary Bonferroni certificate) . Let 𝐽 𝑖 𝑗 =
+
+1 − D Jaccard (ℎ𝑖 , ℎ 𝑗 ) and ¯𝐽 = 2  
+
+> 𝑟 (𝑟 −1)
+
+Í𝑖< 𝑗 𝐽 𝑖 𝑗 . By Bonferroni’s inequality: 
+
+UOR (𝑔, 𝑘 ) ≥ max 
+
+n
+
+1, 𝑟 − 𝑟 (𝑟 − 1) ¯𝐽 
+
+o
+
+. (9) 
+
+Eq. (9) certifies a twofold inflation ( UOR ≥ 2) whenever ¯𝐽 ≤    
+
+> 𝑟 −2
+> 𝑟 (𝑟 −1)
+
+—yielding ¯𝐽 ≤ 1/6 for 𝑟 = 4 and ¯𝐽 ≤ 3/28 for 𝑟 = 8.Proof. | Ðℎ K𝑙,ℎ | ≥ Íℎ |K 𝑙,ℎ | − Í𝑖< 𝑗 |K 𝑙,ℎ 𝑖 ∩ K 𝑙,ℎ 𝑗 | by Bonfer-roni, and |K 𝑙,ℎ 𝑖 ∩K 𝑙,ℎ 𝑗 | = 𝐽 𝑖 𝑗 |K 𝑙,ℎ 𝑖 ∪K 𝑙,ℎ 𝑗 | ≤ 2𝑘 𝐽 𝑖 𝑗 . Summing over the 𝑟 (𝑟 −1)/ 2 pairs gives Í𝑖< 𝑗 |K 𝑙,ℎ 𝑖 ∩K 𝑙,ℎ 𝑗 | ≤ 𝑘 𝑟 (𝑟 −1) ¯𝐽 ,and dividing by 𝑘 yields the bound; the clamp is UOR ≥ 1 from Definition 1. The threshold follows by solving 𝑟 −𝑟 (𝑟 − 1) ¯𝐽 ≥ 2for ¯ 𝐽 . □
+
+Theorem 1 (GQA inflation sandwich bound) . For general 𝑟 ≥
+
+2, with 𝐽 𝑖 𝑗 and ¯𝐽 = 2  
+
+> 𝑟 (𝑟 −1)
+
+Í𝑖< 𝑗 𝐽 𝑖 𝑗 as in Corollary 1, the union overhead ratio is bounded by: 
+
+𝑟 
+
+1 + 2(𝑟 − 1) ¯𝐽 
+
+1 + ¯𝐽 
+
+≤ UOR (𝑔, 𝑘 ) ≤ min 𝑟, 𝑟 −max 
+
+> 𝑖< 𝑗
+
+2𝐽 𝑖 𝑗 
+
+1 + 𝐽 𝑖 𝑗 
+
+!
+
+.
+
+(10) 
+
+Proof. Lower bound. Let U = Ð𝑟 𝑖 =1 K𝑙,ℎ 𝑖 and define the cov-erage degree 𝑥 𝑚 ≜ Í𝑟 𝑖 =1 1{𝑚 ∈ K 𝑙,ℎ 𝑖 } for 𝑚 ∈ U . Exchanging the order of summation and splitting the double sum into diagonal and o ff -diagonal terms, ∑︁ 
+
+> 𝑚
+
+𝑥 𝑚 = 𝑟 𝑘, ∑︁ 
+
+> 𝑚
+
+𝑥 2 
+
+> 𝑚
+
+=
+
+> 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+> 𝑟
+
+∑︁ 
+
+> 𝑗 =1
+
+|K 𝑙,ℎ 𝑖 ∩K 𝑙,ℎ 𝑗 | = 𝑟 𝑘 +2∑︁ 
+
+> 𝑖< 𝑗
+
+𝐼 𝑖 𝑗 ,
+
+(11) where 𝐼 𝑖 𝑗 = |K 𝑙,ℎ 𝑖 ∩ K 𝑙,ℎ 𝑗 |. Cauchy–Schwarz on (𝑥 𝑚 ) and the all-ones vector gives (𝑟 𝑘 )2 ≤ |U| ( 𝑟 𝑘 + 2 Í𝑖< 𝑗 𝐼 𝑖 𝑗 ), hence UOR ≥ 𝑟 2/( 𝑟 + 2
+
+> 𝑘
+
+Í𝑖< 𝑗 𝐼 𝑖 𝑗 ). From 𝐽 𝑖 𝑗 = 𝐼 𝑖 𝑗 /( 2𝑘 − 𝐼 𝑖 𝑗 ) one gets 𝐼 𝑖 𝑗 = 2𝑘 𝐽 𝑖 𝑗 /( 1 + 𝐽 𝑖 𝑗 ), so 2
+
+> 𝑘
+
+Í𝑖< 𝑗 𝐼 𝑖 𝑗 = 4 Í𝑖< 𝑗 𝐽 𝑖 𝑗  
+
+> 1+𝐽 𝑖 𝑗
+
+. Since 
+
+𝑓 (𝑥 ) = 𝑥  
+
+> 1+𝑥
+
+is strictly concave ( 𝑓 ′′ (𝑥 ) = − 2 
+
+> (1+𝑥 )3
+
+< 0), Jensen’s inequality gives Í𝑖< 𝑗 𝑓 (𝐽 𝑖 𝑗 ) ≤ 𝑟 (𝑟 −1) 
+
+> 2
+
+𝑓 ( ¯𝐽 ); substituting this upper bound into the denominator yields the lower bound of Eq. (10). 
+
+Upper bound. For any pair {ℎ𝑎 , ℎ 𝑏 }, U = (K 𝑙,ℎ 𝑎 ∪ K 𝑙,ℎ 𝑏 ) ∪  Ð 𝑚 ≠𝑎,𝑏 K𝑙,ℎ 𝑚 
+
+, so sub-additivity and the map above give 
+
+|U| ≤ ( 2𝑘 − 𝐼 𝑎𝑏 ) + ( 𝑟 − 2)𝑘 = 𝑟 𝑘 − 𝐼 𝑎𝑏 , i.e., UOR ≤ 𝑟 − 2𝐽 𝑎𝑏  
+
+> 1+𝐽 𝑎𝑏
+
+.The pair is arbitrary, so the bound holds with the maximizing pair; the outer min (𝑟, ·) is the natural boundary from Defini-tion 1. □
+
+The full eight-step derivation of Theorem 1 appears in Sec-tion Appendix C.1. 
+
+> Table 2: The two disagreement certificates compared. The sandwich certificate of Theorem 1 strictly widens the certified-inflation regime; it is also naturally tight at consensus, where the Bonferroni form needs its clamp.
+
+Bonferroni Sandwich (Corollary 1) (Theorem 1) 2× threshold ( 𝑟 =4) ¯𝐽 ≤ 16 ≈ 0.167 ¯𝐽 ≤ 15 = 0.200 2× threshold ( 𝑟 =8) ¯𝐽 ≤ 328 ≈ 0.107 ¯𝐽 ≤ 311 ≈ 0.273 At ¯ 𝐽 → 0 (disjoint) 𝑟 (exact, tight) 𝑟 (exact, tight) At ¯ 𝐽 → 1 (consensus) clamp to 1 1 (naturally tight) 
+
+Tightness and threshold synchronization.. The lower bound is tight at both extremes: at ¯ 𝐽 = 0 (pairwise disjoint selections) it evaluates to 𝑟 , the exact worst case, and at ¯ 𝐽 = 1 (identical selections) to 1, the exact best case. The upper bound is tight at the disjoint extreme; at perfect alignment it evaluates to 𝑟 −1 for 
+
+𝑟 > 2—mathematically valid, though loose relative to the true limit of 1 .0, because the pairwise profile does not see higher-order overlap structure. Table 2 compares the two certificates. Under Theorem 1, twofold inflation (UOR ≥ 2) is certified up to ¯ 𝐽 ≤ 𝑟 −23𝑟 −2 —yielding ¯ 𝐽 ≤ 1/5 for 𝑟 = 4 and ¯ 𝐽 ≤ 3/11 for 
+
+𝑟 = 8—a strictly wider certification range than the Bonferroni threshold of Corollary 1. When siblings fully disagree ( ¯ 𝐽 → 0), they attend to essentially disjoint token sets and UOR → 𝑟 : a 4× cache inflation for Llama-3.1-8B ( 𝑟 = 4) and an 8 × inflation for 𝑟 = 8 architectures. 
+
+4. The Page-EntroKV methodology 
+
+Page-EntroKV aligns KV-cache eviction with the hardware-physical structure of GQA serving. Algorithm 1 states the com-plete decision procedure. Section 4.1 fixes the entropy machin-ery behind the pooling weights, Section 4.2 derives group pool-ing, page mapping, and eviction, and Section 4.3 covers inte-gration in vLLM. 
+
+4.1. Sink-isolated discrete Rényi attention entropy 
+
+The pooling weights of Page-EntroKV come from a discrete entropy family evaluated on sink-isolated attention distribu-tions. This subsection fixes the definitions and the suppression guarantee the rest of the paper relies on. 
+
+Definition 3 (Discrete generalized Rényi attention-entropy) .
+
+For A𝑙,ℎ ∈ Δ𝑇 −1 and 𝛼 ∈ ( 0, 1) ∪ ( 1, ∞) :
+
+H𝛼 
+
+ A𝑙,ℎ 
+
+ ≜ 11 − 𝛼 ln 
+
+> 𝑇
+
+∑︁ 
+
+> 𝑡 =1
+
+A𝑙,ℎ, ( 𝑡 ) 𝛼 
+
+!
+
+. (12) Writing A ≡ A𝑙,ℎ for brevity, taking limits establishes the 5Table 3: Why 𝛼 = 2: on-chip cost and numerical behavior of the three entropy orders for one head with 𝑇 positions. Collision entropy is the only order that reduces to a single dot product with a bounded logarithm argument. 
+
+Shannon ( 𝛼 →1) Collision ( 𝛼 =2) Min-entropy (𝛼 →∞ )Definition − Í𝑡 𝐴 ln 𝐴 − ln ∥ 𝐴 ∥22 − ln max 𝑡 𝐴 
+
+On-chip prim-itive 
+
+𝑇 ln-calls 1 dot product + 1ln 
+
+𝑇 -way max 
+
++ 1 ln FP16 stability cancellation as 
+
+𝐴 (𝑡 ) → 0
+
+stable ; argument in (0, 1]
+
+plateau ties Spike sensitiv-ity logarithmic scal-ing 
+
+quadratic ampli-fication of spikes ignores shape be-low peak 
+
+entropy family: lim  
+
+> 𝛼 →1
+
+H𝛼 (A) = −
+
+> 𝑇
+
+∑︁ 
+
+> 𝑡 =1
+
+A(𝑡 ) ln A(𝑡 ) (Shannon) , (13) 
+
+H2 (A) = − ln 
+
+> 𝑇
+
+∑︁ 
+
+> 𝑡 =1
+
+A(𝑡 )2 = − ln ∥A∥22 (collision, 𝛼 =2) ,
+
+(14) 
+
+H∞ (A) = − ln max  
+
+> 𝑡
+
+A(𝑡 ) (min-entropy) .
+
+(15) We fix 𝛼 = 2 for three reasons: collision entropy is a sin-gle inner product per head, it is numerically stable in FP16 (Remark 7), and it amplifies attention spikes while suppress-ing background tail mass. Table 3 makes the computational contrast concrete; the limit-order proofs appear in Section Ap-pendix C.3. 
+
+Definition 4 (Sink-isolated collision entropy) . Let 𝑆 sink denote the set of attention-sink tokens, taken as the first |𝑆 sink | = 4 to-ken positions, following the convention of StreamingLLM [13]. Under the non-degeneracy hypothesis Í𝑡 ′ ∈𝑆 sink A𝑙,ℎ, ( 𝑡 ′) < 1 (a head concentrated entirely on 𝑆 sink is handled by the implemen-tation clamp; Remark 7), the sink-isolated attention distribution ˜A𝑙,ℎ on non-sink positions 𝑡 ∉ 𝑆 sink is: ˜A𝑙,ℎ (𝑡 ) ≜ A𝑙,ℎ, ( 𝑡 )
+
+1 − Í𝑡 ′ ∈𝑆 sink A𝑙,ℎ, ( 𝑡 ′) , 𝑡 ∉ 𝑆 sink , (16) and the sink-isolated collision entropy is H sink 2
+
+ A𝑙,ℎ 
+
+ ≜
+
+− ln ∥ ˜A𝑙,ℎ ∥22.Without isolation, an attention-sink head that concentrates most of its mass on 𝑆 sink has very low raw collision entropy and would receive the same large Boltzmann weight as a genuine retrieval head, misdirecting the pooled mass toward the sink tokens. The next theorem makes the separation quantitative: isolation drives the sink head’s weight to zero at a controllable rate while the retrieval head’s weight stays bounded away from zero. 
+
+Theorem 2 (Sink head suppression) . Let 𝑁 = 𝑇 − | 𝑆 sink | and 
+
+𝜏 𝑔 > 0. Consider two head types: (i) a pure sink head con-centrating mass 1 − 𝛿 on 𝑆 sink (with 0 < 𝛿 < 1) and a uniform residual over the 𝑁 non-sink positions; (ii) a retrieval head with mass 1 − 𝜖 ′ at a non-sink needle 𝑡 ∗ (with 0 < 𝜖 ′ < 1) and zero sink mass. Under sink isolation, the sink head has ∥ ˜A∥22 = 1/𝑁 ,hence H sink 2 () = ln 𝑁 exactly, and its Boltzmann factor is: 
+
+𝑒 −H sink 2 ()/ 𝜏 𝑔 = 𝑒 − ln ( 𝑁 )/ 𝜏 𝑔 = 𝑁 −1/𝜏 𝑔 = 1
+
+(𝑇 − | 𝑆 sink |) 1/𝜏 𝑔 
+
+−−−−→ 
+
+> 𝑇 →∞
+
+0,
+
+(17) 
+
+whereas the retrieval head maintains H sink 2
+
+ A𝑙,ℎ ′
+
+ = −2 ln (1 −
+
+𝜖 ′) = O( 1) and factor (1 − 𝜖 ′)2/𝜏 𝑔 > 0: its weight is bounded away from zero for every 𝑇 .Proof. For the sink head, the residual is uniform: ˜A𝑙,ℎ (𝑡 ) =
+
+(𝛿 /𝑁 )/ 𝛿 = 1/𝑁 on all 𝑁 non-sink positions, so ∥ ˜A∥22 = 𝑁 ·
+
+𝑁 −2 = 1/𝑁 and H sink 2 () = − ln (1/𝑁 ) = ln 𝑁 ; its factor is 
+
+𝑒 − ln 𝑁 /𝜏 𝑔 = 𝑁 −1/𝜏 𝑔 → 0. For the retrieval head, zero sink mass makes isolation the identity, so ∥ ˜A𝑙,ℎ ′ ∥22 ≥ ( 1 − 𝜖 ′)2 and the factor is at least 𝑒 2 ln (1− 𝜖 ′ )/ 𝜏 𝑔 = (1 − 𝜖 ′)2/𝜏 𝑔 . For contrast, the 
+
+raw collision entropy of the sink head tends to −2 ln (1 − 𝛿 )—also O( 1)—so raw entropy cannot separate the two types; the separation is created by the isolation step, not by the entropy family alone. □
+
+Remark 2 (Why isolation, not the entropy family, does the work) . For the pure sink head of Theorem 2, the two regimes contrast sharply. Raw collision entropy is evaluated over all 𝑇 
+
+tokens, where ∥ 𝐴 ∥22 ≥ ( 1 − 𝛿 )2 ≈ 1 and hence H2 ≈ 0: the sink head receives an O( 1) Boltzmann weight and masquer-ades as a sharp retrieval head, stealing group attention mass. 
+
+Sink-isolated entropy is evaluated strictly over the 𝑁 non-sink tokens, where ∥ ˜𝐴 ∥22 = 1/𝑁 → 0 and hence H sink 2 = ln 𝑁 → ∞ :the weight decays as 𝑁 −1/𝜏 𝑔 and the head is suppressed. This holds for every order 𝛼 , since the raw power sum Í𝑡 𝐴 (𝑡 ) 𝛼 ≥(1 − 𝛿 ) 𝛼 = O( 1) for any fixed 𝛼 —no choice of entropy order separates the two head types on the raw distribution. The sep-aration is created entirely by the conditional renormalization of Eq. (16). 
+
+Definition 5 (Prefill observation window) . The sink-isolated collision entropies used for head weighting are evaluated over the prefill observation window 𝑊 obs , the final min (𝑇, 𝑊 max ) to-kens of the prompt with 𝑊 max = 4096 (the observation-window convention of SnapKV [11]): 
+
+H sink 2
+
+ A𝑙,ℎ ↾ 𝑊 obs 
+
+ = − ln ˜A𝑙,ℎ ↾ 𝑊 obs 22, (18) where the restriction is renormalized over the window (the nor-malization constant is part of the configuration and is recorded with it). The entropies—and hence the pooling weights of Eq. (20)—are computed once, at the end of prefill, and remain fixed for the entire auto-regressive generation lifecycle. 
+
+4.2. Hardware-aligned group pooling and paged mapping The union overhead dilemma.. If selection occurs indepen-dently per query head with K𝑙,ℎ = argTopK (A𝑙,ℎ,, 𝑘 ), the en-gine must retain the union Ðℎ∈Group (𝑔 ) K𝑙,ℎ , with UOR (𝑔, 𝑘 ) ∈ 
+
+6𝑄 0
+
+> (Di ff use)
+
+𝑄 1
+
+> (Retrieval)
+
+𝑄 2
+
+> (Di ff use)
+
+𝑄 3
+
+> (Sink)
+
+Entropy-weighted group pooling 
+
+h
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) = Íℎ∈Group (𝑔 ) 𝑤 𝑙,ℎ A𝑙,ℎ (𝑡 )
+
+i
+
+𝑤 ℎ ∝ 𝑒 −H sink 2 (A𝑙,ℎ )/𝜏 𝑔 =⇒ amplifies 𝑄 1; suppresses 𝑄 0, 𝑄 2, 𝑄 3
+
+Page-level discrete aggregation (block size 𝐵 = 16) 
+
+𝐼 𝑙,𝑔 (𝑃 𝑏 ) = max 𝑡 ∈ 𝑃 𝑏 Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 )
+
+Physical block eviction in the vLLM page table 
+
+Shape [𝑁 blocks , 𝐻 KV , 𝐵, 𝐷 head ] =⇒ 𝐾 𝑙 pages selected per group, group-level UOR ≡ 1, zero fragmentation        
+
+> Figure 2: Page-EntroKV mechanism for an 𝑟 =4 architecture such as Llama-3.1-8B: entropy-weighted pooling with sink-isolated entropy amplifies the retrieval head 𝑄 1, suppresses di ff use heads 𝑄 0,𝑄 2, and the attention-sink head 𝑄 3, and maps the result onto physical PagedAttention blocks.
+
+[1, 𝑟 ] as defined in Eq. (6), exactly determined by disagreement at 𝑟 = 2 (Proposition 1) and sandwiched at every ratio (Theo-rem 1): an 800% memory expansion for 𝑟 = 8 architectures when selections diverge, causing out-of-memory faults. 
+
+Needle dilution under arithmetic mean pooling.. Naive mean pooling assigns 
+
+Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 1
+
+𝑟 
+
+
+
+(1 − 𝜖 ) + ( 𝑟 − 1) 1
+
+𝑇 
+
+
+
+−−−−→
+
+> 𝑇 →∞
+
+1 − 𝜖 𝑟 . (19) The needle’s pooled mass drops by exactly 1 − 1/𝑟 —87 .5% for 𝑟 = 8, independent of 𝜖 ; for 𝜖 = 0.05 the pooled score is 
+
+(1 − 𝜖 )/ 8 = 0.11875, below common eviction thresholds. 
+
+Entropy-weighted group pooling.. Page-EntroKV replaces mean pooling with entropy-weighted group pooling: 
+
+𝑤 𝑙,ℎ = exp  −H sink 2
+
+ A𝑙,ℎ 
+
+ /𝜏 𝑔 
+
+Í 𝑗 ∈Group (𝑔 ) exp  −H sink 2
+
+ A𝑙, 𝑗 
+
+ /𝜏 𝑔 
+
+ , Íℎ∈Group (𝑔 ) 𝑤 𝑙,ℎ = 1,
+
+(20) 
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) =∑︁ 
+
+> ℎ∈Group (𝑔 )
+
+𝑤 𝑙,ℎ A𝑙,ℎ, ( 𝑡 ). (21) Low-entropy retrieval heads receive exponentially larger weights; di ff use streaming heads and attention-sink heads are suppressed, the latter by Definition 4 and Theorem 2. Pooling runs once per physical KV group—matching how GQA shares memory. The pooled output stays a convex combination of probability vectors, and that property is exactly what the bud-get guarantee of Theorem 3 requires. With 𝑆 sink = ∅, Eq. (20) reduces to raw collision entropy. The temperature 𝜏 𝑔 interpo-lates the entire family of group aggregators; we characterize it exactly: 
+
+Proposition 2 (Temperature monotonicity and limits) . Let 
+
+𝑤 𝑙,ℎ (𝜏 𝑔 ) be defined by Eq. (20) . (i) 𝑤 𝑙,ℎ (𝜏 𝑔 ) is non-increasing in H sink 2
+
+ A𝑙,ℎ 
+
+ (strictly decreasing when the entropies are dis-tinct), for every 𝜏 𝑔 > 0. (ii) lim 𝜏 𝑔 →∞ 𝑤 𝑙,ℎ (𝜏 𝑔 ) = 1/𝑟 (arith-metic mean pooling). (iii) lim 𝜏 𝑔 →0+ 𝑤 𝑙,ℎ (𝜏 𝑔 ) is the uniform weight on the set of entropy minimizers—one-hot for a unique minimizer. Proof. 𝑤 is a softmax of the scores −H sink 2
+
+ A𝑙,ℎ 
+
+ /𝜏 𝑔 , which is strictly increasing in its score; hence 𝑤 is non-increasing in the entropy (strictly under distinct values). (ii) The entropies are bounded by ln 𝑇 , so every exponential tends to 1 and 𝑤 →
+
+1/𝑟 . (iii) Multiplying numerator and denominator by 𝑒 Hmin /𝜏 𝑔 ,every exponent is ≤ 0, equals 0 exactly at the minimizers, and 
+
+𝑒 −𝑐 /𝜏 𝑔 → 0 for each 𝑐 > 0. □
+
+Proposition 2 also motivates the failure-mode fallback of Section 7: when intra-group entropies are indistinguishable, Proposition 2 (i) loses its bite, the entropy signal carries no in-formation, and the operator can switch to max-over-heads ag-gregation without changing the budget guarantee—which de-pends only on pooling before selection (Theorem 3). 
+
+Discrete physical block-frame aggregation.. Token scores are aggregated onto physical page frames 𝑃 𝑏 ∈ P via max-reduction, and the eviction operator selects the top 𝐾 𝑙 pages at the hardware tuple (𝑙, 𝑔, 𝑃 𝑏 ):
+
+𝐼 𝑙,𝑔 (𝑃 𝑏 ) = max   
+
+> 𝑡 ∈𝑃 𝑏
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ), K𝑙,𝑔 = TopK 
+
+
+
+{𝐼 𝑙,𝑔 (𝑃 𝑏 )} 𝑃 𝑏 ∈ P , 𝐾 𝑙 
+
+
+
+.
+
+(22) (Page-level retention sets K𝑙,𝑔 = K𝑙,𝑔 are distinguished from the token-level selection sets K𝑙,ℎ of Definition 1 by their group subscript.) 
+
+Why block-max rather than block-mean reduction.. Aggregat-ing page importance by the within-page mean instead of the max dilutes exactly the pages the framework exists to protect. With 𝐵 = 16, a page holding a single needle token of pooled mass 0 .95 and fifteen near-zero tokens scores 0 .95 /16 = 0.0594 under block-mean—a 93 .75% in-page dilution—while block-max preserves 0 .95. A di ff use page of sixteen 0 .06-mass tokens then outranks it (0 .06 > 0.0594) and evicts the needle page. Block-max is also exactly scale-invariant in 𝐵 : it preserves the peak coordinate regardless of page size, whereas block-mean attenuates every sharp page by 1 /𝐵 . These figures are illustra-tive arithmetic, not measurements; Lemma 1 makes the corre-sponding guarantee formal. 7Proposition 3 (Budget initialization and exact conservation) .
+
+With total budget Btotal , the per-layer token budget B𝑙 and static per-group page quota 𝐾 𝑙 are: 
+
+B𝑙 = Btotal 
+
+𝐿 , 𝐾 𝑙 =
+
+j B𝑙 
+
+𝐻 KV · 𝐵 
+
+k
+
+. (23) (i) Under the floor quotas alone, exact conservation (Í𝑙 𝐻 KV 𝐵 𝐾 𝑙 = Btotal ) holds i ff Btotal ≡ 0 (mod 𝐿 𝐻 KV 𝐵 ). (ii) 
+
+With largest-remainder (Hamilton) rounding over the fractional remainders 𝑅 𝑙 = B𝑙   
+
+> 𝐻 KV 𝐵
+
+− 𝐾 𝑙 ∈ [ 0, 1)—allocating +1 page to the largest-remainder layer-groups—exact conservation holds iff 𝐻 KV 𝐵 divides Btotal , in which case at most 𝐿 − 1 extra page-groups su ffi ce. (iii) Otherwise the residual Btotal mod 𝐻 KV 𝐵 < 𝐻 KV 𝐵 tokens—less than one page-group—is unavoidable at page granularity. Proof. Page allocation is quantized in 𝐻 KV 𝐵 tokens per layer-group, so Í𝑙 𝐻 KV 𝐵 𝐾 𝑙 is always a multiple of 𝐻 KV 𝐵 ; it equals 
+
+Btotal iff 𝐻 KV 𝐵 divides Btotal , which proves (ii)’s necessity and (iii). For (i): with uniform budgets, B𝑙 /( 𝐻 KV 𝐵 ) =
+
+Btotal /( 𝐿 𝐻 KV 𝐵 ), so all 𝐿 floors sum to Btotal iff the quotient is an integer. For (ii)’s su ffi ciency: writing 𝑥 = Btotal /( 𝐻 KV 𝐵 ) ∈ 
+
+N, the floor sum is 𝐿 ⌊𝑥 /𝐿 ⌋ and the deficit 𝑥 − 𝐿 ⌊𝑥 /𝐿 ⌋ ∈{0, . . . , 𝐿 − 1} is distributed as +1 allocations to the largest-remainder layers, restoring Í𝑙 𝐾 𝑙 = 𝑥 . □
+
+The full derivation, including worked numerical cases on Llama-3.1-8B geometry, appears in Section Appendix C.5. 
+
+Page-level retention across groups.. Because PagedAttention blocks are shared across the 𝐻 KV groups of a sequence, per-group retention sets are materialized by the engine as their per-layer union. Proposition 4 gives the exact accounting. 
+
+Proposition 4 (Engine-level page accounting) . Let 𝑃 ret  
+
+> 𝑙
+
+=Ð𝑔 K𝑙,𝑔 be the layer page union, where each K𝑙,𝑔 is given by Eq. (22) . Then, unconditionally: 
+
+𝐾 𝑙 ≤ 𝑃 ret  
+
+> 𝑙
+
+≤ 𝐻 KV 𝐾 𝑙 . (24) 
+
+The lower bound is attained i ff all groups select identical page sets; the upper bound i ff selections are pairwise disjoint. Proof. By Eq. (22), each group retains exactly 𝐾 𝑙 pages (exact TopK cardinality), so |K 𝑙,𝑔 | = 𝐾 𝑙 for every 𝑔 ; the union con-tains any single member, giving the lower bound. The union of 
+
+𝐻 KV sets of cardinality 𝐾 𝑙 each has cardinality at most 𝐻 KV 𝐾 𝑙 .The equality conditions are immediate. □
+
+The page-union ratio, taken relative to the per-group reten-tion cardinality |𝑃 ret  
+
+> 𝑙
+
+|/ 𝐾 𝑙 , lies in [1, 𝐻 KV ] and equals one whenever the per-group pooled page profiles coincide. Proposi-tion 4 states the guarantee at the level where it holds—per layer, across the 𝐻 KV groups, on top of the per-group guarantee of Theorem 3—and quantifies the residual overhead exactly; the pilot measures it in Section 6.3. The full proof, including both equality conditions and the page-union ratio formalism, appears in Section Appendix C.6. 
+
+Algorithm 1: The Page-EntroKV decision procedure.                                                                                              
+
+> Input: {A𝑙,ℎ }𝐻 𝑄 −1
+> ℎ=0per layer 𝑙 ;Btotal ;𝐵 ;𝜏 𝑔 ;𝑆 sink
+> Output: retention masks K𝑙,𝑔 for all (𝑙, 𝑔 )
+> // Budget initialization (prefill only)
+> 1B𝑙 ← B total /𝐿 ;𝐾 𝑙 ← ⌊ B 𝑙 /( 𝐻 KV ·𝐵 ) ⌋ // Eq. (23) // Page quotas 𝐾 𝑙 are static for the entire generation lifecycle. // Sink-isolated entropy, pooling, and page mapping
+> 2for 𝑙 ←1to 𝐿 do
+> 3for 𝑔 ←0to 𝐻 KV −1do
+> 4Hsink 2
+>  A𝑙,ℎ
+> ← − ln ∥˜A𝑙,ℎ ∥22over 𝑊 obs ,
+> 5ℎ∈Group (𝑔 )// Definitions 4 and 5
+> 6𝑤 𝑙,ℎ ←softmax ℎ∈Group (𝑔 )(−H sink 2
+>  A𝑙,ℎ
+> /𝜏 𝑔 )
+> // Eq. (20)
+> 7Apooled
+> 𝑙,𝑔 ←Íℎ∈Group (𝑔 )𝑤 𝑙,ℎ A𝑙,ℎ // Eq. (21)
+> 8𝐼 𝑙,𝑔 (𝑃 𝑏 ) ← max 𝑡 ∈𝑃 𝑏 Apooled
+> 𝑙,𝑔 (𝑡 )// Eq. (22)
+> 9K𝑙,𝑔 ←TopK ( { 𝐼 𝑙,𝑔 (𝑃 𝑏 ) } 𝑃 𝑏 ∈P , 𝐾 𝑙 )// Eq. (22)
+> 10 end
+> 11 end
+> 12 evict every 𝑃 𝑏 ∉ Ð 𝑔 K𝑙,𝑔
+> per layer (Proposition 4); free blocks to the vLLM pool
+
+4.3. Systems integration in vLLM 
+
+Page-EntroKV never materializes 𝐻 𝑄 × 𝑇 intermediate at-tention matrices in global DRAM. Entropy estimation, Boltz-mann weighting, and page reduction are fused into two kernels executing in on-chip SRAM (Fig. 3). Kernel 1 computes QK dot-products, sink-isolated collision entropies, and Boltzmann weights in FP16 registers, then performs the group reduction in shared memory. Kernel 2 applies the block-table mapping, runs the max-reduction per physical page, and performs two-pass radix top-𝐾 𝑙 selection, emitting the retention mask with-out DRAM materialization. Unreferenced blocks return to the vLLM free-page pool immediately. Section Appendix D gives the PyTorch reference implementation. 
+
+5. Theoretical analysis 
+
+Two guarantees carry the framework. The memory bound of Theorem 3 holds by construction, for any attention pattern; the needle-retention result of Theorem 4 holds under explicit head-specialization assumptions. The remaining results give the finite-context form, a concrete instantiation, and the on-chip cost of the design. 
+
+Theorem 3 (Strict physical memory bounds and union elimina-tion) . Under head-independent top-𝑘 eviction, physical mem-ory consumption satisfies: 
+
+𝑘 ≤ 𝑀 indep ≤ min (𝑟 · 𝑘, 𝑇 ). (25) 
+
+Under Page-EntroKV group-level pooling, 𝑀 pooled ≡ 𝑘 , guar-anteeing group-level UOR (𝑔, 𝑘 ) ≡ 1.0.Proof. Under head-independent selection, each ℎ ∈ Group (𝑔 )
+
+selects K𝑙,ℎ = TopK (A𝑙,ℎ , 𝑘 ) with |K 𝑙,ℎ | = 𝑘 . Because the KV bu ff er is physically shared, the engine allocates Kunion  
+
+> 𝑔
+
+=Ðℎ∈Group (𝑔 ) K𝑙,ℎ . The union contains any member set, so 8Step 1 — vLLM scheduler (decode step 𝑖 ). Initiates the auto-regressive cycle; passes the static per-layer page quotas 
+
+𝐾 𝑙 (fixed at prefill, Eq. (23)) and active page-table pointers to the worker queue. 
+
+Step 2 — fused kernel 1: flash-entropy reduction (on-chip SRAM). 
+
+• QK dot-products: S𝑙,ℎ = q𝑙,ℎ K⊤
+
+> 𝑙,𝑔
+
+/ √𝐷 head .
+
+• Sink-isolated collision entropy in FP16 registers: H sink 2
+
+ A𝑙,ℎ 
+
+ = − ln ∥ ˜A𝑙,ℎ ∥22.
+
+• Boltzmann weights: 𝑤 𝑙,ℎ = softmax ℎ∈Group (𝑔 ) (−H sink 2
+
+ A𝑙,ℎ 
+
+ /𝜏 𝑔 ).
+
+• Group reduction in shared memory: Apooled  
+
+> 𝑙,𝑔
+
+= Íℎ 𝑤 𝑙,ℎ A𝑙,ℎ .
+
+Step 3 — fused kernel 2: block-max + two-pass top-𝐾 page selector. 
+
+• Physical block mapping: 𝑃 𝑏 = Mpage (𝑙, 𝑔, 𝑏 ).
+
+• Max-reduction: 𝐼 𝑙,𝑔 (𝑃 𝑏 ) = max 𝑡 ∈ 𝑃 𝑏 Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ).
+
+• Radix top-𝐾 𝑙 selection → retention mask K𝑙,𝑔 with exact cardinality (Remark 6). 
+
+Step 4 — zero-copy physical block reclamation. Unreferenced blocks return to the vLLM free page pool immediately: group-level UOR ≡ 1, zero DRAM copies, zero internal fragmentation. 
+
+> Figure 3: Hardware-level execution flow of the fused Page-EntroKV kernels within the vLLM decoding loop.
+
+𝑀 indep ≥ 𝑘 ; sub-additivity gives 𝑀 indep ≤ Íℎ |K 𝑙,ℎ | = 𝑟 𝑘 , and trivially 𝑀 indep ≤ 𝑇 ; hence Eq. (25). In Page-EntroKV, pooling occurs prior to selection: because 𝑤 𝑙,ℎ ≥ 0 and Íℎ 𝑤 𝑙,ℎ = 1, 
+
+Apooled  
+
+> 𝑙,𝑔
+
+= Íℎ 𝑤 𝑙,ℎ A𝑙,ℎ is a convex combination of probabil-ity vectors, so Apooled  
+
+> 𝑙,𝑔
+
+∈ Δ𝑇 −1 is itself a valid probability vector. Selection is performed on this single pooled vector: 
+
+|𝑆 pooled  
+
+> 𝑙,𝑔
+
+| = TopK (Apooled  
+
+> 𝑙,𝑔
+
+, 𝑘 ). By the exact cardinality property of TopK on a single vector—with deterministic tie-breaking— 
+
+|𝑆 pooled  
+
+> 𝑙,𝑔
+
+| ≡ 𝑘 under all attention configurations, guaranteeing UOR (𝑔, 𝑘 ) = 𝑘 /𝑘 ≡ 1.0. The union semantics that produce the upper regime of Eq. (25) are eliminated by construction, for every overlap profile of Section 3.3. □
+
+Theorem 4 (Needle retrieval preservation under head special-ization) . Suppose Group (𝑔 ) contains exactly one retrieval head 
+
+ℎ∗ with A𝑙,ℎ ∗ , ( 𝑡 ∗) = 1 − 𝜖 at a non-sink position 𝑡 ∗ ∉ 𝑆 sink , 𝜖 ∈(0, 12 ), and sink-isolated collision entropy H sink 2
+
+ A𝑙,ℎ ∗
+
+ ≤ 𝜂 ret .Suppose each of the 𝑟 − 1 sibling heads has near-maximal sink-isolated entropy: there exist constants 𝑐 𝑗 ≥ 0, independent of 
+
+𝑇 , with 
+
+H sink 2
+
+ A𝑙, 𝑗 
+
+ ≥ ln  𝑇 − | 𝑆 sink | − 𝑐 𝑗 ( 𝑗 ≠ ℎ∗). (26) 
+
+Both canonical background cases satisfy Eq. (26) with 𝑐 𝑗 = 0:uniformly di ff use heads, and attention-sink heads whose resid-ual mass is spread (Theorem 2); the constant 𝑐 𝑗 permits mildly concentrated residuals. Then: 
+
+(i) Under arithmetic mean pooling, Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) → ( 1 − 𝜖 )/ 𝑟 
+
+as 𝑇 → ∞ .
+
+(ii) Under entropy-weighted pooling with sink-isolated en-tropies and temperature 𝜏 𝑔 > 0: lim 𝑇 →∞ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 1 − 𝜖 .Proof. Write 𝑝 𝑗 = Í𝑡 ′ ∈𝑆 sink A𝑙, 𝑗, ( 𝑡 ′) for the sink mass of sibling 
+
+𝑗 , so that A𝑙, 𝑗, ( 𝑡 ) = (1 − 𝑝 𝑗 ) ˜A𝑙, 𝑗 (𝑡 ) for non-sink 𝑡 ; in particular 0 ≤ A𝑙, 𝑗, ( 𝑡 ∗) ≤ ˜A𝑙, 𝑗 (𝑡 ∗)—this is where the hypothesis 𝑡 ∗ ∉ 𝑆 sink 
+
+enters, since ˜ A𝑙, 𝑗 is defined only o ff 𝑆 sink .
+
+Part (i): arithmetic mean collapse.. For each sibling, Eq. (26) gives ∥ ˜A𝑙, 𝑗 ∥22 = 𝑒 −H sink 2 (A𝑙, 𝑗 ) ≤ 𝑒 𝑐 𝑗 (𝑇 − | 𝑆 sink |) −1, hence ˜A𝑙, 𝑗 (𝑡 ∗) ≤ 𝑒 𝑐 𝑗 /2 (𝑇 − | 𝑆 sink |) −1/2 and A𝑙, 𝑗, ( 𝑡 ∗) ≤ 𝑒 𝑐 𝑗 /2 (𝑇 −|𝑆 sink |) −1/2 → 0. Therefore 
+
+Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 1
+
+𝑟 
+
+h
+
+(1 − 𝜖 ) + ∑︁ 
+
+> 𝑗 ≠ℎ∗
+
+A𝑙, 𝑗, ( 𝑡 ∗)
+
+i 𝑇 →∞ 
+
+−−−−→ 1 − 𝜖 𝑟 , (27) which equals (1 − 𝜖 )/ 8 for 𝑟 = 8; at the representative 𝜖 = 0.05 this is 0 .11875—below common eviction thresholds. 
+
+Part (ii): entropy-weighted pooling asymptotics.. Let 𝑢 ℎ =
+
+exp (−H sink 2
+
+ A𝑙,ℎ 
+
+ /𝜏 𝑔 ). The retrieval head satisfies 𝑢 ℎ∗ ≥
+
+exp (− 𝜂 ret /𝜏 𝑔 ) = 𝐶 ret > 0. Each sibling satisfies, by Eq. (26), 
+
+𝑢 𝑗 ≤ 𝑒 𝑐 𝑗 /𝜏 𝑔 (𝑇 − | 𝑆 sink |) −1/𝜏 𝑔 ; collecting these, 𝐷 (𝑇 ) ≜Í 𝑗 ≠ℎ∗ 𝑒 𝑐 𝑗 /𝜏 𝑔 (𝑇 − | 𝑆 sink |) −1/𝜏 𝑔 → 0 for any fixed 𝑐 𝑗 and 𝜏 𝑔 > 0. Hence 𝑤 𝑙,ℎ ∗ ≥ 𝐶 ret    
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+and Í 𝑗 ≠ℎ∗ 𝑤 𝑙, 𝑗 ≤ 𝐷 (𝑇 )   
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+→ 0. All pooled mass at 𝑡 ∗ is bracketed by the retrieval head’s contribu-tion below and the total head mass above: 
+
+𝑤 𝑙,ℎ ∗ (1 − 𝜖 ) ≤ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) ≤ 𝑤 𝑙,ℎ ∗ (1 − 𝜖 ) + ∑︁ 
+
+> 𝑗 ≠ℎ∗
+
+𝑤 𝑙, 𝑗 , (28) and both outer terms converge to 1 − 𝜖 , giving lim  
+
+> 𝑇 →∞
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 1 − 𝜖 . (29) 
+
+□
+
+The asymptotic statement becomes concrete—and checkable against any deployment—in finite context: 9Corollary 2 (Finite-context retention bound) . Under the as-sumptions of Theorem 4, for every finite 𝑇 > |𝑆 sink |:
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) ≥ (1−𝜖 ) − Δ(𝑇 ), Δ(𝑇 ) = (1−𝜖 ) 𝐷 (𝑇 )
+
+𝐶 ret + 𝐷 (𝑇 ) ,
+
+(30) 
+
+and Δ(𝑇 ) → 0 as 𝑇 → ∞ .Proof. By the weight bound of Theorem 4, Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) ≥
+
+𝑤 𝑙,ℎ ∗ (1 − 𝜖 ) ≥ 𝐶 ret    
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+(1 − 𝜖 ) = (1 − 𝜖 ) − Δ(𝑇 ). □
+
+Remark 3 (Scope of the assumptions and boundary cases) .
+
+Theorem 4 gives a su ffi cient condition under which entropy-weighted pooling provably dominates arithmetic mean pooling: siblings must have near-maximal sink-isolated entropy. Three boundary cases delimit it. First, the needle is assumed non-sink: 
+
+𝑡 ∗ ∉ 𝑆 sink excludes a needle inside the sink region—the first 
+
+|𝑆 sink | prompt positions—which the theorem does not cover. Second, the result extends to multiple retrieval heads: pooling preserves the convex combination of their masses rather than a single head’s mass; siblings with intermediate entropy tran-sition smoothly per Proposition 2. Third, when every head in a group has near-identical high entropy, no head satisfies the retrieval-head premise; the weights degenerate toward uniform (Proposition 2 ii), and the max-over-heads fallback of Section 7 is the designated mitigation. 
+
+Remark 4 (Concrete instantiation at 128k context) . For an 𝑟 = 8group, 𝜏 𝑔 = 0.5, uniformly di ff use siblings ( 𝑐 𝑗 = 0), a retrieval head with sink-isolated entropy 𝜂 ret = ln 2 (at least half of its non-sink mass on the needle), 𝜖 = 0.05, and 𝑇 = 131 ,072 (so 
+
+𝑇 − | 𝑆 sink | = 131 ,068): 𝐶 ret = 𝑒 −2 ln 2 = 0.25 and 𝐷 (𝑇 ) =
+
+7 (131 ,068 )−2 ≈ 4.08 ×10 −10 , so Δ(𝑇 ) = (1− 𝜖 ) · 1.64 ×10 −9 ≤
+
+1.64 × 10 −9 (rounded ≲ 2 × 10 −9)—numerically negligible at 128k context. Under mean pooling the same needle’s score is (1 − 𝜖 )/ 8 = 0.11875, an 87 .5% attenuation (Theorem 4 i). These figures follow from the stated assumptions by arithmetic; they involve no measurement. The step-by-step instantiation and the 4k–128k scaling table appear in Section Appendix C.9. 
+
+Lemma 1 (Page-frame monotonicity) . Let 𝑃 ∗ ∈ P contain 
+
+𝑡 ∗ = arg max 𝑡 Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ). Under max-reduction (Eq. (22) ), 
+
+𝑃 ∗ = arg max 𝑃 𝑏 ∈ P 𝐼 𝑙,𝑔 (𝑃 𝑏 ).Proof. Since 𝑡 ∗ ∈ 𝑃 ∗: 𝐼 𝑙,𝑔 (𝑃 ∗) = max 𝑡 ∈ 𝑃 ∗ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) ≥
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗). For any 𝑃 𝑗 ≠ 𝑃 ∗, let 𝑡 𝑗 = arg max 𝑡 ∈ 𝑃 𝑗 Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ).Then 𝐼 𝑙,𝑔 (𝑃 𝑗 ) = Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 𝑗 ) ≤ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) ≤ 𝐼 𝑙,𝑔 (𝑃 ∗). There-fore 𝑃 ∗ tops the priority queue. □
+
+Proposition 5 (Computational complexity of on-chip pool-ing) . Evaluating entropy-weighted group pooling and block-max mapping across 𝐻 𝑄 heads for sequence length 𝑇 and block size 𝐵 requires 
+
+O 𝐻 𝑄 𝑇 + 𝐻 KV (𝑇 /𝐵 ) log 𝐾 𝑙 
+
+ (31) 
+
+operations. When pooling is fused with the block-max reduction and processed page-by-page, the on-chip intermediate storage is O( 𝑟 𝐵 ) words of register /shared memory per active page plus 
+
+O( 𝐻 KV 𝑇 /𝐵 ) accumulated page scores, and the stage adds no global DRAM tra ffi c beyond the attention computation that pro-duces {A𝑙,ℎ }.Proof sketch. Sink-isolated collision entropy per head is an inner product over the non-sink positions, accumulated tile-by-tile; softmax weights cost O( 𝐻 𝑄 ). The pooled vector need never be materialized: for each page 𝑃 𝑏 , 𝐼 𝑙,𝑔 (𝑃 𝑏 ) =
+
+max 𝑡 ∈ 𝑃 𝑏 
+
+Íℎ∈Group (𝑔 ) 𝑤 𝑙,ℎ A𝑙,ℎ, ( 𝑡 ) is computed from the 𝑟 atten-tion rows of the group already resident in on-chip tiles, cost-ing 𝐻 𝑄 𝑇 multiply–accumulates and 𝐻 KV 𝑇 comparisons in to-tal. The top-𝐾 𝑙 selection over the 𝑇 /𝐵 page scores per group costs O( 𝐻 KV (𝑇 /𝐵 ) log 𝐾 𝑙 ) (or O( 𝐻 KV 𝑇 /𝐵 ) with radix selec-tion, Remark 6). The weights ( 𝐻 𝑄 words) and page scores (𝐻 KV 𝑇 /𝐵 words) reside in shared memory, so no intermediate tensor is written to DRAM. □
+
+Remark 5 (Shared-memory footprint) . For a threadblock pro-cessing one GQA group with ratio 𝑟 , page size 𝐵 , and head dimension 𝐷 head : the attention tile for one page requires 𝑟 · 𝐵 
+
+FP16 elements (256 bytes for 𝑟 =8, 𝐵 =16); the group’s Q rows and the page’s K tile require (𝑟 +𝐵 )· 𝐷 head FP16 elements (6 ,144 bytes for 𝑟 =8, 𝐵 =16, 𝐷 head =128); and running page-score ac-cumulators require 𝐻 KV · 4 bytes. The per-SM shared-memory footprint is bounded by Smem req = 𝑟 𝐵 · 2 + ( 𝑟 + 𝐵 ) 𝐷 head · 2 + 𝐻 KV · 4 bytes , (32) i.e., 6 ,432 bytes for 𝑟 =8, 𝐵 =16, 𝐷 head =128, 𝐻 KV =8—well within the 228 KB shared-memory limit of an H100 SM. The full page-score tensor, however, is 𝐻 KV · ( 𝑇 /𝐵 ) FP32 values— 256 KB for 𝐻 KV =8, 𝑇 = 131 ,072, 𝐵 =16—which exceeds that limit; the kernel therefore processes the sequence in segments of 𝑆 = 𝑇 /( 𝐵 𝐻 KV ) pages per invocation, accumulating par-tial maxima in registers and writing final page scores to global memory in one coalesced pass. These are design specifications derived from architecture constants, not measurements. 
+
+Remark 6 (Radix top-𝐾 selection at 128k context) . For 𝑇 =
+
+131 ,072 and 𝐵 = 16, each group holds 𝑁 pages = 8,192 pages; a full bitonic sort costs 𝑂 (𝑁 pages log 2 𝑁 pages ) ≈ 8,192 × 169 comparisons and a sort bu ff er that does not fit a single thread-block. The design instead uses two-pass radix selection: pass 1 builds a histogram of page scores quantized to 16-bit fixed point (65 ,536 bins of 2 bytes, segmented across four threadblocks of 16 ,384 bins, 32 KB per block) and identifies the 𝐾 𝑙 -th largest threshold in 𝑂 (𝑁 pages ); pass 2 scans all pages and retains those exceeding the threshold. Ties at the quantized threshold are bro-ken deterministically by page index, and any deficit relative to 
+
+𝐾 𝑙 is filled in index order, so the retained cardinality is exactly 
+
+𝐾 𝑙 and the guarantee of Theorem 3 is preserved. Selection cost drops from 𝑂 (𝑁 log 2 𝑁 ) to 𝑂 (𝑁 ) with a small constant. As above, these are design specifications, not measurements. 
+
+Remark 7 (FP16 numerical stability and degenerate sinks) . The collision-entropy argument Í𝑡 (A𝑙,ℎ, ( 𝑡 )) 2 = ∥A𝑙,ℎ ∥22 lies in 
+
+[1/𝑇, 1] for any probability vector (Cauchy–Schwarz below, pointwise mass above), so its logarithm is well defined with-out catastrophic cancellation; the entropies themselves lie in 10 [0, ln 𝑇 ]. The 𝜀 -guard is applied inside the logarithm only ,never inside the power, which preserves the normalization Í𝑡 A𝑙,ℎ, ( 𝑡 ) = 1 that the weighting and proofs rely on. For 
+
+𝛼 ∈ ( 0, 1) the power sum can never vanish: subadditivity of 
+
+𝑥 ↦ → 𝑥 𝛼 gives Í𝑡 𝑝 𝛼 𝑡 ≥ ( Í𝑡 𝑝 𝑡 ) 𝛼 = 1, so the guard is like-wise never load-bearing. For the sink-isolated variant, a head whose mass is entirely concentrated on 𝑆 sink has an all-zero residual; the reference implementation clamps the renormaliza-tion denominator, which assigns such a head maximal entropy and hence vanishing weight—the desired degenerate-case be-havior. 
+
+6. Empirical validation: pilot results and pre-registered protocol 
+
+This paper’s guarantees are of two kinds, and the evidence di ff ers accordingly. The architectural guarantees—UOR ≡ 1under pooling (Theorem 3) and the per-layer union bounds (Proposition 4)—hold by construction. Everything else requires measurement. This section reports a pilot validation executed against the pre-registered protocol, discloses every deviation from it, and marks precisely which protocol items remain pend-ing. Two governance principles govern all reporting. First, 
+
+claims follow tables : the abstract, introduction, and conclusion assert only what a table, figure, or theorem supports. Second, 
+
+aggregates are recomputable : every summary below is tran-scribed from the released per-cell logs. 
+
+6.1. Pilot setup and measurement governance 
+
+The pilot runs on Qwen2.5-1.5B-Instruct ( 𝐿 =28, 𝐻 𝑄 =12, 
+
+𝐻 KV =2, 𝑟 =6) in native FP16, loaded with eager attention so that per-head probability vectors are exposed for entropy computation—the capture requirement the protocol already an-ticipates, since fused kernels do not expose attention distribu-tions. Pages are simulated over the model’s cache with logical blocking at 𝐵 =16. Hardware: a single NVIDIA T4 GPU; seeds are fixed per run and recorded in the released logs. The pre-registered Phase 1 names Llama-3.1-8B ( 𝑟 =4) un-der vLLM on an A100-80 GB with contexts to 128k. The pilot deviates on four points, stated explicitly: (i) model : Qwen2.5-1.5B ( 𝑟 =6) for single-GPU capture feasibility; (ii) runtime :HuggingFace transformers with eager attention, page quotas simulated at 𝐵 =16 rather than read from a vLLM block man-ager; (iii) scale : contexts 𝑇 ∈ [ 0.9k , 8.2k ] across the measure-ment suite, needle-recall horizons ≤ 2.5k, and budgets 𝑘 /𝑇 ∈{0.02 , . . . , 0.40 } rather than the 4k–128k sweep; (iv) serving :no vLLM serving measurements yet. The pilot is therefore a validation tier of the structural core, not the pre-registered sweep. Three rules were applied to every table below. Coverage certification : the certified ablation run covers 56 of 56 layer– group pairs (100%) with zero NaN-skipped layers , so ev-ery reported ablation statistic is computed on the full popula-tion; captured head populations are non-degenerate (minimum sibling attention variance 8 .3 × 10 −6). NaN policy : attention-capture rows with non-finite entries under FP16 are zeroed and counted rather than silently dropped. Excluded-task rule : eval-uation runs that faulted (eleven of fifteen LongBench subsets returned exactly 0 .00% under an answer-extraction fault, and one data file was missing) are excluded , never reported as zeros (Section 6.4). The pre-registered serving closure check applies only to vLLM rows and is deferred with the serving phase. 
+
+6.2. Structural validation 
+
+The harness replays head-independent top-𝑘 selection over the model’s actual GQA groups on real long-context text, under three scorers (H2O accumulated attention, last-row attention, and SnapKV-style observation-window scores), and measures the disagreement and union statistics of Definitions 1 and 2. Table 4a summarizes the by-scorer replay: inflation is present in every measured cell (frac (UOR > 1) = 1.0 throughout), the distribution is heavy-tailed (means of 2 .3–3 .0× with max-ima up to 5 .10 × at the smallest budget), and the two certificates separate exactly as Table 2 predicts—the sandwich certificate of Theorem 1 certifies twofold inflation in the large majority of cells (cert 𝑇 ), while the elementary Bonferroni certificate of Corollary 1 (cert 1) fires only near full disagreement and van-ishes first as the budget grows. The pooled Page-EntroKV row is exact: UOR ≡ 1.0000 across 1,008 pooled measurements, matching the by-construction guarantee of Theorem 3. Table 4b reports the coarse cell-level sweep over five budget fractions from the 2,240-row log, showing the same heavy tail (UOR max 
+
+from 4 .75 × at 𝑘 /𝑇 =0.02 down to 2 .33 × at 0 .40) and the same certificate pattern. Figure 4 plots observed UOR against dis-agreement with the Cauchy–Schwarz lower envelope of Theo-rem 1 and the worst-case ceiling 𝑟 .
+
+6.3. Mechanism ablations 
+
+All ablation statistics below come from the certified run: cov-erage of 56 /56 layer–group pairs (100%), zero NaN-skipped layers, and zero entropy-bound violations. Sweeping 𝜏 𝑔 over nearly three orders of magnitude, the max-imum within-group weight falls monotonically from 0 .963 at 
+
+𝜏 𝑔 =0.1 to 0 .173 at 𝜏 𝑔 =50, against the arithmetic-mean limit 1/𝑟 = 0.167: a residual gap of 0 .0068 at the hottest temper-ature (Table 5a, Fig. 5a). The within-group weight dispersion shrinks in lockstep (standard deviation 0 .392 → 0.005): as 𝜏 𝑔 
+
+grows the group’s weights converge to uniform, the softening that Proposition 2(i)–(ii) predicts. Across 𝛼 ∈ {0.5, 1, 2, 999 }, every measured entropy lies within the admissible range [0, ln 𝑇 ], with zero violations, and the entropy support contracts monotonically as 𝛼 grows (Ta-ble 5b)—the ordering property of the Rényi family. Weight profiles are sharpest near 𝛼 ∈ { 1, 2} (max ℎ 𝑤 ℎ ≈ 0.76 and 0 .75) and flatten at the extreme orders (0 .62 at 𝛼 =0.5; 0 .64 at 𝛼 →∞ ), supporting the choice 𝛼 = 2. Across all pairings of pooling operator 
+
+{entropy-weighted , max , mean } and block size 
+
+𝐵 ∈ {8, 16 , 32 , 64 }, the realized TopK cardinality equals the quota exactly—UOR ≡ 1.000 in all 192 operator–block cells (1,008 pooled measurements overall)—confirming that the guarantee of Theorem 3 is invariant to the aggregator, as 11 Figure 4: Empirical union overhead ratio versus intra-group Jaccard disagreement ( 𝑟 =6, Qwen2.5-1.5B pilot, Section 6.2). Blue: observed head-independent selections (SnapKV-style replay). Red dashed: the Cauchy–Schwarz lower envelope of Theorem 1. Green: Page-EntroKV’s pooled selection, UOR ≡ 1 by construction (Theorem 3). Dotted: the worst-case orthogonal ceiling 𝑟 . The observed tail approaches the envelope at high disagreement. 
+
+Proposition 2 implies. The page-level union ratio (Proposi-tion 4) concentrates at its lower endpoint: mean 1 .0, max 1 .0, within the bound [1, 𝐻 KV =2].Within retained page frames ( 𝐵 =16), pooled attention mass is concentrated rather than uniform: slot 0 holds ≈ 14 .4% of mass against the 6 .25% uniform-slot baseline, with secondary concentrations at slots 8 and 10 (Fig. 6). This is descriptive evidence that block-max aggregation (Eq. (22)) tracks real in-page skew—the motivation for page-granular rather than token-granular eviction. Head populations typed by sink mass across three probes (1,008 layer–head observations: 𝑛 =152 sink, 𝑛 =47 retrieval, 
+
+𝑛 =809 contextual) show the masquerade pattern of Definition 4 and Theorem 2: under raw collision entropy the sink popula-tion sits at low entropy, overlapping the left flank of the retrieval population, and under sink isolation the sink mass shifts right while the retrieval population stays low (Fig. 7). At the op-erator level, isolating the sink cuts the sink head’s Boltzmann weight from 0 .303 to 0 .116 while the contextual head’s weight rises from 0 .144 to 0 .176, inverting their relative ordering from a 2 .10 × unearned sink advantage to a 0 .66 × deficit (Fig. 8). The retrieval population remains the smallest class ( 𝑛 =47); the population-level distributional claim is reported as pilot-scale evidence, not a settled characterization. 
+
+6.4. Retrieval and downstream feasibility 
+
+Table 6 reports needle retention under two success criteria, because they answer di ff erent questions and were measured in separate runs. Under the pooled-selection criterion —a trial counts as retained if the needle’s page survives the pooled-selection eviction decision, with no requirement across layers— entropy-weighted pooling retains the needle at 100% across all pilot contexts and depths while arithmetic-mean pooling retains it at 0%: the dilution mechanism of Eq. (19) is directly observ-able. Under the strict all-layer criterion —the needle’s page must survive in every layer—both methods fail at depths 25– 75% (weighted recall 0–33% across strict variants; mean pool-ing 0% throughout), and both retain trivially at depth 100%, where the needle sits in the final pages that the quota never evicts. Every zero cell was verified as a genuine eviction: in 30 of 30 zero cells the needle page’s rank fell below the re-tention quota in the layer that dropped it. The uncompressed cache retains the needle at all depths under both criteria, so the failures are budget e ff ects, not harness artifacts. The theorem’s premise was measured, not assumed. On the strict-criterion pilot ( 𝑇 ∈ { 1024 , 2048 }), needle attention mass is 1 −𝜖 ∈ [ 0.11 , 0.17 ]—roughly two orders of magnitude above the uniform floor 1 /𝑇 ≈ 4.9 × 10 −4—with measured sink-isolated retrieval entropy 𝜂 ret ≈ 2.6–2 .8 nats and pooled needle mass ≈ 1.0–1 .6 × 10 −3. The retrieval-head premise therefore holds directionally at pilot scale, but the strong regime the the-orem asymptotes to (1 − 𝜖 → 1) is not reached: pooled mass of ∼ 10 −3 cannot top a 20% quota in every one of 28 layers. The strict-criterion failures at depths 25–75% are the pilot-scale face of this gap, and closing it (per-layer budget scaling, or cri-teria matched to the mass distribution) is the first item of the pending sweep. Depth-0 needles fall inside the sink region, which Definition 4 isolates and Remark 3 explicitly excludes 12 Table 4: Head-independent replay vs. pooled selection (Qwen2.5-1.5B-Instruct, 𝑟 =6, 𝐿 =28, 𝐵 =16). (a) Per-scorer replay: cert 1 counts cells where the Bonferroni certificate (Corollary 1) certifies UOR ≥ 2; cert 𝑇 where the sandwich certificate (Theorem 1) does; ≥ 2-frac is the fraction of cells with measured UOR ≥ 2. (b) Coarse cell-level sweep (2,240 logged group measurements; NaN rows zeroed and counted per Section 6.1). Pooled Page-EntroKV row: 1,008 measurements, zero layers skipped. 
+
+(a) By scoring method 
+
+Scorer 𝑘 /𝑇 UOR UOR max frac (UOR >1) cert 1 cert 𝑇 ≥ 2-frac H2O (accum.) 0.02 2.849 5.100 1.000 62 290 0.879 H2O (accum.) 0.05 2.442 4.471 1.000 22 112 0.820 H2O (accum.) 0.10 2.292 3.971 1.000 6 65 0.769 Last-row 0.02 2.982 4.600 1.000 21 329 0.960 Last-row 0.05 2.703 3.961 1.000 6 196 0.933 Last-row 0.10 2.460 3.471 1.000 0 70 0.885 SnapKV (obs.) 0.02 2.869 5.000 1.000 66 306 0.887 SnapKV (obs.) 0.05 2.469 4.549 1.000 23 116 0.824 SnapKV (obs.) 0.10 2.317 3.961 1.000 7 71 0.790 
+
+Page-EntroKV (pooled) all 1.0000 1.0000 1,008 measurements (Theorem 3) 
+
+(b) Cell-level budget sweep (2,240-cell log) 
+
+𝑘 /𝑇 UOR UOR max ¯D Dmax cert 1 cert 𝑇 
+
+0.02 1.107 4.75 0.031 0.926 10 16 0.05 1.094 4.04 0.030 0.893 6 16 0.10 1.084 3.73 0.029 0.870 1 16 0.20 1.071 3.23 0.028 0.827 0 16 0.40 1.045 2.33 0.025 0.727 0 0
+
+from the theorem. The engine path reproduces the Corollary 2 bound to floating-point tolerance under a synthetic premise-satisfied construction (Fig. C.9a); on real text at pilot scale the premise is unsatisfied and pooling degenerates toward the mean (Fig. C.9b), consistent with Table 6. On premise-holding lay-ers the measured bound deficit Δ(𝑇 ) shrinks from 1 .3 × 10 −2
+
+at 𝑇 =1024 to 8 × 10 −4 at 𝑇 =8192—the monotone decay the corollary predicts—while the absolute premise gap keeps the real-text pooled mass orders below the bound at pilot scale. Table 7 reports the four LongBench subsets that completed under the pilot harness at 20% retention (20 samples per sub-set): representative QA and code tasks remain solvable (qasper 38.60%, multifieldqa_en 44.20%, lcc 56.10%, repobench-p 44.81%). Three caveats bound the claim: the subsets are 20-sample slices, there is no uncompressed same-harness base-line yet, and the eleven subsets that faulted under an answer-extraction bug are excluded , not reported as zeros. 
+
+6.5. Remaining pre-registered protocol 
+
+The following protocol items are pre-registered and in progress; no claim about them is made anywhere in this paper: 
+
+• Phase 1 scale-up: Llama-3.1-8B-Instruct ( 𝑟 =4; 𝐿 =32; 
+
+𝐻 KV =8; 𝐷 head =128) [4] on a single NVIDIA A100-80 GB GPU under vLLM [7], with the serving tables (max-imum stable batch, decoding throughput, time-to-first-token, inter-token latency) and the pre-registered closure check; extensions to Llama-3.1-70B, Qwen-2.5-7B, and Qwen-2.5-72B. 
+
+• Long-context NIAH: the full sweep over {4k , . . . , 128k }
+
+at depths {0% , 25% , 50% , 75% , 100% }—needle-recall horizons in the pilot are ≤ 2.5k only—with reconciled success criteria across the pilot variants. 
+
+• LongBench re-run: all fifteen subsets with a repaired evaluator and an uncompressed same-harness baseline. 
+
+• Strict all-layer retention at scale: framed as the regime where the premise of Theorem 4 (1 − 𝜖 large) binds; to be tested in Phase 1, where retrieval heads are sharper and budgets are set per the instantiated error bound of Corol-lary 2. 
+
+• Remaining ablations: block-size e ff ects on recall and sink isolation on sink-sensitive task subsets. 
+
+6.6. Logging 
+
+All runs append to a CSV log with fields 
+
+experiment, model, method, budget, context, subset, metric, value, unit, hardware, seed, timestamp ,
+
+and every table in this paper is transcribed from that log: the structural replay ( experiment_1_log.csv , 2,240 rows; the by-scorer replay behind Table 4a), the nee-dle pilot (experiment_3_log.csv , 321 rows), the abla-tion logs (584 and 201 rows, with the certified run be-hind Table 5), the three-probe sink census (1,008 observa-tions, behind Figs. 7 and 8), and the downstream summary (experiment_5_longbench_summary.csv ). Broken runs are discarded from the workspace manifest and tagged as non-transcription sources. Headline quantities are defined at the ta-ble level and propagate through macros, so the abstract, tables, and conclusion cannot disagree. 13 Table 5: Certified mechanism ablations (Qwen2.5-1.5B pilot; coverage certification: 56 /56 layer–group pairs , 100%; zero NaN-skipped layers). (a) Temperature sweep: max ℎ 𝑤 ℎ is monotone in 𝜏 𝑔 toward 1 /𝑟 = 0.167 (Proposition 2). (b) Rényi order sweep at 𝜏 𝑔 =0.5: every entropy lies in [0, ln 𝑇 ] = [0, 7.625 ], zero violations. (c) Cardinality exactness (Theorem 3). (d) Page-union ratio (Proposition 4). 
+
+(a) 𝜏 𝑔 sweep (b) 𝛼 sweep ( 𝜏 𝑔 =0.5) 
+
+𝜏 𝑔 max ℎ 𝑤 ℎ 𝑤 std 𝛼 : max ℎ 𝑤 ℎ; [H min , Hmax ]
+
+0.1 0.9632 0.3922 0.5 0.620; [3.530 , 7.112 ]
+
+0.2 0.9105 0.3700 1.0 0.762; [1.820 , 6.638 ]
+
+0.5 0.7502 0.2994 2.0 0.750; [1.091 , 5.910 ]
+
+1.0 0.5501 0.2076 999 0.641; [0.624 , 4.260 ]
+
+2.0 0.3656 0.1179 violations of [0, ln 𝑇 ]: 0 5.0 0.2407 0.0491 ln 𝑇 = 7.625 10 0.2020 0.0246 25 0.1804 0.0099 50 0.1734 0.0049 (c) Cardinality: UOR ≡ 1.000 in all 3 × 4 operator–block cells; 1,008 pooled measurements. (d) Page-union ratio: mean 1 .0, max 1 .0; bound [1, 𝐻 KV =2].               
+
+> Figure 5: Ablation panels (Section 6.3; certified run: 56 /56 layer–group pairs, zero layers skipped). (a) Temperature limits: maximum within-group weight max ℎ𝑤 ℎ
+> decays monotonically toward the mean-pooling limit 1 /𝑟 =0.167 as 𝜏 𝑔 grows, the empirical form of Proposition 2. (b) Rényi order sensitivity at 𝜏 𝑔 =0.5: weight sharpness peaks near 𝛼 ∈ { 1,2}; all entropies lie within [0,ln 𝑇 ]with zero violations.
+
+7. Discussion and limitations 
+
+Failure modes.. When all heads in a group exhibit near-identical high entropy (uniformly di ff use attention), the Boltz-mann weights degenerate toward uniform (Proposition 2 ii), and Page-EntroKV reduces to mean pooling—re-opening the needle-dilution risk (Remark 3). The fallback sanctioned by Proposition 2 (iii) is to switch a group to max-over-heads pool-ing when intra-group entropy variance falls below a threshold; the switch is cost-neutral for the budget guarantee, which The-orem 3 ties only to pooling before selection. 
+
+Pilot limitations.. Three limitations scope the empirical tier. First, strict all-layer needle retention fails at pilot scale at depths 25–75%: the premise of Theorem 4 holds directionally but not in its strong regime, so pooled needle mass ( ∼ 10 −3)cannot top a 20% quota in every layer; the asymptotic guaran-tee and deployed budgets are reconciled only at Phase-1 scale (Section 6.5), and the two-regime check of Fig. C.9 delimits exactly where the guarantee binds. Second, needle-recall hori-zons are ≤ 2.5k tokens ; the 4k–128k sweep is pending. Third, 
+
+the pilot covers a single model family (Qwen2.5-1.5B, 𝑟 =6); cross-family generality is deferred to Phase 1, and no serving-level measurements exist yet. 
+
+Kernel overhead.. The reference implementation computes en-tropy, weights, pooling, and page reduction as separate oper-ations. The two-kernel fused design of Section 4.3—warp-level dot products for sink-isolated collision entropy, register-resident weighting, page-by-page block-max, and in-kernel radix top-𝐾 selection (Proposition 5 and Remarks 5 and 6)— is what reaches the throughput characteristics the framework is designed for; its open-source release is future work. 
+
+Runtime configuration dependency.. The framework’s guaran-tees are stated relative to the engine’s block size and page ta-ble: 𝐾 𝑙 scales with 1 /𝐵 (Eq. (23)), the page-level union ratio is bounded by 𝐻 KV (Proposition 4), and selection cost scales with 𝑇 /𝐵 (Proposition 5). Deployments must pin the engine version and block size together with the eviction configuration; the protocol records both with every log. 14 Figure 6: Pooled attention mass across token o ff sets within retained page frames (Section 6.3; 𝐵 =16, 𝑟 =6 pilot). Slot 0 concentrates ≈ 14 .4% of mass against the 6 .25% uniform-slot baseline, with secondary concentrations at slots 8 and 10: in-page skew that block-max aggregation is designed to capture, and a descriptive motivation for page-granular eviction. Table 6: Needle retrieval under two success criteria (Qwen2.5-1.5B pilot, matched 20% physical budget). Pooled-selection criterion: retention requires the needle’s page to survive the pooled eviction decision (no cross-layer re-quirement). Strict all-layer criterion: the needle’s page must survive in every layer. Asterisk: weighted recall at depth 0 spans 0–33% across strict-variant runs. All zero cells verified as genuine evictions (30 /30). 
+
+(a) Pooled-selection criterion 
+
+Context 𝑇 959 1469 1989 2499 Arithmetic mean 0.0% 0.0% 0.0% 0.0% 
+
+Page-EntroKV 100.0% 100.0% 100.0% 100.0% 
+
+(b) Strict all-layer criterion (recall by needle depth) 
+
+Method 0% 25% 50% 75% / 100% Uncompressed 1.00 1.00 1.00 1.00 / 1.00 Mean pooling (page) 0.00 0.00 0.00 0.00 / 1.00 
+
+Page-EntroKV 0–0.33 ∗ 0.00 0.00 0.00 / 1.00 
+
+Orthogonality to KV-cache quantization.. Page-EntroKV op-erates exclusively along the sequence dimension 𝑇 , selecting which pages to retain; low-bit KV quantization (KIVI [21], QuaRot [22]) operates along the channel dimension, reducing the bytes per stored element from 2 (FP16) to 0 .5 (INT4). The two optimizations compose multiplicatively: a 20% page bud-get yields a 5 × reduction along 𝑇 by construction, and INT4 yields a further 4 × along the element axis—20 × combined rel-ative to the uncompressed FP16 cache. The pooling and selec-tion logic is una ff ected by storage precision: importance scores are computed from attention probabilities during the QK dot product, which are accumulated in floating point regardless of the stored representation; quantization changes only the stored 
+
+K and V tensors. This is a design-level composition argument, not a measured deployment result. 
+
+Scope boundary.. Page-EntroKV targets GQA architectures. It does not transfer directly to latent-compression designs such as multi-head latent attention [32], where KV states are collapsed into a shared latent vector and no per-token page structure ex-ists to evict. For MHA ( 𝑟 = 1) the union bound is vacuous; 
+
+> Table 7: Downstream feasibility (LongBench subsets that completed, 20% re-tention, 20 samples each; Qwen2.5-1.5B pilot). Scores are not comparable to published LongBench numbers (sample size, retention, and the absence of an uncompressed same-harness baseline). The remaining LongBench subsets are pending re-run after an evaluator fault; unscored subsets are excluded, not re-ported as zero.
+
+LongBench subset Page-EntroKV score (%) qasper 38.60 multifieldqa_en 44.20 lcc 56.10 repobench-p 44.81 
+
+entropy-weighted pooling and page alignment remain applica-ble, but the memory benefit comes from page alignment rather than union elimination. 
+
+Empirical status.. The guarantees of Theorem 3 and Propo-sition 4 are architectural and hold by construction; the pilot confirms their measured form (exact cardinality in 192 of 192 operator–block cells; page-union ratio at the bound’s lower end-point). The pilot further supports the structural analysis on real text: heavy-tailed inflation up to 5 .1× with envelope-certified twofold overhead (Table 4), sink-isolation ordering inversion (Figs. 7 and 8), and the temperature and Rényi-order characteri-zations, certified over the full layer–group population (Table 5). Measured but pending full validation: pooled-criterion needle retention (Table 6a), downstream feasibility at 20% retention (Table 7), and the strict all-layer regime, which fails at pilot scale for the premise reasons recorded in Section 6.4. Every-thing at Phase-1 scale—128k contexts, larger models, uncom-pressed baselines, and serving throughput—is pre-registered and pending (Section 6.5). Until those runs are logged, the ap-propriate reading is a formal framework whose structural core is pilot-validated, not an empirically validated serving system. 
+
+8. Conclusion 
+
+We presented Page-EntroKV, a formal framework for hardware-aligned KV-cache eviction that resolves the mismatch between head-independent eviction policies and physically shared GQA bu ff ers. The framework formalizes the union over-head ratio and intra-group disagreement, proves their exact ana-lytic relationship at 𝑟 = 2, and bounds the inflation two-sidedly at every group ratio; it replaces head-level selection with sink-isolated entropy-weighted pooling at the physical group level; and it projects importance onto the discrete page frames that serving engines allocate, so eviction executes exactly at the tuple (𝑙, 𝑔, 𝑃 𝑏 ) with strict, provable budget preservation and finite-context needle retention. A pilot validation on Qwen2.5-1.5B-Instruct confirms the structural core on real text—heavy-tailed union inflation with envelope-certified overhead, sink-isolation ordering inversion, exact pooled cardinality, and the certified temperature and Rényi-order characterizations—while the full-scale sweep proceeds under the pre-registered protocol. Future work: executing that protocol across model families, re-leasing the fused kernels, entropy-based inter-layer budget al-15 Figure 7: Sink isolation separates head populations (Section 6.3; Qwen2.5-1.5B pilot; three probes, 1,008 layer–head observations: 𝑛 =152 sink, 𝑛 =47 retrieval,       
+
+> 𝑛 =809 contextual). (a) Raw collision entropy: the sink population sits at low entropy and overlaps the left flank of the retrieval population—the masquerade that Theorem 2 predicts raw entropy cannot break. (b) Sink-isolated entropy: the sink mass shifts right while retrieval heads stay low. The dashed line marks the uniform-residual ceiling ln (𝑇 − | 𝑆 sink | ) =6.73 of Theorem 2; measured populations sit below it because real sink residuals are not uniform. Isolation inverts the sink-to-context weight ordering rather than driving any single weight to zero (Fig. 8).
+
+location beyond the present uniform quotas, and training-time co-design of page-granular attention. 
+
+CRediT authorship contribution statement Inbasekaran S.: Conceptualization, Methodology, Soft-ware, Validation, Formal analysis, Investigation, Data curation, Writing – original draft, Writing – review & editing, Visualiza-tion. 
+
+Declaration of competing interest 
+
+The author declares no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper. 
+
+Declaration of generative AI and AI-assisted technologies in the writing process 
+
+During the preparation of this work the author used a generative-AI assistant for language editing and manuscript preparation. After using the tool, the author reviewed and edited the content as needed and takes full responsibility for the content of the published article. 
+
+Data availability 
+
+All experiment logs—the per-cell CSVs for the structural re-play (2,240 rows), the by-scorer replay, the needle pilot (321 rows), the ablation studies (584 and 201 rows, including the certified run), the three-probe sink census (1,008 observations), and the downstream summary—the evaluation harness, and the figure-generation scripts are released at https://github. com/bruce12-glitch/PageEntro-KV . Summary tables in this paper are transcribed directly from those logs; broken runs are excluded from the manifest and are not transcription sources. 
+
+Appendix A. Notation 
+
+Table A.8 summarizes the symbols, architectural parameters, and systems notation used throughout the paper. 
+
+Appendix B. Master verification summary 
+
+Table B.9 maps every theoretical guarantee and hardware-geometry specification in the paper to its mathematical form, derived value or bound, systems-level impact, and the pilot ev-idence (or design-spec status) that backs it. 
+
+Appendix C. Step-by-step derivations 
+
+This appendix collects the full step-by-step derivations sup-porting the main-text results. Only elementary set algebra, Cauchy–Schwarz, Jensen’s inequality, and L’Hôpital’s rule are used. 
+
+Appendix C.1. The GQA inflation sandwich bound Step 1 (coverage degrees).. Let 𝑈 = Ð𝑟 𝑖 =1 K𝑙,ℎ 𝑖 . For 𝑚 ∈ 𝑈 
+
+define the multiplicity 𝑥 𝑚 ≜ Í𝑟 𝑖 =1 1{𝑚 ∈ K 𝑙,ℎ 𝑖 }: every retained token is selected by at least one head and at most 𝑟 , so 𝑥 𝑚 ∈{1, . . . , 𝑟 }.16 Figure 8: Operator-level pooling weights under raw versus sink-isolated entropy, from the same 1,008-observation census as Fig. 7 (Section 6.3). Sink isolation lowers the sink head’s weight from 0 .303 to 0 .116 and raises the contextual head’s weight from 0 .144 to 0 .176, inverting the sink-to-context weight ratio from 2.10 × (raw: sink heads outweigh contextual heads without earning it) to 0 .66 × (isolated: contextual heads dominate)—the empirical form of Theorem 2. 
+
+Step 2 (exact moments over 𝑈 ).. Exchanging the order of finite summations, ∑︁ 
+
+> 𝑚 ∈𝑈
+
+𝑥 𝑚 =
+
+> 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+
+∑︁ 𝑚 ∈𝑈 
+
+1{𝑚 ∈ K 𝑙,ℎ 𝑖 } =
+
+> 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+
+|K 𝑙,ℎ 𝑖 | = 𝑟 𝑘, 
+
+and, using the indicator product rule 1𝐴 1𝐵 = 1𝐴 ∩𝐵 and split-ting the double sum into diagonal ( 𝑖 = 𝑗 ) and symmetric o ff -diagonal ( 𝑖 ≠ 𝑗 ) pairs, ∑︁ 
+
+> 𝑚 ∈𝑈
+
+𝑥 2 
+
+> 𝑚
+
+=
+
+> 𝑟
+
+∑︁ 
+
+> 𝑖 =1
+> 𝑟
+
+∑︁ 
+
+> 𝑗 =1
+
+|K 𝑙,ℎ 𝑖 ∩K 𝑙,ℎ 𝑗 | = 𝑟 𝑘 +2∑︁ 
+
+> 𝑖< 𝑗
+
+𝐼 𝑖 𝑗 , 𝐼 𝑖 𝑗 ≜ |K 𝑙,ℎ 𝑖 ∩K 𝑙,ℎ 𝑗 |.
+
+Step 3 (Cauchy–Schwarz).. Applying Cauchy–Schwarz to 
+
+(𝑥 𝑚 )𝑚 ∈𝑈 and the all-ones vector, 
+
+∑︁ 
+
+> 𝑚 ∈𝑈
+
+𝑥 𝑚 
+
+2
+
+≤
+
+∑︁ 
+
+> 𝑚 ∈𝑈
+
+1
+
+ ∑︁ 
+
+> 𝑚 ∈𝑈
+
+𝑥 2
+
+> 𝑚
+
+
+
+,
+
+and Í𝑚 ∈𝑈 1 = |𝑈 |, so (𝑟 𝑘 )2 ≤ | 𝑈 | ( 𝑟 𝑘 + 2 Í𝑖< 𝑗 𝐼 𝑖 𝑗 ). Isolating 
+
+|𝑈 | and dividing by 𝑘 :UOR (𝑔, 𝑘 ) = |𝑈 |
+
+𝑘 ≥ 𝑟 2
+
+𝑟 + 2
+
+> 𝑘
+
+Í𝑖< 𝑗 𝐼 𝑖 𝑗 
+
+.
+
+Step 4 (pairwise overlaps via Jaccard).. Inclusion–exclusion gives |K 𝑙,ℎ 𝑖 ∪ K 𝑙,ℎ 𝑗 | = 2𝑘 − 𝐼 𝑖 𝑗 , hence 𝐽 𝑖 𝑗 = 𝐼 𝑖 𝑗 /( 2𝑘 − 𝐼 𝑖 𝑗 ).Solving, 2 𝑘 𝐽 𝑖 𝑗 = 𝐼 𝑖 𝑗 (1 + 𝐽 𝑖 𝑗 ), so 
+
+𝐼 𝑖 𝑗 = 2𝑘 𝐽 𝑖 𝑗 
+
+1 + 𝐽 𝑖 𝑗 
+
+=⇒ 2
+
+𝑘 ∑︁ 𝑖< 𝑗 
+
+𝐼 𝑖 𝑗 = 4∑︁ 
+
+> 𝑖< 𝑗
+
+𝐽 𝑖 𝑗 
+
+1 + 𝐽 𝑖 𝑗 
+
+.
+
+Step 5 (strict concavity and Jensen).. 𝑓 (𝑥 ) ≜ 𝑥  
+
+> 1+𝑥
+
+= 1 − ( 1 +
+
+𝑥 )−1 satisfies 𝑓 ′ (𝑥 ) = (1+𝑥 )−2 and 𝑓 ′′ (𝑥 ) = −2(1+𝑥 )−3 < 0 on 
+
+[0, 1]: strictly concave. Under the uniform weights 2 /( 𝑟 (𝑟 −1)) 
+
+across the 𝑟 (𝑟 − 1)/ 2 pairs, 2
+
+𝑟 (𝑟 − 1)∑︁ 𝑖< 𝑗 
+
+𝑓 (𝐽 𝑖 𝑗 ) ≤ 𝑓 ( ¯𝐽 ) = ¯𝐽 
+
+1 + ¯𝐽 .
+
+Multiplying by 𝑟 (𝑟 − 1) bounds the denominator cross-term: 4 Í𝑖< 𝑗 𝐽 𝑖 𝑗  
+
+> 1+𝐽 𝑖 𝑗
+
+≤ 2𝑟 (𝑟 − 1) ¯𝐽   
+
+> 1+¯𝐽
+
+.
+
+Step 6 (lower bound completed).. Substituting Steps 4–5 into Step 3 (upper-bounding the denominator lower-bounds the frac-tion) and factoring 𝑟 from numerator and denominator: UOR (𝑔, 𝑘 ) ≥ 𝑟 2
+
+𝑟 + 2𝑟 (𝑟 − 1) ¯𝐽  
+
+> 1+¯𝐽
+
+= 𝑟 
+
+1 + 2(𝑟 − 1) ¯𝐽  
+
+> 1+¯𝐽
+
+.
+
+Step 7 (upper bound).. Subadditivity gives |𝑈 | ≤ 𝑟 𝑘 , i.e., UOR ≤ 𝑟 . To refine using pairwise data, isolate an arbitrary pair {ℎ𝑖 , ℎ 𝑗 }: 𝑈 = (K 𝑙,ℎ 𝑖 ∪ K 𝑙,ℎ 𝑗 ) ∪  Ð 𝑚 ≠𝑖, 𝑗 K𝑙,ℎ 𝑚 
+
+, so |𝑈 | ≤ (2𝑘 − 𝐼 𝑖 𝑗 ) + ( 𝑟 − 2)𝑘 = 𝑟 𝑘 − 𝐼 𝑖 𝑗 and, by Step 4, UOR ≤ 𝑟 − 2𝐽 𝑖 𝑗 
+
+> 1+𝐽 𝑖 𝑗
+
+for every pair. Taking the infimum over all pairs subtracts the maximal term, and intersecting with UOR ≤ 𝑟 yields the upper bound of Eq. (10). 
+
+Step 8 (extremes and the certification threshold).. ¯𝐽 = 0: dis-joint selections, both bounds equal 𝑟 —exact. ¯𝐽 = 1: identical selections, the lower bound evaluates to 𝑟 /( 1 + ( 𝑟 − 1)) = 1— exact; the upper bound evaluates to 𝑟 − 1 for 𝑟 > 2, valid but loose because the pairwise profile cannot see higher-order over-lap. Solving 𝑟    
+
+> 1+2(𝑟 −1)¯𝐽
+> 1+¯𝐽
+
+≥ 2 gives the certification threshold ¯𝐽 ≤ 𝑟 −23𝑟 −2 .17 Table A.8: Symbols and notation used throughout the paper. 
+
+Symbol Definition 
+
+𝐿 Number of transformer layers, 𝑙 ∈ { 1, . . . , 𝐿 }.
+
+𝐻 𝑄 , 𝐻 KV Logical query heads; physical KV heads. 
+
+𝑟 = 𝐻 𝑄 /𝐻 KV GQA group ratio (query heads per physical KV bu ff er). 
+
+𝐷 model , 𝐷 head Hidden dimension; head dimension ( 𝐷 model = 𝐻 𝑄 · 𝐷 head ). 
+
+𝑇 Current sequence length ( 𝑇 ≤ 𝑇 ctx ). 
+
+𝐵 PagedAttention block size (tokens per page, e.g. 𝐵 = 16). 
+
+𝑁 blocks Number of allocated physical blocks. 
+
+P, 𝑃 𝑏 Set of physical pages; page frame 𝑏 .
+
+A𝑙,ℎ ∈ R𝑇 Attention probability vector, head ℎ, layer 𝑙 .
+
+K𝑙,ℎ Token-level top-𝑘 selection set of head ℎ (Definition 1); page-level retention sets K𝑙,𝑔 are distinguished by their group subscript. 
+
+𝐼 𝑖 𝑗 , 𝐽 𝑖 𝑗 , DJaccard , ¯𝐽 Pairwise intersection size; Jaccard similarity and disagreement; mean pairwise similarity (Definition 2 and Corollary 1). 
+
+𝑆 sink , ˜A𝑙,ℎ Sink token set ( |𝑆 sink | = 4); sink-isolated attention distribution (Definition 4). 
+
+H𝛼 ( 𝐴 ) Discrete Rényi entropy of order 𝛼 .
+
+H2 ( 𝐴 ) Collision entropy (Rényi 𝛼 =2): − ln ∥ 𝐴 ∥22.
+
+H sink 2 ( 𝐴 ) Sink-isolated collision entropy. 
+
+𝑊 obs , 𝑊 max Prefill observation window and its bound ( 𝑊 max = 4096); entropies for head weighting are evaluated over 𝑊 obs (Defini-tion 5). 
+
+Btotal , B𝑙 Total KV capacity; uniform per-layer budget (Eq. (23)). 
+
+𝐾 𝑙 Pages retained per physical group in layer 𝑙 (Eq. (23)). Group (𝑔 ) Set of query-head indices mapping to KV group 𝑔 .
+
+𝑤 𝑙,ℎ Entropy-weighted importance of head ℎ within its group. 
+
+Apooled  
+
+> 𝑙,𝑔
+
+∈ R𝑇 Group-level pooled attention. 
+
+𝐼 𝑙,𝑔 (𝑃 𝑏 ) Importance of page 𝑃 𝑏 in group 𝑔 , layer 𝑙 .
+
+K𝑙,𝑔 Page-level retention set of group 𝑔 , layer 𝑙 .UOR (𝑔, 𝑘 ) Union overhead ratio under head-independent top-𝑘 .
+
+𝜏 𝑔 Group-pooling temperature (Eq. (20)). 
+
+Appendix C.2. The elementary Bonferroni bound 
+
+The full inclusion–exclusion expansion of |𝑈 | truncated af-ter the second-order sum is a strict lower bound (second-order Bonferroni): |𝑈 | ≥ 𝑟 𝑘 − Í𝑖< 𝑗 𝐼 𝑖 𝑗 . Since |K 𝑙,ℎ 𝑖 ∩ K 𝑙,ℎ 𝑗 | =
+
+𝐽 𝑖 𝑗 |K 𝑙,ℎ 𝑖 ∪ K 𝑙,ℎ 𝑗 | ≤ 2𝑘 𝐽 𝑖 𝑗 by subadditivity of the pairwise union, summing over all 𝑟 (𝑟 − 1)/ 2 pairs and using Í𝑖< 𝑗 𝐽 𝑖 𝑗 =   
+
+> 𝑟 (𝑟 −1)
+> 2
+
+¯𝐽 gives Í𝑖< 𝑗 𝐼 𝑖 𝑗 ≤ 𝑘𝑟 (𝑟 − 1) ¯𝐽 . Dividing by 𝑘 and clamp-ing with UOR ≥ 1 (the union contains any single head’s 𝑘 se-lections) yields Eq. (9). Non-trivial inflation requires 𝑟 ¯𝐽 < 1, i.e., ¯𝐽 < 1/𝑟 ; twofold certification requires ¯𝐽 ≤ 𝑟 −2   
+
+> 𝑟 (𝑟 −1)
+
+, i.e., ¯𝐽 ≤ 16 for 𝑟 = 4 and ¯ 𝐽 ≤ 328 for 𝑟 = 8. 
+
+Appendix C.3. Limit orders of the Rényi family 
+
+Write 𝐴 ≡ A𝑙,ℎ , 𝜓 (𝛼 ) ≜ Í𝑇 𝑡 =1 𝐴 (𝑡 ) 𝛼 , 𝑓 (𝛼 ) ≜ ln 𝜓 (𝛼 ), and 
+
+𝑔 (𝛼 ) ≜ 1 − 𝛼 .
+
+Part 1: Shannon ( 𝛼 → 1).. 𝜓 (1) = 1, so 𝑓 (1) = 0 and 
+
+𝑔 (1) = 0: the ratio is a 00 form. Both functions are con-tinuously di ff erentiable and 𝑔 ′ (𝛼 ) ≡ − 1 ≠ 0, so L’Hôpital’s rule applies once lim 𝑓 ′/𝑔 ′ exists. Termwise di ff erentiation via  
+
+> 𝑑 𝑑 𝛼
+
+𝑥 𝛼 = 𝑥 𝛼 ln 𝑥 (with the continuous extension 𝑝 𝛼 ln 𝑝 → 0as 𝑝 → 0+) gives 𝑓 ′ (𝛼 ) =          
+
+> Í𝑡 𝐴 (𝑡 )𝛼 ln 𝐴 (𝑡 )Í𝑡 𝐴 (𝑡 )𝛼
+
+. As 𝛼 → 1, the de-nominator tends to 1 and each 𝐴 (𝑡 ) 𝛼 ln 𝐴 (𝑡 ) → 𝐴 (𝑡 ) ln 𝐴 (𝑡 ), so lim 𝛼 →1 H𝛼 ( 𝐴 ) = − Í𝑇 𝑡 =1 𝐴 (𝑡 ) ln 𝐴 (𝑡 ).
+
+Part 2: collision ( 𝛼 = 2).. Direct substitution: H2 ( 𝐴 ) =
+
+− ln Í𝑡 𝐴 (𝑡 )2 = − ln ∥ 𝐴 ∥22. The self-inner product ⟨𝐴, 𝐴 ⟩ =
+
+∥ 𝐴 ∥22 ∈ ( 0, 1] is the collision probability. 
+
+Part 3: min-entropy ( 𝛼 → ∞ ).. Let 𝑀 = max 𝑡 𝐴 (𝑡 ) ∈ [ 1 
+
+> 𝑇
+
+, 1]
+
+and Tmax = {𝑡 : 𝐴 (𝑡 ) = 𝑀 } with multiplicity 𝑚 ≥ 1; on the complement, 0 ≤ 𝐴 (𝑡 )/ 𝑀 < 1 strictly. Factoring 𝑀 𝛼 out of the power sum and using ln (𝑢𝑣 ) = ln 𝑢 + ln 𝑣 :
+
+H𝛼 ( 𝐴 ) = 𝛼 
+
+1 − 𝛼 ln 𝑀 + 11 − 𝛼 ln 
+
+h
+
+𝑚 +∑︁ 
+
+> 𝑡 ∉Tmax
+
+ 𝐴 (𝑡 )
+
+𝑀 
+
+ 𝛼 i
+
+.
+
+As 𝛼 → ∞: each ( 𝐴 (𝑡 )/ 𝑀 ) 𝛼 → 0, so the inner loga-rithm tends to ln 𝑚 ; 𝛼   
+
+> 1−𝛼
+
+→ − 1; and 11− 𝛼 ln 𝑚 → 0. Hence lim 𝛼 →∞ H𝛼 ( 𝐴 ) = − ln 𝑀 .
+
+Appendix C.4. Sink head suppression Step 1 (conditional distribution).. Partition {1, . . . , 𝑇 } into 
+
+𝑆 sink and 𝑆 ctx with |𝑆 ctx | = 𝑁 . By normalization, Í𝑡 ∈𝑆 ctx A𝑙,ℎ, ( 𝑡 ) = 1 − 𝑝 ℎ, so the renormalized residual is a valid distribution on Δ𝑁 −1 (for 𝑝 ℎ < 1). 
+
+Step 2 (pure sink residual).. For a sink head with 𝑝 sink = 1 − 𝛿 
+
+and uniform residual, A𝑙,ℎ sink , ( 𝑡 ) = 𝛿 /𝑁 off 𝑆 sink , so ˜ A𝑙,ℎ sink (𝑡 ) = 
+
+> 𝛿 /𝑁 𝛿
+
+= 1 
+
+> 𝑁
+
+on all 𝑁 non-sink positions. 
+
+Step 3 (norm).. ∥ ˜A𝑙,ℎ sink ∥22 = 𝑁 · 𝑁 −2 = 1 
+
+> 𝑁
+
+.18 Table B.9: Master verification summary of Page-EntroKV theoretical guarantees and hardware geometry (Tables 4–7; Figs. 4–8). 
+
+Guarantee Mathematical form Value / bound Systems impact Validated by 
+
+Arithmetic inten-sity 
+
+𝑊 FLOPs /𝐷 bytes (Eq. (1)) 2𝑟 /𝑏 el = 4.0 FLOP /Byte Decode phase memory-bound Architectural con-stant H100 ridge point Eq. (2) ≈ 295 .4 FLOP /Byte Decode at < 1.5% of peak Architectural con-stant Cache footprint Eq. (3) 4𝐵 batch 𝐿𝐻 KV 𝐷 head 𝑇 Bytes Linear HBM capacity Architectural con-stant 
+
+𝑟 = 2 identity UOR = 2/( 2 − 𝐷 ), monotone and convex in 𝐷 (Remark 1) Exact Disagreement implies in-flation Table 4 certificates Bonferroni certifi-cate UOR ≥ max {1, 𝑟 − 𝑟 (𝑟 − 1) ¯𝐽 } 2× at ¯ 𝐽 ≤ 𝑟 −2   
+
+> 𝑟 (𝑟 −1)
+
+Elementary certificate Table 4 (cert 1)Sandwich bound 𝑟      
+
+> 1+2(𝑟 −1)¯𝐽 /( 1+¯𝐽 )
+
+≤ UOR ≤
+
+min (𝑟, 𝑟 − 2𝐽 max  
+
+> 1+𝐽 max
+
+)
+
+Tight at extremes Two-sided inflation bound Table 4 (cert 𝑇 ); Fig. 4 Rényi family Shannon / collision / min-entropy limits 
+
+H2 = − ln ∥ 𝐴 ∥22 Dot-product evaluation Table 5b (zero viola-tions) Sink suppression 𝑤 sink ∝ 𝑁 −1/𝜏 𝑔 Sink ordering inverted 2.10 × → 0.66 ×
+
+No sink masquerade Figs. 7 and 8 Mean dilution Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) → ( 1 − 𝜖 )/ 𝑟 Exact 1 − 1/𝑟 drop Mean pooling failure mode Table 6a (mean 0%) Temperature limits 𝜏 𝑔 → ∞ ⇒ 1/𝑟 ; hot limit one-hot Monotone in 𝜏 𝑔 Interpolates aggregators Table 5a (certified) Budget conserva-tion Eq. (23) + Hamilton rounding Exact i ff 𝐻 KV 𝐵 | B total Static page quotas Table 5c (exact cardi-nality) Engine page ac-counting 
+
+𝐾 𝑙 ≤ | 𝑃 ret  
+
+> 𝑙
+
+| ≤ 𝐻 KV 𝐾 𝑙 Per-layer cross-group Residual overhead bounded Table 5d (PUR 1 .0) Memory guarantee 𝑀 pooled ≡ 𝑘 UOR ≡ 1.0 Union overhead elimi-nated Table 4 pooled row Needle preserva-tion pooled mass → 1 − 𝜖 Premise-gated Retrieval signal preserved Table 6; Fig. C.9 Finite bound Δ(𝑇 ) ≤ 1.64 × 10 −9 at 128k (in-stantiation) Non-asymptotic error budget Table C.10 and Fig. C.9 Page monotonicity block-max preserves argmax page Exact Token to page linkage Design property Fused complexity O( 𝐻 𝑄 𝑇 + 𝐻 KV 𝑇 𝐵 log 𝐾 𝑙 ) On-chip No DRAM intermediates Design specification Shared-memory footprint 2𝑟 𝐵 + 2(𝑟 +𝐵 )𝐷 head + 4𝐻 KV 6,432 Bytes ( 𝑟 =8, 𝐵 =16) Fits H100 SM (228 KB) Design specification Radix top-𝐾 two-pass 16-bit histogram O( 𝑁 pages ) Exact 𝐾 𝑙 cardinality Design specification FP16 stability guard inside ln only; clamped denominator 
+
+∥ ˜𝐴 ∥22 ∈ [ 1/𝑇, 1] No ln (0); degenerate sinks suppressed Table 5b (zero viola-tions) 
+
+Step 4 (entropy).. H sink 2 = − ln (1/𝑁 ) = ln 𝑁 = ln (𝑇 −|𝑆 sink |) → +∞ as 𝑇 → ∞ .
+
+Step 5 (sink weight decay).. With 𝑢 ℎ ≜ exp (−H sink 2 ( 𝐴 𝑙,ℎ )/ 𝜏 𝑔 ):
+
+𝑢 sink = exp (− ln 𝑁 /𝜏 𝑔 ) = 𝑁 −1/𝜏 𝑔 → 0. 
+
+Step 6 (retrieval weight floor).. For a retrieval head with 
+
+A𝑙,ℎ ∗ , ( 𝑡 ∗) = 1 − 𝜖 , 𝑡 ∗ ∉ 𝑆 sink , and sink mass 𝑝 ℎ∗ ≥ 0: ˜A(𝑡 ∗) = 1− 𝜖   
+
+> 1−𝑝 ℎ∗
+
+≥ 1 − 𝜖 , so ∥ ˜A∥22 ≥ ( 1 − 𝜖 )2 and H sink 2 ≤
+
+2 ln 11− 𝜖 ≜ 𝜂 ret < ∞, giving 𝑢 ℎ∗ ≥ 𝐶 ret > 0 for all 𝑇 .
+
+Step 7 (normalized suppression).. 𝑤 𝑙,ℎ sink = 𝑢 sink      
+
+> 𝑢 ℎ∗+Í𝑗 ≠ℎ∗𝑢 𝑗
+
+≤ 
+
+> 𝑢 sink
+> 𝐶 ret +𝑢 sink
+
+since all kernels are non-negative. Taking 𝑇 → ∞ 
+
+with 𝑢 sink → 0: the sink head’s normalized weight vanishes. 
+
+Appendix C.5. Budget initialization and exact conservation Step 1 (dimensional decomposition).. In PagedAttention, memory is allocated as physical blocks 𝑃 𝑏 of capacity 𝐵 . Un-der GQA, the 𝐻 𝑄 query heads partition into 𝐻 KV groups shar-ing per-group quotas 𝐾 𝑙,𝑔 = 𝐾 𝑙 . Total capacity: Ctotal =Í𝐿 𝑙 =1 𝐻 KV · 𝐵 · 𝐾 𝑙 . The quota divisor is 𝐻 KV · 𝐵 (not 𝑟 · 𝐵 
+
+or 𝐻 𝑄 · 𝐵 ): B𝑙 is the layer’s total token budget across all 𝐻 KV 
+
+bu ff ers, so each bu ff er receives B𝑙 /𝐻 KV , and each page stores 
+
+𝐵 tokens. 
+
+Step 2 (fractional residuals).. The unquantized page target per group is 𝜅 𝑙 ≜ B𝑙   
+
+> 𝐻 KV 𝐵
+
+, decomposed as 𝜅 𝑙 = 𝐾 𝑙 +𝑅 𝑙 with 𝐾 𝑙 = ⌊𝜅 𝑙 ⌋
+
+and 𝑅 𝑙 = {𝜅 𝑙 } ∈ [ 0, 1).
+
+Step 3 (unadjusted conservation condition).. Cunadj =
+
+𝐻 KV 𝐵 Í𝐿 𝑙 =1 𝐾 𝑙 = Btotal − 𝐻 KV 𝐵 Í𝐿 𝑙 =1 𝑅 𝑙 . Exact conservation 19 iff Í𝑙 𝑅 𝑙 = 0, which (each 𝑅 𝑙 ≥ 0) holds i ff 𝑅 𝑙 = 0 for all 𝑙 , i.e., 
+
+Btotal ≡ 0 (mod 𝐿 · 𝐻 KV · 𝐵 ).
+
+Step 4 (deficit integrality).. Define 𝑚 ≜ Í𝐿 𝑙 =1 𝑅 𝑙 = Btotal   
+
+> 𝐻 KV 𝐵
+
+−
+
+Í𝑙 𝐾 𝑙 . Under page-vector budgets, both terms are integers, so 
+
+𝑚 ∈ Z; and 𝑚 > 0 with 𝑚 < 𝐿 , giving 𝑚 ∈ { 1, . . . , 𝐿 − 1}.
+
+Step 5 (largest-remainder restoration).. Sort layers by residual magnitude, 𝑅 𝜋 (1) ≥ · · · ≥ 𝑅 𝜋 (𝐿 ) (ties broken by canonical layer index), and set 𝐾 adjusted   
+
+> 𝜋 (𝑖 )
+
+= 𝐾 𝜋 (𝑖 ) + 1 for 1 ≤ 𝑖 ≤ 𝑚 ,
+
+𝐾 𝜋 (𝑖 ) otherwise. Then Í𝑙 𝐾 adjusted  
+
+> 𝑙
+
+= Í𝑙 𝐾 𝑙 + 𝑚 , so Cadjusted =
+
+𝐻 KV 𝐵 (Í𝑙 𝐾 𝑙 + 𝑚 ) = Btotal , with zero internal fragmentation. 
+
+Numerical cases (Llama-3.1-8B geometry: 𝐿 =32 , 𝐻 KV =8,
+
+𝑟 =4, 𝐵 =16 ; granularity 𝐻 KV 𝐵 = 128 ; full-model granular-ity 4,096 ).. Case A (divisible, Btotal = 32 ,768 ): 32 ,768 mod 4,096 = 0; B𝑙 = 1,024; 𝐾 𝑙 = 8 pages, 𝑅 𝑙 = 0; conserva-tion exact. Case B (non-divisible, target 35 ,000 ): the nearest hardware-aligned budget is ⌊35 ,000 /128 ⌋ × 128 = 273 × 128 =
+
+34 ,944; 𝜅 𝑙 = 8.53125; 𝐾 𝑙 = 8, 𝑅 𝑙 = 0.53125 for all 𝑙 ; 𝑚 = 17 pages. Apportionment: layers {1, . . . , 17 } receive 9 pages, lay-ers {18 , . . . , 32 } receive 8; verification: 17 × 9 × 128 + 15 × 8 ×
+
+128 = 34 ,944—exact conservation, zero fragmentation. 
+
+Appendix C.6. Engine-level page accounting Step 1 (exact per-group cardinality).. By Eq. (22) with deter-ministic tie-breaking, |K 𝑙,𝑔 | ≡ 𝐾 𝑙 for every group. 
+
+Step 2 (lower bound).. Each K𝑙,𝑔 ⊆ 𝑃 ret  
+
+> 𝑙
+
+, so by monotonicity 
+
+𝐾 𝑙 ≤ | 𝑃 ret  
+
+> 𝑙
+
+|.
+
+Step 3 (lower-bound equality).. If all groups select the identical set K∗, the union is K∗ and |𝑃 ret  
+
+> 𝑙
+
+| = 𝐾 𝑙 . Conversely, if |𝑃 ret  
+
+> 𝑙
+
+| =
+
+𝐾 𝑙 with each K𝑙,𝑔 ⊆ 𝑃 ret  
+
+> 𝑙
+
+of the same cardinality, each K𝑙,𝑔 =
+
+𝑃 ret  
+
+> 𝑙
+
+: all selections are identical. 
+
+Step 4 (upper bound).. By Boole’s inequality, |𝑃 ret  
+
+> 𝑙
+
+| ≤Í𝑔 |K 𝑙,𝑔 | = 𝐻 KV 𝐾 𝑙 .
+
+Step 5 (upper-bound equality).. If the selections are pairwise disjoint, finite additivity gives |𝑃 ret  
+
+> 𝑙
+
+| = 𝐻 KV 𝐾 𝑙 . Conversely, if some page lies in two selections, it is counted at least twice in the sum but exactly once in the union, so equality forces pairwise disjointness. 
+
+Step 6 (page-union ratio).. PUR 𝑙 ≜ |𝑃 ret  
+
+> 𝑙
+
+|/ 𝐾 𝑙 satisfies 1 .0 ≤
+
+PUR 𝑙 ≤ 𝐻 KV : it tends to 1 when groups attend to shared regions (system prompts, preambles, shared code) and to 𝐻 KV when groups specialize into independent subspaces. 
+
+Appendix C.7. Strict physical memory bounds Step 1 (union semantics).. All 𝑟 sibling heads read the same physical slice Kphysical [:, 𝑔, :, :], so a shared bu ff er cannot store token 𝑡 for one head while freeing it for another: the engine materializes Kunion  
+
+> 𝑔
+
+= Ðℎ∈Group (𝑔 ) K𝑙,ℎ and 𝑀 indep = |K union  
+
+> 𝑔
+
+|.
+
+Steps 2–3 (bounds under head-independent selection).. Subset inclusion plus cardinality monotonicity gives 𝑘 ≤ 𝑀 indep , with equality i ff all heads select identical sets. Subadditivity gives 
+
+𝑀 indep ≤ 𝑟 𝑘 , and Kunion  
+
+> 𝑔
+
+⊆ { 1, . . . , 𝑇 } gives 𝑀 indep ≤ 𝑇 ; hence 
+
+𝑀 indep ≤ min (𝑟 𝑘, 𝑇 ), with equality i ff selections are pairwise disjoint and 𝑟 𝑘 ≤ 𝑇 . Dividing by 𝑘 : 1 .0 ≤ UOR (𝑔, 𝑘 ) ≤ 𝑟 .
+
+Steps 4–5 (pooling preserves the simplex).. A𝑙,ℎ, ( 𝑡 ) > 0 (soft-max outputs) and 𝑤 𝑙,ℎ > 0 (ratios of positive exponentials), so 
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) ≥ 0. For normalization, interchange the finite sum-mations and factor the weights: 
+
+> 𝑇
+
+∑︁ 
+
+> 𝑡 =1
+
+Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) =∑︁ 
+
+> ℎ∈Group (𝑔 )
+
+𝑤 𝑙,ℎ 
+
+ 𝑇 ∑︁ 
+
+> 𝑡 =1
+
+A𝑙,ℎ, ( 𝑡 )
+
+
+
+=∑︁ 
+
+> ℎ∈Group (𝑔 )
+
+𝑤 𝑙,ℎ ·1 = 1.
+
+Hence Apooled  
+
+> 𝑙,𝑔
+
+∈ Δ𝑇 −1: a convex combination of probability vectors is a probability vector. 
+
+Step 6 (exact cardinality and page extension).. Sorting Apooled 
+
+> 𝑙,𝑔
+
+via a permutation 𝜎 of {1, . . . , 𝑇 } in non-increasing order, the selection set {𝜎 (1), . . . , 𝜎 (𝑘 )} contains exactly 𝑘 pairwise dis-tinct indices because 𝜎 is a bijection (ties broken by canonical index): |K 𝑙,𝑔, | ≡ 𝑘 for every attention configuration, tempera-ture, and group ratio, so UOR (𝑔, 𝑘 ) = 𝑘 /𝑘 ≡ 1.0. The token-level guarantee extends to pages verbatim: block-max reduces the pooled vector to scalar page scores, and page-level TopK retains exactly 𝐾 𝑙 frames per group. 
+
+Appendix C.8. Needle retrieval preservation Step 1 (residual formulation).. For each head, A𝑙,ℎ, ( 𝑡 ) = (1 −
+
+𝑝 ℎ) ˜A𝑙,ℎ (𝑡 ) for non-sink 𝑡 , and ∥ ˜A𝑙,ℎ ∥22 = exp (−H sink 2
+
+ A𝑙,ℎ 
+
+).
+
+Step 2 (sibling coordinates vanish, part i).. From Eq. (26), 
+
+∥ ˜A𝑙, 𝑗 ∥22 ≤ 𝑒 𝑐 𝑗 /( 𝑇 − | 𝑆 sink |) , so ˜ A𝑙, 𝑗 (𝑡 ∗) ≤ 𝑒 𝑐 𝑗 /2/√︁ 𝑇 − | 𝑆 sink |
+
+and, since (1 − 𝑝 𝑗 ) ≤ 1, A𝑙, 𝑗, ( 𝑡 ∗) ≤ 𝑒 𝑐 𝑗 /2/√︁ 𝑇 − | 𝑆 sink | → 0; by the squeeze theorem the limit is zero for all 𝑗 ≠ ℎ∗. Mean pooling therefore satisfies Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) → 1− 𝜖 𝑟 .
+
+Step 3 (retrieval kernel floor).. H sink 2
+
+ A𝑙,ℎ ∗
+
+ ≤ 𝜂 ret gives, after multiplying by −1/𝜏 𝑔 < 0 (which reverses the inequality) and exponentiating, 𝑢 ℎ∗ ≥ 𝐶 ret > 0 for all 𝑇 .
+
+Step 4 (sibling kernel sum vanishes).. Each 𝑢 𝑗 ≤ 𝑒 𝑐 𝑗 /𝜏 𝑔 (𝑇 −|𝑆 sink |) −1/𝜏 𝑔 ; defining 𝐷 (𝑇 ) ≜  Í 𝑗 ≠ℎ∗ 𝑒 𝑐 𝑗 /𝜏 𝑔  (𝑇 − | 𝑆 sink |) −1/𝜏 𝑔 ,the coe ffi cient is 𝑇 -independent and the power term vanishes, so Í 𝑗 ≠ℎ∗ 𝑢 𝑗 ≤ 𝐷 (𝑇 ) → 0. 
+
+Step 5 (weights converge).. 𝑤 𝑙,ℎ ∗ = 11+ 
+
+> Í
+> 𝑗 ≠ℎ∗𝑢 𝑗 𝑢 ℎ∗
+
+after dividing by 
+
+𝑢 ℎ∗ > 0; the ratio is sandwiched between zero and 𝐷 (𝑇 ) 
+
+> 𝐶 ret
+
+→ 0, so 𝑤 𝑙,ℎ ∗ → 1 and Í 𝑗 ≠ℎ∗ 𝑤 𝑙, 𝑗 → 0. 
+
+Step 6 (squeeze on the needle).. Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 𝑤 𝑙,ℎ ∗ (1 − 𝜖 ) + 
+
+Í 𝑗 ≠ℎ∗ 𝑤 𝑙, 𝑗 A𝑙, 𝑗, ( 𝑡 ∗) with the sibling term sandwiched between zero and Í 𝑗 ≠ℎ∗ 𝑤 𝑙, 𝑗 → 0: both brackets converge to 1 − 𝜖 ,giving the limit lim 𝑇 →∞ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 1 − 𝜖 .20 Appendix C.9. Finite-context retention bound Step 1 (weight floor).. 𝑔 (𝑥, 𝑦 ) ≜ 𝑥 /( 𝑥 + 𝑦 ) satisfies 𝜕𝑔 /𝜕𝑥 =  
+
+> 𝑦
+> (𝑥 +𝑦 )2
+
+≥ 0 and 𝜕𝑔 /𝜕𝑦 = − 𝑥   
+
+> (𝑥 +𝑦 )2
+
+< 0 for 𝑥 > 0, 𝑦 ≥ 0; re-placing 𝑥 = 𝑢 ℎ∗ by its floor 𝐶 ret and 𝑦 = Í 𝑗 ≠ℎ∗ 𝑢 𝑗 by its ceiling 
+
+𝐷 (𝑇 ) preserves the lower bound: 𝑤 𝑙,ℎ ∗ ≥ 𝐶 ret    
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+.
+
+Step 2 (minorization).. The sibling term Í 𝑗 ≠ℎ∗ 𝑤 𝑙, 𝑗 A𝑙, 𝑗, ( 𝑡 ∗) ≥ 
+
+0; dropping it gives Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) ≥ 𝑤 𝑙,ℎ ∗ (1 − 𝜖 ) ≥ 𝐶 ret    
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+(1 −
+
+𝜖 ).
+
+Step 3 (deficit closed form).. Writing the bound as (1−𝜖 )− Δ(𝑇 )
+
+and isolating, Δ(𝑇 ) = (1 − 𝜖 ) 𝐷 (𝑇 )   
+
+> 𝐶 ret +𝐷 (𝑇 )
+
+.
+
+Step 4 (monotone decay).. 𝑑 𝑑𝑇 𝐷 (𝑇 ) = − 1
+
+> 𝜏 𝑔
+
+ Í 𝑗 ≠ℎ∗ 𝑒 𝑐 𝑗 /𝜏 𝑔  (𝑇 −|𝑆 sink |) − ( 1  
+
+> 𝜏𝑔 +1)
+
+< 0, and by the chain rule 𝑑 Δ 
+
+> 𝑑𝑇
+
+< 0: the bound tightens as context grows. 
+
+Step 5 (exact instantiation and scaling; arithmetic, not mea-surement).. With 𝑟 = 8 (7 siblings), |𝑆 sink | = 4, 𝜏 𝑔 = 0.5, 
+
+𝑐 𝑗 = 0, 𝜂 ret = ln 2, and 1 − 𝜖 = 0.95: 𝐶 ret = 2−2 = 0.25; 
+
+𝐷 (𝑇 ) = 7(𝑇 − 4)−2; Δ(𝑇 ) = 0.95 · 𝐷 (𝑇 )   
+
+> 0.25 +𝐷 (𝑇 )
+
+≤ 0.95 · 4 𝐷 (𝑇 ).Because 4 .08 × 10 −10 ≪ 0.25 at 𝑇 = 131 ,072, Δ(131 ,072 ) ≤ 
+
+1.63 ×10 −9. In FP32, 𝜀 FP32 ≈ 1.19 ×10 −7; since Δ(𝑇 ) ≪ 𝜀 FP32 ,the pooled needle signal is numerically indistinguishable from exact single-head selection in FP32 registers. Table C.10 tabu-lates the closed-form bound across deployment contexts. 
+
+Two-regime mechanism check.. Figure C.9 exercises the corol-lary’s mechanism end-to-end in the two regimes the pilot spans. Panel (a) is a synthetic construction that satisfies the premises of Theorem 4 exactly (a needle head at mass 1 − 𝜖 = 0.95 with near-maximal-entropy siblings), run through the full en-gine path: the measured pooled needle mass coincides with the bound (1 − 𝜖 ) − Δ(𝑇 ) to within 3 × 10 −7 at every con-text length, up to and including 128k. Panel (b) is the real-text pilot regime on Qwen2.5-1.5B-Instruct eager-attention cap-tures at 𝑇 ≤ 2048: the measured best-head needle mass is 
+
+≈ 0.16 rather than 0 .95, the premise is unsatisfied, and entropy-weighted pooling degenerates toward arithmetic-mean pooling (Proposition 2 ii), with the two pooled masses within a factor 1.06 of each other. Both panels appear together deliberately: panel (a) alone could be misread as an empirical claim, whereas the pair delimits precisely where the guarantee binds and where it does not yet. 
+
+Appendix C.10. Page-frame monotonicity Steps 1–3 (exact equality at the target page).. The pages {𝑃 𝑏 }
+
+form a disjoint partition of {1, . . . , 𝑇 }, so 𝑡 ∗ lies in a unique 
+
+𝑃 ∗. By definition of the maximum, 𝐼 𝑙,𝑔 (𝑃 ∗) ≥ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗);conversely 𝑃 ∗ ⊆ {1, . . . , 𝑇 } gives max 𝑡 ∈ 𝑃 ∗ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) ≤
+
+max 𝑡 Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ) = Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗). The squeeze gives the identity 
+
+𝐼 𝑙,𝑔 (𝑃 ∗) ≡ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗): block-max preserves the peak coordi-nate exactly, independent of 𝐵 .
+
+Step 4 (dominance over other pages).. For any 𝑃 𝑗 ≠ 𝑃 ∗ (dis-joint from 𝑃 ∗, so 𝑡 ∗ ∉ 𝑃 𝑗 ), let 𝑡 𝑗 be the local maximizer. Then 
+
+𝐼 𝑙,𝑔 (𝑃 𝑗 ) = Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 𝑗 ) ≤ Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) = 𝐼 𝑙,𝑔 (𝑃 ∗), with strict in-equality when 𝑡 ∗ is the unique global maximizer. 
+
+Step 5 (retention for any quota).. Sorting page scores in non-increasing order, the maximal page occupies the first rank; for any budget 𝐾 𝑙 ≥ 1, 𝑃 ∗ ∈ K 𝑙,𝑔 : the page containing the global attention peak is unconditionally retained. 
+
+Appendix C.11. On-chip execution and the FP16 guard Argument bounds.. For 𝐴 ∈ Δ𝑇 −1: the collision argument 
+
+∥ 𝐴 ∥22 is at most 1 (single-coordinate concentration) and at least 1/𝑇 > 0 (uniform), so H2 ( 𝐴 ) ∈ [ 0, ln 𝑇 ] and the logarithm never sees a zero argument. 
+
+Guard placement.. The guard must sit inside the logarithm (− ln (∥ 𝐴 ∥22 + 𝜀 ), 𝜀 = 10 −12 ) and never inside the power: ex-panding Í𝑡 ( 𝐴 (𝑡 )+ 𝜀 )2 = ∥ 𝐴 ∥22+2𝜀 +𝑇 𝜀 2, the context-dependent term 𝑇 𝜀 2 corrupts the normalization Í𝑡 𝐴 (𝑡 ) = 1 and breaks the convexity that Theorem 3 relies on. Guarding inside the loga-rithm leaves the distribution untouched. 
+
+Degenerate all-sink clamping.. If Í𝑡 ′ ∈𝑆 sink A𝑙,ℎ, ( 𝑡 ′) = 1, the residual denominator is zero and ˜ A is undefined. The imple-mentation clamps to max(1-p_h, 1e-12) : the residual coor-dinates stay 0, so ∥ ˜𝐴 ∥22 = 0 and H sink 2 = − ln (10 −12 ) ≈ 27 .63— maximal entropy. Under 𝜏 𝑔 = 0.5, 𝑢 sink = exp (− 55 .26 ) ≈ 
+
+9.99 × 10 −25 : the degenerate head’s pooling weight vanishes, preventing all-sink heads from diluting genuine retrieval sig-nals. 
+
+Appendix D. Reference implementation 
+
+Listing 1 gives the PyTorch reference implementation of the Page-EntroKV engine: sink isolation (Definition 4), dis-crete Rényi entropy with the 𝜀 -guard applied inside the log-arithm only (preserving normalization; cf. Remark 7), Boltz-mann weighting over sibling heads (Eq. (20)), group pooling (Eq. (21)), block-max page aggregation and top-𝐾 physical block selection (Eq. (22)). The listing evaluates entropies on the full non-sink sequence for clarity—the full-sequence instance of the observation-window restriction (Definition 5); the win-dowed instance follows by restricting the inputs to 𝑊 obs .                                               
+
+> 1import torch
+> 2import torch . nn as nn
+> 3import torch . nn . functional as F
+> 456class Pa ge E nt r oK V Gr ou p Po o le r ( nn . Module ) :
+> 7" " " Entropy - weighted GQA group pooling +page mapping .
+> 89Entropy is computed on the sink - isolated distribution ; the pooled
+> 10 output uses the RAW attention rows , so it remains aconvex
+> 11 combination of probability vectors ( the budget -preservation
+> 12 guarantee relies on this ) .
+> 13 " " "
+> 14
+
+21 Figure C.9: Corollary 2 two-regime mechanism check ( 𝑟 =6, single 𝜀 = 0.05 used throughout, 𝜏 𝑔 = 0.5). (a) Synthetic premise-satisfied regime : an engine-path construction with a needle head at mass 1 − 𝜀 and near-maximal-entropy siblings; the measured pooled needle mass coincides with the bound (1 − 𝜀 ) − Δ(𝑇 ) at every context length (raw gap ≤ 3 × 10 −7; markers o ff set by +0.01 vertically for visibility), verifying the mechanism end-to-end up to 128k. (b) Real-text pilot regime (premise unsatisfied) : Qwen2.5-1.5B-Instruct eager-attention captures at 𝑇 ≤ 2048; the measured best-head needle mass is ≈ 0.16 rather than 0 .95, so the premise of Theorem 4 is not reached and entropy-weighted pooling degenerates toward arithmetic-mean pooling (Proposition 2 ii), the pooled and mean masses agreeing to within a factor 1 .06. The two panels together delimit where the guarantee binds; neither panel alone is interpretable. Table C.10: Non-asymptotic scaling of the finite-context bound (Corollary 2) across deployment contexts ( 𝑟 =8, 𝜏 𝑔 =0.5, 𝑐 𝑗 =0, 𝜂 ret = ln 2, 1 − 𝜖 = 0.95). All entries are arithmetic instantiations of the closed-form bound—not measurements. 
+
+𝑇 Non-sink 𝑁 𝐷 (𝑇 ) Δ(𝑇 ) Apooled  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) Amean  
+
+> 𝑙,𝑔
+
+(𝑡 ∗) Ratio 4k 4,092 4.18 × 10 −7 1.59 × 10 −6 0.949998 0.118750 8.00 ×
+
+8k 8,188 1.04 × 10 −7 3.97 × 10 −7 0.949999 0.118750 8.00 ×
+
+16k 16,380 2.61 × 10 −8 9.92 × 10 −8 0.949999 0.118750 8.00 ×
+
+32k 32,764 6.52 × 10 −9 2.48 × 10 −8 0.950000 0.118750 8.00 ×
+
+64k 65,532 1.63 × 10 −9 6.20 × 10 −9 0.950000 0.118750 8.00 ×
+
+128k 131,068 4.08 × 10 −10 1.63 × 10 −9 0.950000 0.118750 8.00 × 
+
+> 15
+
+def __init__ ( self , num_query_heads =32 , num_kv_heads =8 ,  
+
+> 16
+
+block_size =16 , tau_g =0.5 , alpha =2.0 ,  
+
+> 17
+
+sink_size =4) :  
+
+> 18
+
+super () . __init__ ()  
+
+> 19
+
+self . num_query_heads = num_query_heads  
+
+> 20
+
+self . num_kv_heads = num_kv_heads  
+
+> 21
+
+self . group_size = num_query_heads // num_kv_heads  
+
+> 22
+
+self . block_size = block_size  
+
+> 23
+
+self . tau_g = tau_g  
+
+> 24
+
+self . alpha = alpha  
+
+> 25
+
+self . sink_size = sink_size  
+
+> 26 27
+
+def renyi_entropy ( self , attn ) :  
+
+> 28
+
+# eps inside log ONLY : preserves sum ( p ) = 1 
+
+> 29
+
+eps = 1e -12  
+
+> 30
+
+if self . alpha == 1.0:  
+
+> 31
+
+return - torch . sum (  
+
+> 32
+
+attn * torch . log ( attn + eps ) , dim = -1)  
+
+> 33
+
+s = torch . sum ( torch . pow ( attn , self . alpha ) , dim = -1)  
+
+> 34
+
+return (1.0 / (1.0 - self . alpha ) ) * torch . log ( s + eps )  
+
+> 35 36
+
+@torch . inference_mode ()  
+
+> 37
+
+def forward ( self , attn_weights , num_retained_blocks ) :  
+
+> 38
+
+" " " [B , H_Q , T ] -> bool mask [B , H_KV , num_blocks ]. " " "  
+
+> 39
+
+Bsz , H_Q , T = attn_weights . shape  
+
+> 40
+
+sink_mask = torch . zeros (  
+
+> 41
+
+T , dtype = torch . bool , device = attn_weights . device )  
+
+> 42
+
+sink_mask [: min ( self . sink_size , T ) ] = True  
+
+> 43
+
+attn_nonsink = attn_weights . masked_fill (  
+
+> 44
+
+sink_mask . unsqueeze (0) . unsqueeze (0) , 0.0)  
+
+> 45
+
+attn_nonsink = attn_nonsink / attn_nonsink . sum (  
+
+> 46
+
+dim = -1 , keepdim = True ) . clamp ( min =1 e -12)  
+
+> 47
+
+ent = self . renyi_entropy ( attn_nonsink )  
+
+> 48
+
+grouped = attn_weights . view (  
+
+> 49
+
+Bsz , self . num_kv_heads , self . group_size , T )  
+
+> 50
+
+ent_g = ent . view ( Bsz , self . num_kv_heads ,  
+
+> 51
+
+self . group_size )  
+
+> 52
+
+weights = F . softmax ( - ent_g / self . tau_g ,  
+
+> 53
+
+dim = -1) . unsqueeze ( -1)  
+
+> 54
+
+pooled = ( weights * grouped ) . sum ( dim =2)  
+
+> 55
+
+pad = ( self . block_size - T % self . block_size ) \ 
+
+> 56
+
+% self . block_size  
+
+> 57
+
+if pad :  
+
+> 58
+
+pooled = F . pad ( pooled , (0 , pad ) )  
+
+> 59
+
+nb = pooled . shape [ -1] // self . block_size  
+
+> 60
+
+pages = pooled . view (  
+
+> 61
+
+Bsz , self . num_kv_heads , nb ,  
+
+> 62
+
+self . block_size ) . max ( dim = -1) . values  
+
+> 63
+
+idx = torch . topk ( pages , num_retained_blocks ,  
+
+> 64
+
+dim = -1) . indices  
+
+> 65
+
+mask = torch . zeros_like ( pages , dtype = torch . bool )  
+
+> 66
+
+mask . scatter_ ( -1 , idx , True )  
+
+> 67
+
+return mask 
+
+Listing 1: PyTorch reference implementation of the Page-EntroKV engine, with sink-isolated entropy weighting. 
+
+22 References 
+
+[1] A. Vaswani, N. Shazeer, N. Parmar, J. Uszkoreit, L. Jones, A. N. Gomez, Ł. Kaiser, I. Polosukhin, Attention is all you need, in: Advances in Neural Information Processing Systems, 2017. [2] N. Shazeer, Fast transformer decoding: One write-head is all you need, arXiv preprint arXiv:1911.02150 (2019). [3] J. Ainslie, J. Lee-Thorp, M. de Jong, Y. Zemlyanskiy, F. Lebrón, S. Sanghai, GQA: Training generalized multi-query transformer models from multi-head checkpoints, in: Proceedings of EMNLP, 2023. [4] A. Dubey, A. Jauhri, A. Pandey, et al., The Llama 3 herd of models, arXiv preprint arXiv:2407.21783 (2024). [5] A. Yang, B. Yang, B. Zhang, et al., Qwen2.5 technical report, arXiv preprint arXiv:2412.15115 (2024). [6] A. Q. Jiang, A. Sablayrolles, A. Mensch, et al., Mistral 7B, arXiv preprint arXiv:2310.06825 (2023). [7] W. Kwon, Z. Li, S. Zhuang, Y. Sheng, L. Zheng, C. H. Yu, J. E. Gonzalez, H. Zhang, I. Stoica, E ffi cient memory management for large language model serving with Paged Attention, in: Proceedings of SOSP, 2023. [8] G.-I. Yu, J. S. Jeong, G.-W. Kim, et al., Orca: A dis-tributed serving System for transformer-based generative models, in: Proceedings of USENIX OSDI, 2022. [9] R. Pope, S. Douglas, A. Chowdhery, et al., E ffi ciently scaling transformer inference, in: Proceedings of Machine Learning and Systems (MLSys), 2022. [10] Z. Zhang, Y. Sheng, T. Zhou, et al., H2O: Heavy-hitter oracle for e ffi cient generative inference of large language models, in: Advances in Neural Information Processing Systems, 2023. [11] Y. Li, Z. Huang, et al., SnapKV: LLM knows what you are looking for before generation, arXiv preprint arXiv:2404.14469 (2024). [12] Z. Liu, A. Desai, F. Liao, et al., Scissorhands: Exploit-ing the persistence of importance hypothesis for LLM KV cache compression at test time, in: Advances in Neural Information Processing Systems, 2023. [13] G. Xiao, Y. Tian, B. Chen, S. Han, M. Lewis, E ffi cient streaming language models with attention sinks, in: Inter-national Conference on Learning Representations (ICLR), 2024. [14] S. Ge, et al., Model tells you what to discard: Adap-tive KV cache compression for large language models, in: International Conference on Learning Representations (ICLR), 2024. [15] Z. Cai, Y. Zhang, B. Gao, et al., PyramidKV: Dynamic KV cache compression based on pyramidal information funneling, arXiv preprint arXiv:2406.02069 (2024). [16] J. Tang, Y. Yang, J. Lin, et al., Quest: Query-aware spar-sity for e ffi cient long-context LLM inference, in: Interna-tional Conference on Learning Representations (ICLR), 2025. [17] Y. Feng, et al., Ada-KV: Optimizing KV cache eviction via adaptive budget allocation for grouped-query atten-tion, arXiv preprint arXiv:2407.11550 (2024). [18] EntroKV: Entropy-guided dynamic budget allocation for KV-cache compression, under review (2025). [19] G. Xiao, Y. Tian, B. Chen, S. Han, M. Lewis, DuoAtten-tion: E ffi cient long-context LLM inference with retrieval and streaming heads, in: Advances in Neural Information Processing Systems, 2024. [20] Y. Yang, Z. Liu, C. Wang, C. Deng, M. Zhang, K. Zhao, X. Zheng, W. Zhang, Y. Gao, B. C. Ooi, Z. Zhang, N. V. Chawla, ThinK: Thin Kertia for Faster KV Cache Compression in Large Language Models, in: Proceedings of ACL, 2024. [21] C. Liu, Y. Shen, H. Yin, L. Liu, KIVI: A tuning-free asym-metric 2-bit quantization for KV cache, in: Advances in Neural Information Processing Systems, 2024. [22] S. Ashkboos, A. Mohtashami, M. L. Croci, B. Li, P. K. Aithal, M. Jaggi, D. Alistarh, T. Pethick, M. E. Pe-ters, QuaRot: Outlier-free 4-bit inference in rotated large language models, in: Advances in Neural Information Processing Systems, 2024. [23] C. Xiao, P. Zhang, X. Han, G. Xiao, Y. Lin, Z. Zhang, Z. Liu, S. He, W. Han, S. Tang, B. He, Q. Zhu, X. Zhang, M. Sun, InfLLM: Training-free long-context extrapola-tion for LLMs with an e ffi cient context memory, arXiv preprint arXiv:2402.04617 (2024). [24] W. Wu, Y. Wang, G. Xiao, H. Peng, S. Han, Retrieval head mechanistically explains long-context factuality, arXiv preprint arXiv:2404.15574 (2024). [25] P. Michel, O. Levy, G. Neubig, Are sixteen heads really better than one?, in: Advances in Neural Information Pro-cessing Systems, 2019. [26] E. Voita, D. Talbot, F. Moiseev, R. Sennrich, I. Titov, Ana-lyzing multi-head self-attention: Specialized heads do the heavy lifting, the rest can be pruned, in: Proceedings of ACL, 2019. [27] T. Dao, D. Y. Fu, S. Ermon, A. Rudra, C. Ré, FlashAt-tention: Fast and memory-e ffi cient exact attention with IO-awareness, in: Advances in Neural Information Pro-cessing Systems, 2022. 23 [28] T. Dao, FlashAttention-2: Faster attention with bet-ter parallelism and work partitioning, arXiv preprint arXiv:2307.08691 (2023). [29] Y. Bai, X. Yuan, J. Chang, et al., LongBench: A bilin-gual, multitask benchmark for long context understand-ing, arXiv preprint arXiv:2308.14508 (2023). [30] C.-P. Hsieh, S. Sun, S. Kriman, et al., RULER: What’s the real context size of your long-context language models?, arXiv preprint arXiv:2404.06654 (2024). [31] N. F. Liu, K. Lin, J. Hewitt, A. Paranjape, M. Bevilacqua, F. Petroni, P. Liang, Lost in the middle: How language models use long contexts, Transactions of the Association for Computational Linguistics (2024). [32] DeepSeek-AI, DeepSeek-V2: A strong, economical, and e ffi cient mixture-of-experts language model, arXiv preprint arXiv:2405.04434 (2024). 24

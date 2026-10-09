@@ -1,0 +1,410 @@
+Title: ServeTwin: A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration
+
+URL Source: https://arxiv.org/pdf/2610.02732v1
+
+Published Time: Mon, 05 Oct 2026 00:32:13 GMT
+
+Number of Pages: 12
+
+Markdown Content:
+# ServeTwin: A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration 
+
+## Sungjoon Park * Changue Jung * Kyungno Joo Mincheol Kang Jaehyung Ahn Sehwan Lee Sangjoon Kim 
+
+{stdio.park,changue.jung,kyungno.joo,minc.kang,jh91.ahn,sehwan.b.lee,sangjoon0919}@samsung.com 
+
+Samsung Advanced Institute of Technology Suwon-si, Republic of Korea 
+
+## Abstract 
+
+Evaluating distributed LLM serving designs on physical clus-ters is costly. Yet existing simulators provide only subsets of the capabilities needed for realistic design exploration: state-ful closed-loop execution, timing prediction without pro-filing target hardware, and direct execution of unmodified serving benchmarks. We present ServeTwin, a closed-loop simulator that couples specification-driven analytical timing with a stateful serving loop. This coupling captures feedback among request completion, scheduling, queue state, and KV-cache evolution, including prefill–decode disaggregation and multi-turn agent workloads. ServeTwin avoids target-hardware operator profiling through iSTAGE, an analytical trace generator that derives per-iteration traces from model and engine specifications while representing ragged batches and discrete engine mechanisms such as CUDA-graph batch padding. It fur-ther decomposes execution time into component-owned throughput, scheduler, and runtime costs. This ownership lets unaffected parameters transfer across platforms and confines recalibration to changed hardware or software components. ServeTwin implements a vLLM-compatible interface and runs unmodified serving benchmarks. Against real deployments, it reproduces InferenceX’s steady-state throughput–interactivity frontier with a 3.6% mean error and predicts LMBenchmark’s multi-turn performance with a 9.9% error while tracking KV-cache evolution. Pre-silicon sweeps reveal that the preferred HBM bandwidth–capacity tradeoff reverses across workload states and that increasing concurrency shifts the bottleneck from memory bandwidth to scheduler and runtime overheads. Together, these capabil-ities enable practical exploration of distributed LLM serving systems before target hardware is available. 
+
+## 1 Introduction 
+
+Large Language Model (LLM) serving extends far beyond accelerating isolated tensor operations; it has evolved into a highly dynamic systems engineering challenge. Funda-mentally, the autoregressive nature of LLMs dictates a strict two-phase execution for every request: a prefill phase that processes the prompt to generate a KV cache, followed by an 
+
+> *The first two authors contributed equally to this work.
+
+Table 1. Comparison of prior tools against ServeTwin’s key simulation capabilities. ServeTwin uniquely com-bines stateful closed-loop execution, profiling-free timing prediction, and compatibility with unmodified serving bench-marks. ( ⃝ full, △ partial, × absent.)                
+
+> Stateful serving loop Profiling free Unmodified benchmarks LLMServingSim 2.0 [3] △××
+> Vidur [1] △××
+> AgentServeSim [14] △×△
+> GenZ [2] / LLMCompass [20] ×⃝×
+> ServeTwin ⃝⃝⃝
+
+iterative decode phase. While modern engines like vLLM [6] and SGLang [21] employ continuous batching [19] to dy-namically mix these phases and maximize throughput, the differing compute profiles of prefill and decode have driven a recent architectural shift. Today, modern deployments phys-ically disaggregate these two phases onto separate workers, coupling them via KV cache transfer [11]. This architectural complexity is further amplified by agentic workloads. Un-like simple pass-through queries, agentic clients introduce a strict multi-turn dependency, issuing subsequent requests only after receiving the previous response. This shift trans-forms LLM serving into a highly interactive, stateful system loop, demanding sophisticated evaluation. Production metrics like TTFT and queue transients emerge from a continuous feedback loop: serving state dictates each iteration’s batch, while hardware execution time updates the subsequent state (e.g., queue depth and KV-cache occupancy). Consequently, faster hardware inherently alters the batches themselves, rendering fixed-batch models inadequate. While evaluating architectural improvements under these dynamic conditions is critical, the prohibitive scale and cost of LLM infrastructure drives an urgent demand for high-fidelity sim-ulators that capture this end-to-end dynamic environment. Rapidly evolving agentic workloads compound that demand. Existing simulators fail to capture this continuous loop. Analytical models (e.g., GenZ [2], LLMCompass [20]) evalu-ate static workloads without queueing feedback, while serv-ing simulators (e.g., LLMServingSim [4], Vidur [1]) repro-duce scheduling but rely on rigid physical hardware profiles. 
+
+> 1arXiv:2610.02732v1 [cs.PF] 2 Oct 2026 Park et al.
+
+0 50 100 150 
+
+simulated time (s) 
+
+050 100  
+
+> KV pool used (%)
+> 33 GiB KV budget ServeTwin LLMServingSim replay LLMServingSim adapt. Complete at 141 s Abort at 39 s Abort at 45 s
+
+Figure 1. Capacity failure under a deployment-equivalent KV budget. LLMServingSim aborts the multi-turn workload without a staged-KV waiting state. The 33 GiB KV budget is derived from an 80 GB H100. Benchmark Client    
+
+> Interface Layer  Continuous Batch Admission Control KV Cache Management Ragged Batching Graph Capture Trace Reuse Compute Model Memory Model Network Model
+> Serving Param.
+> Serving State Model iSTAGE ASTRA-Sim
+> Model Param. HW Param. Closed Loop Batch Shape Trace
+> InferenceX LMBench.
+
+Figure 2. The closed-loop simulation architecture of ServeTwin. Simulated execution times from iSTAGE and ASTRA-sim dynamically dictate subsequent scheduling deci-sions in a continuous feedback loop. Crucially, current tools fundamentally fail at dynamic state management, particularly in prefill/decode disaggregation. For example, LLMServingSim treats prefill/decode disaggre-gation as a simple pipeline cut. It lacks a way for the pre-fill worker to temporarily hold the KV cache if the decode worker is busy. As Figure 1 shows, this creates a fundamental simulation failure, not just a timing inaccuracy. Multi-turn workloads simply crash because requests attempt to enter the decode phase without any queue to safely wait in. ServeTwin reconnects this severed feedback loop and re-solves these state failures, as illustrated in Figure 2. Running unmodified multi-turn benchmarks, it completes execution under deployment-equivalent KV budgets by properly stag-ing the waiting path. Each iteration, it constructs a batch mir-roring production LLM engines (e.g., vLLM, SGLang), strictly enforcing admission control, cross-worker KV transfers, and multi-turn states. To process this without empirical profiles, we introduce iSTAGE—extending STAGE [9] to translate the batch into a symbolic trace, calculating latency directly from hardware specifications. Feeding this precise timing back to advance the system state naturally dictates the next batch composition. Integrating an analytical model within a dynamic serving loop poses profound challenges. First, serving batches are inherently ragged; naïvely padding them to maximum di-mensions for analytical graphs overestimates execution time by up to 146 ×. Second, theoretical FLOPs and memory band-width cannot capture discrete runtime mechanisms (e.g., KV page walks, kernel launches) that heavily skew step latency. Finally, continuous end-to-end simulation demands excep-tionally lightweight trace generation. iSTAGE overcomes these hurdles through (1) statistics-preserving batch binding, (2) first-order modeling of discrete engine mechanisms, and (3) aggressive trace reuse. We validate ServeTwin across two distinct evaluation paradigms. For steady-state performance, InferenceX [15] evaluates system throughput and interactivity frontiers. Be-cause it largely operates without the unpredictability of prefix-cache hits, ServeTwin easily tracks physical perfor-mance with just a 3.6% mean error. In contrast, LMBench-mark [8] introduces the chaotic dynamics of multi-turn serv-ing. In this environment, real-time prefix-cache hits con-stantly shift the execution timing balance between prefill and decode (P/D) phases, dynamically cascading into ad-mission control and queueing variations. Despite this ex-treme runtime complexity where prior methods simply crash, ServeTwin successfully captures these transient dynamics within a 10% error margin. This paper makes the following contributions: 1. Stateful Serving Model: A dynamic serving model that explicitly tracks request scheduling, multi-turn sessions, and KV-cache lifecycles, featuring occupancy-coupled admission for prefill/decode disaggregation rather than simplistic fixed-delay handoffs (§3.2–§3.4). 2. Spec-Driven Execution (iSTAGE): An analytical trace generator that derives execution timings directly from hardware and model specifications, eliminat-ing the need for empirical profiles while remaining lightweight enough to operate inside the serving loop (§3.5). 3. Component-Owned Cost Decomposition: Amechanism-attributed cost ledger that separates specification-driven throughput from host-control and runtime-mechanism costs. Each term family is assigned an observable ablation footprint and an 
+
+> 2ServeTwin : A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration
+
+owning component, enabling selective recalibra-tion only when that component changes instead of global overhead fitting or per-point retuning (§3.6, §4.2–§4.4). 4. Benchmark-Validated Architectural Exploration: 
+
+Validation against unmodified public benchmarks across hardware generations, serving stacks, and deployment scales, followed by spec-driven hardware sweeps that reveal a workload-dependent trade-off be-tween HBM bandwidth and capacity and a bottleneck shift from memory physics toward runtime control overheads (§4.5–§4.8). 
+
+## 2 Background and Motivation 
+
+2.1 LLM Serving as a Stateful System 
+
+LLM serving entails two distinct phases: prefill (processing prompts to generate a KV cache) and decode (iteratively generating tokens, expanding the cache). Modern engines dynamically reconstruct batches every iteration via contin-uous batching and chunked prefill, while leveraging prefix caching for history reuse. Crucially, execution is fundamen-tally state-dependent. A request is admitted only if sufficient KV memory exists; otherwise, it queues or preempts. Be-cause discrete runtime mechanisms often reshape physical execution (§3.5), simulators must explicitly track the dy-namic system state (e.g., KV occupancy) that governs batch composition, rather than merely counting requests. 
+
+2.2 Prefill/Decode Disaggregation and KV Transfer 
+
+Disaggregated architectures [12, 13, 22] isolate prefill and decode workers to prevent long prompts from stalling token generation. This necessitates transferring the KV cache be-tween workers. However, this handoff is not a static network delay. Production systems (e.g., Dynamo [11] with NIXL [10]) implement a pull mechanism where decode workers fetch KV blocks only when they have sufficient free capacity. If de-code memory is full, the cache remains staged on the prefill worker, creating upstream backpressure. Accurate simula-tion requires tracking this occupancy-coupled admission and the resulting capacity-driven dependencies (§3.3). 
+
+2.3 Benchmarks Used in This Paper 
+
+We validate ServeTwin using two distinct benchmarks. 
+
+InferenceX [15] maps the steady-state balance between throughput and interactivity. We validate our simulator against the public hardware performance data published online by SemiAnalysis. 
+
+LMBenchmark [8] captures dynamic, multi-turn behav-iors like admission pressure and transient delays. We vali-dated this by deploying an in-house DGX H100 with NVIDIA Dynamo and vLLM, directly matching ServeTwin’s behavior with physical telemetry data extracted via Prometheus and Grafana. 
+
+2.4 Existing Simulation Approaches Serving Simulators. Tools like LLMServingSim [3, 4], Vidur [1], and AgentServeSim [14] model continuous batch-ing and scheduling but fundamentally rely on hardware-profiled latencies. Furthermore, they omit critical stateful semantics: LLMServingSim relies on open-loop trace replay that breaks multi-turn session dependencies, and mod-els prefill-to-decode disaggregation as an unconditional pipeline cut lacking staged-KV backpressure. Vidur and AgentServeSim similarly lack occupancy-coupled KV lifecy-cles. 
+
+Analytical Models. GenZ [2] and LLMCompass [20] es-timate execution timings directly from hardware specifi-cations, enabling architectural exploration. However, they evaluate static workloads offline (i.e., snapshots), completely lacking the dynamic closed-loop scheduling required to iter-atively update batch compositions. 
+
+STAGE. STAGE [9] synthesizes symbolic tensor graphs for distributed LLM workloads and includes an inference case study. Its abstraction, however, models prescribed work-load graphs rather than a stateful serving loop: it does not represent KV-cache lifecycles, queueing feedback, or the scheduler-generated ragged batches that change at every iter-ation. Adapting it for serving therefore requires the serving-specific mechanisms described in §3.5. 
+
+2.5 Why Existing Serving Simulation Is Insufficient 
+
+LLMServingSim represents prefill/decode disaggregation as a pipeline cut and has no state in which a completed pre-fill request can retain its KV on the producer while wait-ing for decode-side capacity. Figure 1 gives a motivating counterexample. ServeTwin runs the unmodified multi-turn benchmark and completes under the deployment-equivalent KV budget, while both LLMServingSim encodings abort when they attempt to allocate the decode-side KV without a staged waiting path. This is a semantic failure rather than an execution-time calibration error: all methods use the same calibrated compute profile. 
+
+## 3 ServeTwin Design 
+
+3.1 Overview 
+
+Figure 2 illustrates ServeTwin’s closed-loop architecture. Unmodified clients interact via a lightweight wall-clock-to-simulated-time interface. Each iteration executes four stages: (1) The stateful serving loop admits and batches requests under dynamic memory and token budgets, tracking KV lifecycles. (2) iSTAGE binds the batch shape to a symbolic tensor graph, emitting a Chakra execution trace [16]. (3) ASTRA-sim [17] evaluates the trace; employing a structural  
+
+> 3Park et al. Prefill Queue Prefill Worker (Staged KV) Decode Worker (Resident KV) Admission Control Decode Queue
+> Capacity Backpressure
+> Control Pull KV
+
+KV Cache 
+
+Figure 3. Capacity-driven KV handoff in disaggregated serving. Decode-side capacity regulates KV transfers, natu-rally backpressuring the prefill stage when the pool is full. network simulator rather than closed-form equations cap-tures topology-dependent collective communication over-heads. (4) The resulting execution time advances the simu-lated clock and updates system states to drive subsequent batching. 
+
+3.2 Serving-State Simulation 
+
+While the baseline scheduling logic builds upon LLMServ-ingSim [3, 4], we redesign its internal state management to achieve strict closed-loop fidelity. Through this redesign, ServeTwin models production systems like vLLM and SGLang, supporting continuous batching, chunked prefill, radix-tree prefix caching, and capacity-driven preemp-tion. To track these dynamics, we introduce a KV lifecycle registry featuring Dynamo-inspired pull-based handoffs (§2.2), occupancy-coupled admission, tiered memory, and a dedicated multi-turn session layer. Finally, iSTAGE and ASTRA-sim replace the legacy profile-based backend, en-abling fully spec-driven simulation. 
+
+3.3 Disaggregated KV Lifecycle 
+
+In ServeTwin, a request’s KV cache transitions through an explicit state machine (Figure 3), from initial allocation to eventual eviction or demotion. Unlike a simplistic pipeline cut, this lifecycle enforces two critical couplings. First, admis-sion is occupancy-coupled : decode-side memory saturation blocks admission, naturally inducing backpressure on the prefill queue. Second, KV transfer is strictly consumer-driven :staged KV awaits an explicit pull from the decode worker (modeling NIXL-style handoffs [10]). Decoding commences only upon full KV arrival or suffix recomputation, supporting both full and layer-wise transfers. Implementation components include a prefill-side registry with heartbeat leases, a decode-side wait queue, bandwidth-constrained transfer tracking, radix-tree-aware delta pulls, KVCache New Tok. 
+
+> Req. 0 Req. 1 Req. 2 Req. 3 iSTAGE Binding Ragged Batch
+> Avg. New Tok. Avg. KVCache
+> (a)
+
+Live Batch Requests : 5 Select Graph Size (4,8,16..) 
+
+Executed Shape Requests : 8 
+
+3 Padded Requests. 
+
+> (b)
+
+Figure 4. Mapping serving batches to execution shapes. 
+
+(a) iSTAGE binds ragged batches to statistics-preserving rect-angles. (b) Decode batches are padded to discrete CUDA-graph capture sizes. and a recompute fallback. By explicitly modeling these mech-anisms, ServeTwin captures crucial second-order dynam-ics—such as localized queue buildups, network backlogs, and KV-induced admission stalls—that unconditional pipeline models obscure. 
+
+3.4 Multi-turn Sessions as Simulator State 
+
+Unlike traditional trace-driven approaches that statically unroll conversations into independent requests, ServeTwin tracks multi-turn sessions as internal simulator state. A ses-sion issues a subsequent turn only after the preceding re-sponse is fully generated, reflecting strict inter-request de-pendencies and optional tool-execution delays. Because con-text accumulates continuously across rounds, the integrated prefix cache (§3.2) translates shared history into cache hits and minimal delta transfers. Furthermore, ServeTwin supports tiered KV memory man-agement: blocks evicted from HBM can be demoted to host memory and promoted back upon subsequent hits, with all data movement strictly constrained by the host-to-device in-terconnect bandwidth. Additionally, speculative decoding is analytically incorporated via a parameterized per-step accep-tance length. Collectively, these state-tracking mechanisms capture the workload semantics inherent to the multi-round agentic scenarios evaluated by LMBenchmark. 
+
+> 4ServeTwin : A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration
+
+3.5 Spec-Driven Execution Modeling with iSTAGE 
+
+While STAGE [9] provides foundational spec-driven graph synthesis for distributed LLM workloads, it does not model the dynamic serving state or KV-aware ragged batches pro-duced by a serving scheduler. To bridge this gap, we develop 
+
+iSTAGE (Inference STAGE) , which extends and retargets this symbolic execution modeling specifically for serving. This enables accurate, profile-free timing evaluation based purely on hardware specifications. iSTAGE achieves modu-larity via configuration files rather than hardcoded backends. As summarized in Table 2, its templates support a wide spec-trum of modern architectural features. This breadth is es-sential for architectural exploration, as varying model struc-tures fundamentally shift system bottlenecks across compute, bandwidth, memory capacity, and communication. However, integrating these models into an iterative serv-ing loop introduces three unique challenges absent in train-ing simulations: (1) modeling irregular (ragged) batches with-out padding-induced cost distortions; (2) capturing discrete engine mechanisms that alter latency independently of the-oretical FLOPs/bytes; and (3) ensuring trace generation is lightweight enough for per-iteration execution. As illustrated in Figure 4, iSTAGE resolves these by replacing naïve rect-angular schemas with statistics-preserving batch binding and applying capture-size padding to reflect actual engine discreteness. 
+
+Ragged Batches. Symbolic execution graphs typically require rectangular inputs, but LLM serving batches are in-herently ragged, comprising requests with varying new to-kens ( 𝑞 𝑖 ) and KV lengths ( 𝑘𝑣 𝑖 ). Padding to the maximum lengths (max-folding) substantially overestimates compute costs, especially in mixed prefill–decode batches. To resolve this without losing analytical efficiency, we observe that the underlying cost model depends only on aggregate statistics: total tokens ( Í 𝑞 𝑖 for dense GEMMs), at-tention FLOPs ( Í 𝑞 𝑖 𝑘𝑣 𝑖 ), and KV footprint ( Í 𝑘𝑣 𝑖 ). Therefore, iSTAGE binds the graph dimensions to statistics-preserving averages: Seq = 1
+
+> 𝑛
+
+Í 𝑞 𝑖 and KVSeq = Í 𝑞 𝑖 𝑘𝑣 𝑖 /Í 𝑞 𝑖 as shown in Figure 4a. This guarantees exact token and attention FLOP counts, while precisely matching the KV footprint during pure-decode phases ( 𝑞 𝑖 =1). Against exact ragged computation, iSTAGE yields a me-dian step-time error of 3 .7% (p95 11%) on mixed prefill– decode batches, versus 268% for max-folding. Across all it-erations, including pure decode, iSTAGE’s median error is 1.1%. 
+
+Engine Discreteness. Beyond batch representation, accu-rate simulation must account for runtime engine interven-tions that alter physical workloads. For instance, execution engines routinely pad decode batches to match pre-compiled CUDA-graph capture sizes. This padding constitutes real computational work; in MoE models, it artificially increases 
+
+Table 2. iSTAGE coverage. Measured evaluation covers DeepSeek-R1 and Qwen3; additional model families exercise the same analytical templates in simulation.            
+
+> Category Representative support Models DeepSeek-R1, Qwen3 (measured); Llama, DeepSeek-V4, Kimi K2/K3 (template coverage) Mode Training, Inference Structure Dense, MoE Attention GQA, MLA, CSA, Linear, Hybrid attention Features P/D Disagg., Chunked prefill, Ragged mixed batches, KV delta pooling
+
+the number of distinct experts fetched from HBM, chang-ing actual latency independently of the logical token count (Figure 4b). To capture this, iSTAGE explicitly models the engine’s discrete behaviors and capture lists as first-order effects (Table 2). Consequently, in ServeTwin, performance curve shapes emerge inherently from structural mechanisms, while fitted constants merely calibrate baseline levels. 
+
+Keeping Trace Generation Affordable. Serving simu-lations run tens of thousands of iterations, making on-the-fly trace generation a major performance bottleneck. This overhead historically forced analytical models to rely on offline, single-shot evaluations. To overcome this, iSTAGE avoids redundant work by aggressively reusing previously generated traces. It caches recurring batch shapes, collapses identical model layers (layer folding), and skips through re-peated decode steps. This reuse does not sacrifice accuracy; layer folding, for example, remains perfectly exact by ex-plicitly re-adding the per-collective network latencies (§3.6). Ultimately, these caching optimizations (§4.7) make trace generation lightweight enough to run efficiently inside the closed loop on a single CPU, without GPU acceleration. 
+
+3.6 Component-Driven Latency Modeling 
+
+Hardware specifications easily provide baseline times for compute and memory traffic. However, real-world execution includes complex overheads like host scheduling, KV cache traversal, and network startups. If a simulator lumps all these delays into a single, generic "overhead" constant, it cannot accurately predict performance when hardware or software configurations change. To address this, ServeTwin breaks down every overhead by its actual root cause—a principle we call component ownership .Every delay in our model must map to a specific system operation, scale based on clear variables (like request count or context length), and remain unchanged unless that specific operation changes. Consequently, the total time for each iteration is the sum of three distinct components: 
+
+𝑡 step = 𝑡 throughput + 𝑡 scheduler + 𝑡 runtime (1) 
+
+> 5Park et al.
+
+Table 3. Cost ledger. Cost parameters are updated only when the corresponding hardware or software component changes.           
+
+> Category Cost factor Architectural source Throughput
+> (T)
+> GEMM utilization Tensor core efficiency Scheduler
+> (S)
+> Host control CPU stack overhead Capture behavior Graph padding penalty Runtime
+> (R)
+> KV traversal Attention page-walk Launch exposure Kernel submission gap Collective residual Comm. setup & barrier DPA residual Workload imbalance & barrier P→D pacing KV transport setup
+
+Throughput Cost ( 𝑡 throughput ): The fundamental time spent on GPU computation, memory access, and network transfer. For prefill, we use a compute utilization curve that scales with the number of tokens. For decode, execution is typically limited by memory bandwidth; tensor-core tile quantization additionally bounds compute efficiency at small batches. 
+
+Scheduler Cost ( 𝑡 scheduler ): This category includes per-step and per-request CPU overheads and additional GPU work induced by CUDA-graph batch padding. Although padding increases GPU computation and expert-weight traf-fic, we attribute this additional cost to the Scheduler because it arises from the scheduler’s batch-size decision. 
+
+Runtime Cost ( 𝑡 runtime ): Engine-specific runtime delays. This explicitly includes the time to search the KV cache (which grows with context length), GPU kernel launch de-lays (which become noticeable at small batch sizes), and the setup time for collective communications. Under data-parallel attention (DPA), ranks finish their work at different times; the DPA residual captures both the resulting wait for slower ranks and the additional synchronization-barrier overhead. The Runtime category also includes P →D pacing, which limits the handoff rate rather than adding to 𝑡 runtime 
+
+in Equation 1. By structurally isolating these costs, ServeTwin avoids arbitrary curve fitting. Our parameters represent real sys-tem mechanics, allowing the model to generalize accurately across diverse architectural designs. Crucially, these mechanism costs do not overlap with the network simulator. While ASTRA-sim handles the actual data transfer time, our calibrated terms isolate only the auxil-iary startup and synchronization delays; the two components divide the work clearly without double-counting. Table 3 summarizes these costs and their system owners. To prevent these terms from becoming unjustified fitting parameters, ServeTwin enforces three strict rules: 1. Use specifications directly: Peak compute, mem-ory bandwidth, and engine capture lists are drawn strictly from hardware and software specifications, never from curve fitting. 2. Ground terms in observation: We introduce over-head terms exclusively when warranted by empirical scaling trends. For instance, a cost profile scaling with context length isolates KV-cache traversal, whereas an overhead persisting across hardware transitions signifies software-stack overheads. 3. Fix and reuse values: Calibrated parameters are frozen and consistently applied across all operating points and platforms, provided their underlying com-ponents remain unaltered. This breaks away from conventional practices—such as tuning a generic over-head percentage—that overfit a single scenario and fail to generalize. Separating these sources is critical for accuracy. For instance, on a high-batch H200 decode step, throughput physics takes 12.7 ms, but control and mechanism overheads add 11.1 ms—comprising nearly half the total time, not just a rounding error. By adhering to component ownership, ServeTwin makes falsifiable predictions: removing a term primarily affects the serving conditions it represents (§4.3), parameters transfer safely across platforms (§4.4), and swapping a component requires re-calibrating only its specific owner (§4.5). 
+
+## 4 Evaluation 
+
+4.1 Experimental Setup 
+
+Our evaluation answers five research questions based on the predictions of our component-driven model: 
+
+• RQ1 (Attribution): When we remove one overhead term, does accuracy degrade where we expect it to (§4.3)? 
+
+• RQ2 (Transferability): Can the same parameters be reused across different hardware systems without re-calibration, and when only one component changes, is it sufficient to re-calibrate only the parameters as-sociated with that component(§4.4)? 
+
+• RQ3 (Fidelity): Does the simulation accurately repro-duce both steady-state and transient serving dynamics (§4.5, §4.6)? 
+
+• RQ4 (Cost): Is the simulator lightweight enough for extensive design sweeps (§4.7)? 
+
+• RQ5 (Design): Can high-fidelity simulation alter pre-silicon design decisions (§4.8)? 
+
+Configurations and Workloads. Our primary eval-uation uses DeepSeek-R1 (671B MoE, FP8) on 8 ×H200 and H200/B200 disaggregated deployments (Dynamo with SGLang workers). For transient dynamics (§4.6), we de-ploy Qwen3-32B on a 2 ×H100 setup and validate against Prometheus/Grafana telemetry on LMBenchmark. To isolate 
+
+> 6ServeTwin : A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration
+
+Table 4. Application of Table 3’s transfer rules. Unlisted applicable families transfer unchanged.           
+
+> Platform Deployment Change Updated H200 agg.
+> (baseline)
+> ––disagg. LLM engine build Disagg. Framework
+> S, R
+> B200 agg. Blackwell GPU LLM engine build
+> T, S
+> disagg. +(B200 agg.) Disagg. Framework DPA, P →D handoff
+> T, S, R
+> GB200 NVL72 disagg. +(B200 disagg.) Grace host CPU NVLink only
+> T, S, R
+
+pure pipeline overheads and prevent mixing KV transfers with collective communications (e.g., TP/EP), we strictly assign one GPU for prefill and one for decode, restricting NVLink traffic solely to KV transfers. To evaluate binding accuracy (§3.5), we analyze 44,220 iterations across 10 runs, encompassing steady-state decode, chunked prefill, and multi-turn contexts (up to 21K tokens). 
+
+Validation Methodology. To ensure an exact compara-tive validation, we execute unmodified benchmarks through our endpoint interface (§3.1). We calibrate model parameters using a subset of the measurement points from the public InferenceX dashboard and evaluate the resulting model on the remaining held-out points. 
+
+4.2 Calibration Methodology 
+
+We calibrate component-specific overhead parameters from benchmark measurements and reuse them unchanged unless their owning components change. For example, on the H200 baseline, host overheads are derived from request concur-rency, KV costs from context length scaling, and collective costs from communication counts. Table 3 defines the trans-fer rules for these parameters, and Table 4 tracks their lifecy-cle across deployments. We initialize the baseline parameters on the aggregated H200 setup and following fix and resuse values rules when moving new deployment. For instance, transitioning to an aggregated B200 updates only the hardware specifications and host control costs. Mov-ing to a disaggregated architecture introduces new structural terms, such as prefill-to-decode pacing and data-parallel at-tention (DPA) residuals. When validating a disaggregated H200 on a different software snapshot, re-measuring the host control yielded values within 0 .61 ms of the B200 baseline, confirming the reliability of this transfer method. This strict update policy prevents overfitting through arbitrary tuning. Any discrepancies between our simulated predictions and empirical data (e.g., anomalous compute efficiencies > 1.0) GEMM utilization +56 0 +2 0 0 0                                                            
+
+> Host control
+> per step +2 +47 +12 +5 +6 +6
+> per request 0+2 +12 +1 -1 +3
+> Capture behavior 0+13 0000
+> KV traversal/setup
+> traversal 0+3 +20 +1 -4 +4
+> sequence setup 0+2 +11 0-3 +2
+> Launch exposure 0+8 00-2 0
+> Collective residual +1 +23 +7 +16 +39 +15
+> DPA residual ×××+27 ×+40
+> P → D pacing ×××00+5
+> Small batch Large batch DPA on DPA off Under util. Aggregated Disaggregated Prefill Decode Δ|error| (pp)
+> −10 020 40 60
+
+Figure 5. Ablation impact on absolute prediction error (pp). Outlines mark the expected dominant effects of each term; × denotes absent mechanisms. indicate missing systemic factors, such as unmodeled frame-work optimizations or hidden execution overheads, which we then explicitly incorporate into the simulator. 
+
+4.3 Sensitivity Analysis of Cost Terms 
+
+We conduct an ablation study to verify the necessity of the individual cost families in Table 3. By removing one term at a time, we evaluate whether prediction errors (reported as ab-solute percentage points, pp, in Figure 5) increase specifically under the serving conditions each term is designed to repre-sent. Omitting the GEMM utilization term increases prefill prediction error by 56 pp, showing that peak compute rates alone do not capture effective GEMM performance. Per-step host control: Removing this increases small-batch decode error by 47pp, demonstrating that CPU overhead remains sig-nificant even for small GPU batches. DPA synchronization: Removing this increases DPA-decode error by 40pp. Other terms (e.g., KV traversal, collective costs) similarly domi-nate prediction errors under their corresponding conditions. These results justify maintaining separate cost terms rather than using a generic, interchangeable correction factor, an approach that conceptually aligns with LIMINAL [5]. 
+
+4.4 Selective Transfer 
+
+We evaluate parameter transferability across four dimen-sions, updating only the parameters associated with changed hardware or software components:              
+
+> 7Park et al. 40 60 80 100
+> Interactivity (tok/s/user)
+> 0200 400 600 800
+> Throughput per chip (tok/s)
+> 416 64 128 1024 2048
+> H200
+> 40 60 80 100
+> Interactivity (tok/s/user)
+> 0500 1000 1500
+> 416 64 256 1024 2048
+> B200
+> 20 40 60 80 100
+> Interactivity (tok/s/user)
+> 02000 4000 6000 8000
+> 1024 2048 4096 (TP32) 6144 4096 (TP8)
+> GB200 NVL72
+> agg. measured agg. simulated disagg. measured disagg. simulated
+
+Figure 6. InferenceX throughput–interactivity frontiers. Measured vs. simulated performance across H200, B200, and GB200 NVL72 (DeepSeek-R1 FP8, 1k/1k). Labels indicate concurrency. 
+
+• Hardware (H200 → B200): Updating only hardware specifications and host costs accurately predicts held-out data. 
+
+• Stack (B200 → H200 disaggregated): Reusing frozen B200 parameters on H200—re-measuring only host control—results in just a 3 .1% average error. 
+
+• Workers (1 → 2 prefill): The P →D pacing parame-ter models handoff control overhead separately from KV-data transfer time. We reuse it unchanged when scaling from one to two prefill workers within the same handoff-path class. 
+
+• Platform (HGX → GB200 NVL72): Re-calibrating only replaced components matches anchors within 2%. We avoid arbitrary overfitting, transparently reporting 7–12% errors at extreme concurrencies where batching amortizes per-request overheads (e.g., state updates, KV cache allocation) to scale sublinearly ( ∼𝑛 0.6). 
+
+4.5 End-to-End Steady-State Fidelity: InferenceX 
+
+We evaluate steady-state metrics and enforce the InferenceX dashboard’s filtering criteria (e.g., pareto-optimal configura-tions). Furthermore, applying Little’s law identifies the true bottleneck: a nominal "concurrency 2048" yields an effective pool of only ≈978 requests, proving the actual supply rate dictates the system load. Figure 6 validates our simulator across H200, B200, and GB200 environments. Across 27 operating points, the mean error is just 3.6%, with all predictions falling within a 10% margin. Robust generalization is evident, as held-out vali-dation error (3.7%) closely matches calibration error (3.5%). Finally, evaluating a dense LLM (Qwen3-32B) yields a 3 ×
+
+higher compute efficiency than the MoE baseline, exactly matching their arithmetic intensity ratio. This confirms that efficiency emerges from inherent architectural properties, not arbitrary tuning variables. 
+
+4.6 Transient Serving Fidelity: LMBenchmark 
+
+To evaluate transient dynamics, we use LMBenchmark [8] serving Qwen3-32B FP8 on two H100 GPUs (1 prefill, 1 de-code worker) with vLLM and prefix caching. The baseline configures 1 user, 20 rounds, 2 QPS, 1K-token shared prompt, 10K-token history, and 100-token output. We evaluate three more variants: ISL ×2 (20K history), OSL ×10 (1K output), and USERS ×20 (20 users). Before the main run, 0.5 s-interval two-round warm-ups and short requests populate reusable KV prefixes. During execution, users append to and resend accumulated conversa-tions. Consequently, cache-hit rates naturally rise as repeated prefixes replace cold prefills. We update hardware specifica-tions (memory capacity, HBM bandwidth, peak compute) to H100 and model inputs to Qwen3-32B at TP1. For the MoE-to-dense GEMM shift, we solely re-anchor the prefill GEMM utilization curve based on the baseline scenario. Despite shifting from SGLang to vLLM, we retain the H200 software overheads (KV-traversal, kernel launches, host costs, and CUDA-graphs). Figure 7 compares simulations against actual measure-ments. ISL ×2 increases KV occupancy and cold-prefills, peak-ing the prefill queue at 16 requests. Initial reuse boosts hit rates, but growing contexts accelerate evictions, eventually lowering hit rates and forcing renewed prefills. Similarly, USERS ×20 distributes the 2 QPS across 20 separate per-user histories. These compete for the fixed KV pool without shar-ing prefixes, causing evictions before reuse. This sustains prefill workloads and lowers cache-hit rates. Conversely, OSL ×10 prolongs decoding, keeping KV blocks active. During warm-up, prefills accumulate while            
+
+> 8ServeTwin : A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration 010
+> baseline
+> Waiting queue (reqs)
+> 050 100
+> Prefix-cache hit (%)
+> 01
+> Prefill time (s)
+> 02
+> Decode time (s)
+> 010
+> ISL x2
+> 050 100
+> 02
+> 02
+> 05
+> OSL x10
+> 050 100
+> 01
+> 020
+> 0100 200
+> time (s)
+> 010
+> USERS x20
+> 0100 200
+> time (s)
+> 050 100
+> 0100 200
+> time (s)
+> 01
+> 0100 200
+> time (s)
+> 02
+> measured P ServeTwin P measured D ServeTwin D
+
+Figure 7. Transient serving dynamics on LMBenchmark. Rows show the four scenarios; columns show waiting queues, prefix-cache hit rates, prefill time, and decode time. Blue and orange denote prefill and decode instances. Dashed markers show measurements and solid lines show simulation. Insets give measured and simulated timing summaries from Table 5. decode capacity is busy, causing a decode-admission spike. Longer responses delay subsequent multi-turns, causing cache-hit rates to rise slower than the baseline. However, high cache-hit rates ultimately reduce prefill work, though they cannot eliminate the extended decode phase. 
+
+Comparison with LLMServingSim. We compare our ServeTwin against LLMServingSim using its two provided trace modes: a replay mode with arrival timestamps exported from a specific benchmark, and a chained mode that triggers each turn only after its predecessor completes. 1 Both modes abort at the deployment’s 33 GiB KV budget (Figure 1). To inspect their behavior beyond this failure, we relax only LLMServingSim’s KV capacity to 4 TB, while the measured deployment and ServeTwin retain the original budget. This diagnostic tests whether bypassing the capacity abort is suf-ficient to reproduce measured timing behavior. Table 5 shows that both two modes match baseline TTFT within 10%, but this agreement does not carry to the pres-sure scenarios. On ISL ×2 and USERS ×20, their TTFTs are         
+
+> 1Release v1.1.0: the sub_requests workload schema and its
+> tool_duration gap are present in the repository but are not described in its papers.
+
+96–99 .7% below measurement, missing the large latency in-crease associated with prefill pressure. OSL ×10 is less uni-form: replay underestimates TTFT by 42%, while chained adaptation overestimates it by 38%. Both modes overestimate ITL across all four scenarios, by 79–137%. Preserving turn dependencies alone therefore does not recover the measured workload-dependent timing behavior. 
+
+4.7 Simulation Efficiency 
+
+Three forms of reuse cut trace-generation overhead. First, we generate each heavily repeated end-to-end trace expression once and reuse it. Second, rather than simulating individual layers, we exploit the layer-wise repetition of a Transformer to jump analytically to the end of all layer executions, a further 4 .9×. Third, a shape cache groups slightly varying tensor shapes (e.g., batch sizes or sequence lengths) into size-based buckets that share one entry, instead of caching every shape separately. Consequently, all experiments, including full calibration sweeps, execute deterministically on a single commodity CPU in minutes. 
+
+> 9Park et al.
+
+Table 5. Simulation fidelity on LMBenchmark. Post-warmup mean window medians; parentheses show signed errors vs. measurements. LLMServingSim uses relaxed ca-pacity.                                     
+
+> Scenario Source TTFT(s) ITL(ms) baseline measured 0.060 22.3
+> ServeTwin (calibration) 0.058 ( −3%) 22.5 (+1%)
+> LLMServingSim replay 0.057 ( −5%) 52.9 (+137%) LLMServingSim chained adapt. 0.054 ( −10%) 46.0 (+106%) ISL ×2measured 3.14 29.7
+> ServeTwin 2.50 ( −20%) 26.8 ( −10%)
+> LLMServingSim replay 0.089 ( −97%) 63.3 (+113%) LLMServingSim chained adapt. 0.113 ( −96%) 55.4 (+87%) OSL ×10 measured 0.219 25.0
+> ServeTwin 0.204 ( −7%) 28.5 (+14%)
+> LLMServingSim replay 0.126 ( −42%) 55.2 (+121%) LLMServingSim chained adapt. 0.302 (+38%) 47.4 (+90%) USERS ×20 measured 15.2 24.0
+> ServeTwin 15.3 (+1%) 18.6 ( −23%)
+> LLMServingSim replay 0.044 ( −99.7%) 42.9 (+79%) LLMServingSim chained adapt. 0.557 ( −96%) 50.5 (+110%)
+
+4.8 Pre-Silicon Design Exploration 
+
+Motivated by the selective-transfer results in §4.4, we con-duct two complementary design explorations. First, we in-vestigate whether specific workloads benefit more from in-creased HBM bandwidth or expanded capacity. Second, un-der a fixed memory capacity, we evaluate whether bandwidth enhancements or scheduler and runtime optimizations better accommodate latency-sensitive versus throughput-oriented services. It is important to note that these are simulated sensi-tivity analyses, rather than equal-cost hardware comparisons or measurements of unreleased silicon. 
+
+Bandwidth vs. Capacity. Figure 8 compares the sensitiv-ity of two workloads to HBM bandwidth and capacity: inde-pendent single-turn requests ( W1 : 1K-input/1K-output, fixed concurrency of 64) and multi-turn sessions ( W2 : 20 users, 20 rounds per user, 11–13.2K-token prompts, and 100-token outputs). Both workloads use Qwen3-32B FP8 in a two-GPU H100 configuration with one prefill worker and one decode worker (1P1D). We separately scale HBM bandwidth and the usable memory pool to {0.7, 1, 1.4}× their baseline values, varying one while holding the other fixed. After subtracting the fixed model-weight footprint, the capacity sweep yields effective KV budgets of 14.1, 33.3, and 58.8 GiB, respectively. For W1 , increasing bandwidth to 1 .4× baseline improves throughput by 24%, whereas increasing the memory pool provides no throughput benefit. Reducing the pool to 0 .7×
+
+baseline lowers throughput by 5%. These results are consis-tent with the baseline pool accommodating the active KV working set at the configured concurrency, while memory traffic during decoding remains a performance constraint. Al-though additional capacity can support larger batches when 0.8× 1.0× 1.2×       
+
+> +24% 0.01 0.1 110 100
+> 0.7 1.0 1.4 0.8× 1.0× 1.2×
+> +22% 0.7 1.0 1.4 0.01 0.1 110 100
+> −99.5%
+> Throughput (norm.) Median TTFT (s, log)
+> W1: Simple pass-through W2: Multi-turn
+> Resource scaling factor
+> HBM bandwidth Usable HBM pool
+
+Figure 8. Workload-dependent HBM priorities. Inde-pendent requests (top) and multi-turn sessions (bottom): normalized output throughput (left) and median TTFT on a shared logarithmic scale (right). concurrency is increased, it provides no throughput gain under this fixed workload setting. For W2 , increasing bandwidth to 1 .4× baseline has lit-tle effect on end-to-end throughput. Increasing the mem-ory pool to 1 .4× baseline, however, improves throughput by 22% and reduces median TTFT from 12.55 s to 0.068 s. The prefix-cache hit rate rises from 22% to 93%, while median queueing delay falls from 10.46 s to approximately 0.01 s. These changes are consistent with improved retention of reusable multi-turn contexts, reducing repeated prefill com-putation and queueing pressure. The limited throughput response to additional bandwidth suggests that accelerat-ing memory-bound operations alone does not address the dominant serving constraints in this configuration. Together, these workloads illustrate that the benefits of additional bandwidth and capacity depend on active KV demand, prefix reuse, and the stages that limit serving per-formance. In particular, capacity can improve responsiveness at a fixed user count by preserving reusable contexts across turns. Evaluating bandwidth–capacity trade-offs therefore requires accounting for cache residency and queueing dy-namics alongside concurrency. 
+
+Bandwidth vs. Scheduler and Runtime Costs. Figure 9 evaluates hardware scaling versus software overhead re-duction on a validated H200 setup (DeepSeek-R1 FP8, 1K-input/1K-output). We compare the baseline against tripling HBM bandwidth or reducing selected Scheduler costs (host       
+
+> 10 ServeTwin : A Benchmark-Validated Simulator for Distributed LLM Architecture Exploration 25 75 125 0500 1000 1500
+> Throughput (tok/s/GPU)
+> (a) Aggregated
+> 25 75 125
+> (b) Disaggregated Token rate per user (tok/s)
+> Baseline HBM BW ×3 Lower overhead
+
+Figure 9. Bandwidth gains and overhead constraints. (a) Aggregated and (b) disaggregated serving. “Lower overhead” denotes reductions in selected Scheduler and Runtime costs. control) and Runtime costs (prefill-to-decode (P →D) pac-ing and DPA synchronization) by 40%. Panel (a) shows an aggregated TP8 configuration, while Panel (b) presents a disaggregated deployment scaling to extreme concurrencies. Under low loads (e.g., concurrency 128), hardware band-width dominates. Because software queues and communica-tion delays are practically non-existent at this stage, perfor-mance scales directly with memory bandwidth, increasing throughput by 28–63%. However, Panel (b) reveals a strik-ing reversal under extreme loads. At a concurrency of 2048, tripling the bandwidth makes raw token generation 60% faster, but overall throughput stalls completely, and median TTFT degrades to 52.96 s. The hardware computes faster, but the software (scheduler and inter-worker synchronization) fails to manage the massive influx of requests, causing severe traffic congestion. Conversely, holding hardware fixed and cutting these Scheduler and Runtime costs by 40% increases throughput by 60% and halves TTFT to 22.92 s. This indi-cates that at high concurrency, the binding constraint shifts from memory bandwidth to scheduler and runtime costs. Crucially, the root cause of bottlenecks shifts depending not only on the workload characteristics but also on the current concurrency level being served. 
+
+Batch-Dependent Limits to Hardware Gains. Figure 10 presents a controlled decode-step comparison across differ-ent hardware platforms (H200, B200, GB200) to complement the sensitivity study. 𝐵 denotes the active batch size on a single decode worker, rather than system-wide concurrency. The total decode step time is decomposed into three model-attributed components: Throughput Cost (analytical trace execution), Scheduler Cost (exposed host CPU work), and Runtime Cost (KV traversal, sequence setup, kernel launch, H200 B200 GB200 H200 B200 GB200 0510 15 20   
+
+> Decode step time (ms) B=1
+> 18% 20% 63% 12% 21% 67% 14% 9% 77%
+> B=32
+> 51% 12% 37% 39% 15% 46% 42% 9% 50% Throughput Scheduler Runtime
+
+Figure 10. Batch-dependent decode cost decomposition. 
+
+Compares H200, B200, and GB200 at active batches 𝐵 = 1and 𝐵 = 32 under a fixed DeepSeek-R1 FP8 setup (aggregated TP8, 1536-token FP8 KV cache). and collective setup residuals). This comparison uses no cap-ture padding, so the Scheduler component contains only exposed host work. We utilize the hardware calibration profiles from §4.4. H200 and B200 share identical runtime coefficients, isolating the pure effect of their hardware specification differences. For GB200, the per-step Scheduler cost (host control) is explicitly reduced from 1.8 ms to 0.635 ms. Consequently, the GB200 results represent a transferred platform-model prediction rather than an empirical measurement. This breakdown explains why hardware upgrades fail to deliver proportional performance gains at small batch sizes. At a low batch size ( 𝐵 = 1), Runtime Cost dominates, accounting for 63–77% of the total step time. Upgrading from H200 to B200 reduces the Throughput Cost from 1.67 ms to 1.09 ms (1 .53 × faster), but the total step time only marginally improves from 9.34 ms to 8.76 ms (1 .07 ×). Conversely, at a high batch size ( 𝐵 = 32), Throughput Cost accounts for a significantly larger share. Moving from H200 to B200 reduces this cost from 10.94 ms to 6.64 ms (1 .65 × faster), resulting in a more substantial total step time reduction from 21.34 ms to 17.04 ms (1 .25 ×). 
+
+## 5 Related Work 
+
+Simulators and Analytical Models. Beyond the tools dis-cussed in §2.4, most simulators (e.g., APEX [7]) are validated solely on custom internal testbeds. LIMINAL [5] bounds decode performance using a single lumped overhead term. In contrast, ServeTwin isolates specific mechanism costs to accurately model state-dependent queueing behaviors. 
+
+Overhead Characterization. While KernelSight-LM [18] profiles host-side overheads via direct instrumentation, 
+
+> 11
+
+Park et al. 
+
+ServeTwin complements this approach by analytically in-ferring these overheads from public measurements and verifying them through component-level parameter transfer. 
+
+Disaggregated Systems. ServeTwin directly models the underlying mechanisms of modern disaggregated serving architectures pioneered by Splitwise, DistServe, and Moon-cake. 
+
+## 6 Conclusion 
+
+ServeTwin predicts LLM serving performance by integrat-ing a KV-lifecycle state machine with a specification-driven analytical backend. Validated against independent public benchmarks, it achieves a 3 .6% mean error on InferenceX frontiers and reproduces queue and cache-reuse dynamics in multi-turn scenarios. By updating calibration parameters strictly based on architectural changes, ServeTwin success-fully transfers to new platforms, predicting GB200 NVL72 performance within a 2% margin. This capability allows ar-chitects to generate serving curves directly from pre-silicon specifications. Finally, our design studies demonstrate that hardware upgrade priorities must align with workload states and service targets. 
+
+## References 
+
+[1] Amey Agrawal, Nitin Kedia, Jayashree Mohan, Ashish Panwar, Nipun Kwatra, Bhargav Gulavani, Ramachandran Ramjee, and Alexey Tu-manov. 2024. Vidur: A Large-Scale Simulation Framework for LLM Inference. In Proceedings of Machine Learning and Systems (MLSys) .[2] Abhimanyu Bambhaniya, Ritik Raj, Geonhwa Jeong, Souvik Kundu, Sudarshan Srinivasan, Suvinay Subramanian, Midhilesh Elavazhagan, Madhu Kumar, and Tushar Krishna. 2024. Demystifying Platform Requirements for Diverse LLM Inference Use Cases. In arXiv preprint arXiv:2406.01698 .[3] Jaehong Cho, Hyunmin Choi, Guseul Heo, and Jongse Park. 2026. LLMServingSim 2.0: A Unified Simulator for Heterogeneous and Dis-aggregated LLM Serving Infrastructure. arXiv:2602.23036. [4] Jaehong Cho, Minsu Kim, Hyunmin Choi, Guseul Heo, and Jongse Park. 2024. LLMServingSim: A HW/SW Co-Simulation Infrastructure for LLM Inference Serving at Scale. In IEEE International Symposium on Workload Characterization (IISWC) .[5] Michael Davies, Neal Crago, Karthikeyan Sankaralingam, and Christos Kozyrakis. 2025. LIMINAL: Exploring The Frontiers of LLM Decode Performance. arXiv:2507.14397. [6] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the 29th Symposium on Operating Systems Principles (SOSP) .[7] Yi-Chien Lin, Woosuk Kwon, Ronald Pineda, and Fanny Nina Parave-cino. 2024. APEX: An Extensible and Dynamism-Aware Simulator for Automated Parallel Execution in LLM Serving. arXiv:2411.17651. [8] LMCache Team. 2025. LMBenchmark: Benchmarking Suite for LLM Serving Systems. https://github.com/LMCache/LMBenchmark .[9] Changhai Man, Joongun Park, Hanjiang Wu, Huan Xu, Srinivas Sridha-ran, and Tushar Krishna. 2026. Scalable Synthesis of Distributed LLM Workloads through Symbolic Tensor Graphs. In Proceedings of the 53rd Annual IEEE/ACM International Symposium on Computer Architecture (ISCA) . To appear. arXiv:2511.10480. [10] NVIDIA. 2025. NIXL: NVIDIA Inference Xfer Library. https://github. com/ai-dynamo/nixl .[11] NVIDIA. 2025. NVIDIA Dynamo: A Datacenter-Scale Distributed In-ference Serving Framework. https://github.com/ai-dynamo/dynamo .[12] Pratyush Patel, Esha Choukse, Chaojie Zhang, Aashaka Shah, Íñigo Goiri, Saeed Maleki, and Ricardo Bianchini. 2024. Splitwise: Efficient Generative LLM Inference Using Phase Splitting. In Proceedings of the 51st Annual International Symposium on Computer Architecture (ISCA) .[13] Ruoyu Qin, Zheming Li, Weiran He, Mingxing Zhang, Yongwei Wu, Weimin Zheng, and Xinran Xu. 2025. Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving. In 23rd USENIX Confer-ence on File and Storage Technologies (FAST) .[14] Rakibul Hasan Rajib, Mengxin Zheng, and Qian Lou. 2026. AgentServeSim: A Hardware-aware Simulator for Multi-Turn LLM Agent Serving. arXiv:2606.09613. [15] SemiAnalysis. 2026. InferenceX (formerly InferenceMAX): An Open, Continuously Updated LLM Inference Benchmark. https://inferencex. semianalysis.com .[16] Srinivas Sridharan, Taekyung Heo, Louis Feng, Zhaodong Wang, Matt Bergeron, Wenyin Fu, Shengbao Zheng, Brian Coutinho, Saeed Rashidi, Changhai Man, and Tushar Krishna. 2023. Chakra: Advancing Perfor-mance Benchmarking and Co-design using Standardized Execution Traces. In arXiv preprint arXiv:2305.14516 .[17] William Won, Taekyung Heo, Saeed Rashidi, Srinivas Sridharan, Sudar-shan Srinivasan, and Tushar Krishna. 2023. ASTRA-sim2.0: Modeling Hierarchical Networks and Disaggregated Systems for Large-model Training at Scale. In IEEE International Symposium on Performance Analysis of Systems and Software (ISPASS) .[18] Xiteng Yao, Taeho Kim, Hengzhi Pei, Xinle Liu, Kyle Ulrich, Leonard Lausen, Ashish Khetan, Xiang Song, George Karypis, and Martin Her-bordt. 2026. KernelSight-LM: A Kernel-Level LLM Inference Simulator. arXiv:2606.28565. [19] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In OSDI .[20] Hengrui Zhang, August Ning, Rohan Baskar Prabhakar, and David Wentzlaff. 2024. LLMCompass: Enabling Efficient Hardware Design for Large Language Model Inference. In ISCA .[21] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Effi-cient Execution of Structured Language Model Programs. In NeurIPS .[22] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .12
