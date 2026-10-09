@@ -44,14 +44,14 @@
       <span class="dpr-home-dashboard-kicker">2026-10-09</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 19 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>8</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>6</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>13</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-09 00:25:17 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-09 23:46:50 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日日报共筛13篇，精读5篇、速读8篇，重点集中在Agent的KV Cache生命周期管理与选择性复用。</p>
-<p>最值得看的是两项9.0精读：KVTether讲ReAct Agent的KV Cache管理，以及请求顺序对滚动Agent选择性KV-Cache复用的缓存历史敏感性。</p>
-<p>普通读者可先读这两篇精读，再按兴趣看SparseEngine、持久上下文图和多Agent持久记忆的速读结论。</p>
+<p>2026-10-09 日报：筛完 19 篇，精读 6 篇、速读 13 篇，主线集中在 Agent 推理与 KV 缓存优化。</p>
+<p>最值得看的是两篇 9.0 精读：KV 缓存复用中“请求顺序”对缓存历史敏感性的影响，以及面向 Agentic LLM 服务的 HEAR 协议；速读可留意 KV 缓存淘汰与稀疏推理引擎。</p>
+<p>普通读者建议先读这两篇精读，建立“缓存复用顺序 + 服务协议”的框架，再按兴趣补速读。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">6 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Capture the lifecycle: KV Cache management in ReAct Agents with KVTether">Capture the lifecycle: KV Cache management in ReAct Agents with KVTether</span></li><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Coda: Exploiting Admission Flexibility for Coding-Agent Serving">Coda: Exploiting Admission Flexibility for Coding-Agent Serving</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Capture the lifecycle: KV Cache management in ReAct Agents with KVTether">Capture the lifecycle: KV Cache management in ReAct Agents with KVTether</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">8 篇</strong>
+    <strong class="dpr-home-dashboard-count">13 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SparseEngine: Sparse-First Inference Engine">SparseEngine: Sparse-First Inference Engine</span></li><li><span class="dpr-home-dashboard-paper-title" title="Persistent Context Graphs for Efficient Memory Compaction in LLM Agents">Persistent Context Graphs for Efficient Memory Compaction in LLM Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell">Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Monte Carlo Estimation for KV Cache Eviction">Monte Carlo Estimation for KV Cache Eviction</span></li><li><span class="dpr-home-dashboard-paper-title" title="Online Adaptive Computation Reuse in Collaborative Edge Computing: A Two-Timescale Approach">Online Adaptive Computation Reuse in Collaborative Edge Computing: A Two-Timescale Approach</span></li><li><span class="dpr-home-dashboard-paper-title" title="SparseEngine: Sparse-First Inference Engine">SparseEngine: Sparse-First Inference Engine</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>4</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>4</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>5</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>5</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>4</strong></span></div>
 </section>
 </div>
 

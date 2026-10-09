@@ -1,0 +1,475 @@
+Title: Lineage-Aware Memory Governance: A Derivation-Gated Framework for Privacy-Preserving Column-Level Access Control in Enterprise AI Agents
+
+URL Source: https://arxiv.org/pdf/2610.07258v1
+
+Published Time: Wed, 07 Oct 2026 00:16:52 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+Accepted for publication in IEEE Access . This is the author’s accepted manuscript; the final published version is available at https://doi.org/10.1109/ACCESS.2026.3730363. Digital Object Identifier 10.1109/ACCESS.2026.3730363 
+
+# Lineage-Aware Memory Governance: A Derivation-Gated Framework for Privacy-Preserving Column-Level Access Control in Enterprise AI Agents 
+
+> 1
+
+Venkata Sangaraju and 2Sudhir Vissa   
+
+> 1Independent Researcher (ORCID: 0009-0001-7716-1342)
+> 2SAGE7 AI, Georgetown, Texas, USA (ORCID: 0009-0003-7865-0863)
+
+Corresponding author: Venkata Sangaraju. This research received no specific grant from any funding agency in the public, commercial, or not-for-profit sectors. 
+
+ABSTRACT Enterprise AI agents that share a memory store face two unaddressed risks: sensitive data can leak through legitimately computed results the requester could not derive, and departments can silently compute a same-named key performance indicator (KPI) through conflicting logic. Existing agent-memory systems (e.g., MemGPT, Zep, A-MEM) gate retrieval by content, ownership, and role, not derivation, missing a cached insight that embeds a forbidden column. We introduce the Analytical Memory Unit (AMU), a memory schema that attaches a full derivation (lineage) graph to every cached result, gated by a retrieval policy that serves a hit only when the requester is authorised for every column touched. Provided lineage recording is complete, we prove by construction that the policy blocks retrieval of results derived from a sensitive column outside the requester’s permissions, at O(n) worst case – a conditional design guarantee, not an empirical claim, that excludes derived features encoding sensitive information without naming their source. Eliminating measured leakage required 75 –90% recorded lineage completeness, so we treat 90% as a conservative deployment target. Across six experiments, lineage-gated retrieval removes the 18 .8–25 .5% cross-department leakage naive content-gated memory suffers, keeping 81 .5–82 .6% of memory reuse at 13 .8 μs worst-case overhead. A real-agent proof-of-concept with LLM-generated SQL is consistent with the guarantee: zero leaks over 9 round-trips, two conflicts caught automatically – though a feasibility demonstration, not evidence of production viability. This offers a practical governance layer for shared agent memory, complementing source-layer access control and supporting EU AI Act compliance. 
+
+INDEX TERMS Column-level access control, data provenance, enterprise AI agents, lineage-aware memory governance, metric-definition governance, multi-agent systems, privacy-preserving retrieval. 
+
+I. INTRODUCTION 
+
+Consider a mid-sized enterprise running separate Finance and Marketing AI agents against a shared customer data warehouse. Finance joins customer_pii (which contains 
+
+income ) against transactions to identify high-value customers, producing a segment of 12,400 customer IDs and a count. The result itself carries no raw personally identifiable information (PII) and no sensitivity tag. So under any memory system that governs access by content, it gets freely cached and served to the next agent that asks for “high-value customers” – including Marketing, whose role was never granted access to income . The derivation path quietly violated column-level access policy, and none of the content-gated safeguards common in current memory-sharing systems (§II) would catch it, because the violation is invisible in the stored value and shows up only in how the value was computed. This is simply how the content-gated memory-sharing pattern behaves in every system we survey in §II.  
+
+> 1arXiv:2610.07258v1 [cs.CR] 5 Oct 2026 Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+> A. MOTIVATION AND PRIOR GAP
+
+The urgency tracks the pace of agent adoption: Gartner data shows 80% of enterprise applications shipped or updated in Q1 2026 embed at least one AI agent, up from 33% in 2024, and 31% of enterprises already run at least one agent in production, rising to 47% in banking and insurance [1]. IBM’s 2025 Cost of a Data Breach Report puts the global average breach cost at $4.44 million ($10.22 million in the US) [2], and El Yagoubi et al.’s AgentLeak benchmark finds that inter-agent messages leak sensitive data at 68 .8% , com-pared with 27 .2% for final outputs alone, meaning output-only auditors—who inspect only final outputs—miss 41 .7% 
+
+of privacy violations [3]. Systems such as MemGPT [4], Zep [5], A-MEM [6], Governed Memory [7], SSGM [8], and Oracle AI Agent Memory [9] show that shared, governed memory cuts down redundant computation. The problem is that every current system controls access at the level of 
+
+content and tags , not derivation (§II, Table 1): a memory entry gets labelled with an owner, sensitivity class, or role, and retrieval is gated on whether the requester holds the matching label. None of these systems, and none of the source-layer controls such as Apache Ranger or Databricks Unity Catalog, record which tables were joined, which columns were touched, or what filter logic produced a stored result. Source-layer controls stop an unauthorised agent from querying a restricted column, but they do nothing once a legitimately computed result is cached and later served to a different, less-privileged requester. There is a second, independent failure mode on top of this: departments often compute the same-named key performance indicator (KPI) through different business logic (e.g., a 90-day vs. 60-day churn window), and without derivation tracking, shared memory quietly propagates one team’s definition to the other. This is documented in the business intelligence (BI) literature as semantic drift [10], and it is apparently serious enough that Snowflake, Salesforce, dbt Labs, BlackRock, and RelationalAI jointly launched the Open Semantic Inter-change initiative in 2025 [11] – though that effort targets human-facing BI tools, not autonomous agents writing their own queries. There is also a regulatory angle worth noting: the EU AI Act imposes explainability and risk-management obligations on high-risk AI systems for which data lineage is a structural prerequisite [12]. A memory layer that can actually prove rather than just assert that no result crossed a column-permission boundary turns what would otherwise be an audit question into something the system itself can check mechanically. 
+
+> B. CONTRIBUTIONS
+
+We make four contributions in this paper. First is the Analytical Memory Unit (AMU) schema and the lineage-gated retrieval policy that goes with it: a memory schema that attaches a full derivation graph to every stored result, and a retrieval algorithm that gates memory hits on column-level derivation permissions rather than content tags (§III). Second, we give a formal safety guarantee – Theorem 1 proves that lineage-gated retrieval prevents leakage of any sensitive column outside the requester’s permissions un-der complete lineage recording, with corollaries covering unsafe store contents and policy updates, plus O(n)/O(1) 
+
+complexity analysis (§IV). Third is an eight-threat model (T1–T8) that lays out what the mechanism protects against, what it does not, and what production control we rec-ommend for each gap (§V). Fourth, we run six statisti-cally validated experiments: two schema configurations, a completeness-degradation study, an extended 43-pair fuzzy conflict-detection study, microsecond runtime benchmarks, and a real-agent integration with automatic SQL lineage ex-traction. Together these quantify the governance-efficiency tradeoff and ground the mechanism in a real, open-source agent stack (§VI). Two boundaries on this protection are worth stating here rather than only in §VII. The safety guarantee holds only to the extent lineage recording is complete (Assumption 1); Experiment 3 shows measured leakage eliminated only once recorded completeness reaches 
+
+75 –90% depending on schema, and our own automatic extractor has known blind spots for views, stored proce-dures, and deep aliasing. And it does not cover threat T4 (§V), inference through undeclared derived features – in our view the most consequential gap for production use. We keep the main text within IEEE Access length guidelines by moving full derivations, line-by-line algorithm walk-throughs, extended related-work discussion, and complete per-experiment tables to the Supplementary Material. 
+
+> II. RELATED WORK
+
+Agent memory systems. Du [13] formalises agent mem-ory as a write-manage-read loop. MemGPT [4] pages an LLM between a bounded in-context tier and an external archival/recall store, moving data across tiers via explicit LLM-issued function calls – a capacity-management mech-anism with no notion of what produced a stored value. Zep [5] instead extracts entities and relations from agent interactions into a bi-temporal knowledge graph (separate valid-time and transaction-time edges) and retrieves via graph traversal and semantic search, so its notion of prove-nance is when a fact was true and when it was recorded, not which source columns produced it. A-MEM [6] generates keywords, tags, and contextual descriptions for each note with an LLM and links related notes Zettelkasten-style, so its retrieval mechanism operates on note-to-note semantic similarity rather than on a computation’s inputs. All three are state of the art for conversational or task-level memory, but their gating and retrieval mechanisms all operate above the level of individual source columns, so none model the provenance of a computed analytical result. 
+
+Governed and enterprise memory. Governed Mem-ory [7] and SSGM [8] introduce role-based access, tiered governance routing, and consistency verification for evolv-ing memory stores. Oracle AI Agent Memory [9] pro-vides a commercially deployed governed core, and Agent-Guardian [14] learns access-control policies from execution  
+
+> 2Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+
+traces. What all four have in common is that they govern access to a memory entry as a whole – by owner, role, or tool-call legitimacy – rather than by the individual columns that contributed to it. That means none of them can tell that a permitted entry embeds a forbidden column. 
+
+Multi-user and multi-principal shared memory. Two very recent systems tackle adjacent problems. Collabora-tive Memory [27] models multi-user, multi-agent memory sharing via bipartite user–agent–resource access graphs with per-fragment provenance (contributing agents, accessed re-sources, timestamps) for retrospective permission checks, and it proves adherence to time-varying read/write policies. Like Governed Memory and SSGM, though, its policies gate access to a memory fragment as an atomic unit by identity and permission graph rather than by the individual source columns a computed result embeds, so a fragment it permits can still quietly carry a value derived from a column outside the requester’s grant. GateMem [28] is a benchmark rather than a memory system: it evaluates existing memory-agent baselines for utility, access control, and active forgetting across multi-principal shared-memory settings (medical, of-fice, education, and household domains), and finds that no evaluated method achieves robust access control without sacrificing utility. That is a useful independent confirmation of the governance gap this paper targets, though its leak-target annotations are defined at the level of shared facts rather than derivation graphs, so it does not test column-level lineage gating specifically. Neither system attaches a derivation graph to a cached analytical result or gates retrieval on the columns touched to produce it, which is the specific mechanism AMU contributes. 
+
+Column-level security and provenance. Apache Ranger, Databricks Unity Catalog, and BigQuery enforce column-gated access at the query layer; DePLOI [15] audits such policies via natural-language-to-SQL (NL2SQL) translation. The W3C PROV standard [16] and Herschel et al. [17] model data provenance for extract-transform-load (ETL) pipelines, and LINEAGEX [18] extracts column-level SQL lineage with high accuracy. None of these fire at the point where a legitimately computed result gets cached and later served to a different, less-privileged requester. That is the gap our AMU schema closes, by applying column-level derivation tracking to agent memory entries rather than raw database records. 
+
+Privacy and security in multi-agent systems. 
+
+AgentLeak [3] shows most multi-agent leakage occurs through inter-agent channels; OMNI-LEAK [19] and Al-izadeh et al. [20] show prompt injection can exfiltrate observed data; AuthGraph [21] defends individual agents by comparing an execution-derived provenance graph against an authorisation graph (closest in spirit to our column-level gate, but scoped to single-agent tool-calling rather than cross-department memory retrieval). This literature targets communication channels and single-agent manipulation. Our work targets a complementary vector: a shared analyti-cal memory store that leaks even when every communication link and agent is individually secure (threat T8, §V). 
+
+Metric-definition governance. Semantic-layer tools and the Open Semantic Interchange initiative [11] centralise hu-man-defined metrics but provide no mechanism for detecting drift when an autonomous agent computes a KPI through its own generated query—the gap our definition_hash 
+
+conflict detector (Algorithm 2) targets. Table 1 summarises six governance dimensions across representative systems: no prior system tracks column-level derivation, and consequently none can gate retrieval on whether the requester is permitted to see every column that contributed to a cached result. Extended per-system discussion appears in the Supplementary Material. 
+
+A note on source provenance. The comparison systems in Table 1 sit at very different stages of peer review, and that difference matters for how the comparison should be read. A-MEM [6] appeared at NeurIPS 2025. MemGPT [4] is unpublished but widely adopted and highly cited, and it established the field’s dominant memory-tiering paradigm anyway. Zep [5], Governed Memory [7], SSGM [8], and AgentGuardian [14] are, at the time of writing, preprints describing production or proposed architectures rather than independently peer-reviewed evaluations (AgentGuardian, from a Ben-Gurion University security group, does report its own empirical evaluation on two real-world agent ap-plications, but that evaluation hasn’t been peer-reviewed either). Oracle AI Agent Memory [9] is documented only in a vendor developer blog, with no publicly available technical paper. Collaborative Memory [27], from Accenture’s Center for Advanced AI, and GateMem [28] are, like most of this comparison, unreviewed preprints as of this writing. We include all of them because Table 1 compares documented design decisions – what each system’s own description says it tracks and gates on – rather than reported performance numbers we did not independently verify. The governance gap we identify (content/tag-level access control rather than derivation-level) is a structural property of each system’s publicly stated design, and that holds regardless of whether the design has cleared peer review. We are not making comparative performance claims from these sources, only feature-support claims, and we want to flag that distinction explicitly so readers can weigh the comparison accordingly. 
+
+> III. SYSTEM DESIGN
+> A. THE ANALYTICAL MEMORY UNIT
+
+Definition 1 (Analytical Memory Unit) . An Analytical Memory Unit (AMU) is a tuple ⟨metric , v, d, τ, L ⟩ where: 
+
+metric is a metric-name string; v ∈ R is the computed result value; d is the producing department; τ is an integer epoch (supports time-to-live (TTL) eviction); and 
+
+L = (s1, . . . , s k) is a lineage graph , each step si =(table i, C i, φ ) where Ci is the set of columns of table i
+
+accessed and φ is a filter-logic string. 
+
+Figure 1 shows a worked example: the result value v
+
+alone carries no information about how it was produced; the 
+
+> 3
+
+Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents 
+
+Table 1. Feature comparison of representative agent-memory and governance systems against the Analytical Memory Unit (AMU). “Role ACL” = role-based access-control list. ✓ = supported, ✗ = not supported, ~ = partial/indirect support. Cells reflect each system’s 
+
+documented design decisions , not independently verified performance; see the note on source provenance following this table. 
+
+System Content tag Role ACL Column lineage Drift detect Retrieval gate 
+
+MemGPT ✗ ✗ ✗ ✗ ✗
+
+Zep ✓ ✗ ✗ ✗ ✗
+
+A-MEM ✓ ✗ ✗ ✗ ✗
+
+Governed Memory ✓ ✓ ✗ ✗ ✓
+
+SSGM ✓ ~ ✗ ~ ✓
+
+Collaborative Memory ~ ✓ ✗ ✗ ✓
+
+Oracle AI Agent Memory ✓ ✓ ✗ ✗ ✓
+
+AgentGuardian ✗ ✓ ✗ ✗ ~Source-layer ACL (Ranger/Unity Cata-log) 
+
+✗ ✓ ~ ✗ ✗
+
+AMU (this work) ✓ ✓ ✓ ✓ ✓           
+
+> customers
+> {customer_id, signup_date}
+> transactions customer_pii
+> {last_txn_date,
+> income }
+> transactions ▷◁customer_pii
+> filter: last_txn_date <now() −90d AND income >20000
+> churn_rate =0.114
+> (Finance, epoch 17)
+> S( a) = {income }
+> H( a) = 7a41c9e0 d3f2
+
+Figure 1. Worked lineage graph: Finance’s churn_rate is derived by joining three source tables. Because the join touches the sensitive column income , the derived tag S( a) makes this single cached number unsafe to serve to any department lacking income 
+
+access—even though the value 0.114 alone reveals nothing. 
+
+Table 2. Analytical Memory Unit (AMU) schema fields. 
+
+Field Description 
+
+metric_name Business KPI name ( e.g. , churn_rate )
+
+value ,
+
+owner_dept ,
+
+epoch 
+
+Result, producing department, TTL time index 
+
+lineage Derivation graph: sequence of (t, C, φ ) steps 
+
+sensitivity_tags S( a) (Eq. 1), cached 
+
+definition_hash H( a) (Eq. 2), cached 
+
+lineage graph L makes the derivation explicit and machine-checkable at retrieval time. Two quantities are derived once at AMU creation and cached: 
+
+S( a) = 
+
+k[
+
+i=1 
+
+Ci ∩ S (1) 
+
+H( a) = SHA256 sort( tables ) ∥ sort [
+
+i
+
+Ci
+
+!
+
+∥ φ
+
+!
+
+[0:12] 
+
+(2) where S is the sensitive-column registry and H( a) is the definition hash fingerprinting how the metric was computed. Both are sub-microsecond in practice (§VI-D). Table 2 lists the full schema. 
+
+B. LINEAGE-GATED RETRIEVAL AND CONFLICT DETECTION 
+
+Algorithms 1 and 2 give the two core operations; P( d)
+
+denotes department d’s permitted column set. A full walk-through of Algorithm 1 follows below; the analogous walkthrough of Algorithm 2 appears in the Supplementary Material. 
+
+Algorithm 1: Lineage-Gated Retrieve Input: store, metric, dept, fresh ;Output: result ; leaked =False                                                                  
+
+> 1candidates <-store[metric] %all stored AMUs for this metric
+> 2permitted <-P(dept) %column set the department may see
+> 3blocked <-False
+> 45for each ain REVERSE(candidates): %most-recent-first
+> 6if S(a) not_subset permitted: %derivation touches aforbidden column
+> 7blocked <-True
+> 8continue %skip this candidate; try the next
+> 9end if
+> 10 return (reused=True, value=a.value, leaked=False, blocked=False)
+> 11 end for
+> 12 13 store[metric].append(fresh)
+> 14 return (reused=False, value=fresh.value, leaked=False, blocked=blocked)
+
+Algorithm 2: Lineage-Aware Write Input: store , AMU a; Output: 
+
+conflict bool                                                         
+
+> 1existing <-store[a.metric] %all AMUs stored for this metric name
+> 2conflict <-False
+> 34for each ein existing:
+> 5if e.dept != a.dept: %cross-department pair
+> 6if H(e) != H(a): %definition hashes differ -> potential conflict
+> 7conflict <-True
+> 8break
+> 9end if
+> 10 end if
+> 11 end for
+> 12 13 store[a.metric].append(a) %always persist; conflict is surfaced, not blocked
+> 14 return conflict
+
+Line-by-line walkthrough of Algorithm 1. Line 1 re-trieves every AMU ever stored under this metric name; this list is the candidate pool. Line 2 resolves the requester’s column permission set once, outside the loop, so it is not recomputed per candidate. Line 5 iterates candidates most-recent-first: this is a deliberate policy choice, not an implementation detail—it means that when a safe candidate exists, the department receives the freshest safe value rather than an arbitrary historical one. Line 6 is the gate: a single 
+
+O(|S| ) set-difference check (cached S( a) against P( d)). If the check fails, line 7 records that at least one candidate was blocked (used only for diagnostics and the experiments in §VI) and line 8 continues to the next-oldest candidate— the rejected candidate is never returned, never partially returned, and never logged with its value. Line 10 is the only successful-return statement in the loop body: it fires the first time a candidate’s derivation is fully contained in the 
+
+4Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents 
+
+requester’s permissions. If the loop exhausts all candidates without a safe hit, line 13 appends the caller-supplied, already-in-scope fresh computation to the store (so future requests may reuse it) and line 14 returns it. Every exit path is covered by exactly one of these two return statements, which is what the proof of Theorem 1 exploits. Complexity: the loop runs at most n times ( n = candidates for this metric), each iteration doing O(|S| ) work, giving O(n · |S| )
+
+worst case; since |S| is a small constant per organisation, we report this as O(n) in Table 3. The best case (first candidate safe) is O(|S| ) = O(1) .Algorithm 2 compares cached definition hashes H( ·)
+
+rather than raw lineage graphs, making conflict detection 
+
+O(1) per pair; the write path never blocks on a conflict, only surfaces one for downstream alerting (threat T2). Its full line-by-line walkthrough, structurally analogous to the one above, is given in the Supplementary Material. 
+
+> C. IMPLEMENTATION CONSIDERATIONS
+
+Three practical points come up once you actually try to deploy this (details in the Supplementary Material). The cleanest integration point is the database driver layer: if you wrap the cursor so every executed SQL string passes through a lineage extractor (SQLGlot, Experiment 6), lineage cap-ture needs zero cooperation from the agent. The system also has to fail closed – if lineage extraction fails, treat the AMU as maximally sensitive ( S( a) ← S ) rather than failing open, and if a department’s permission set is unavailable, default retrieval to denial rather than access. Finally, the 
+
+epoch field does double duty: it supports ordinary TTL eviction, but it can also drive policy-driven invalidation – when S or P( d) changes, cached S( a) values should be lazily recomputed on the next retrieval (Corollary 3, threat T3). 
+
+> IV. FORMAL ANALYSIS
+
+Assumption 1 (Complete Lineage) . For every AMU a in the store, a. lineage records every table, column, and filter predicate of the computation that produced a. value .
+
+Theorem 1 (Sensitive-Column Safety) . Under Assump-tion 1, Algorithm 1 returns no result to department d that was derived from a sensitive column c ∈ S with c / ∈ P( d).
+
+Remark. This is a conditional design-correctness result, not an empirical one: it follows from the structure of Al-gorithm 1 together with Assumption 1, by the case analysis below. Wherever a 0% leak rate appears later in this paper (§VI), it is a consequence of this proof holding in the setting tested, not an independent empirical discovery – the empirical content of those experiments is the naive-baseline leak rate, the reuse-rate cost, and how performance degrades once Assumption 1 is violated (§VI-B). Proof. By inspection, Algorithm 1 has exactly two state-ments that return a value to the caller: line 10 (memory-served) and line 14 (fallback). Every invocation terminates by reaching one of the two, since the for loop either returns early at line 10 or exhausts candidates and falls through to lines 13–14. We show the returned AMU’s derivation touches no forbidden sensitive column on each path. 
+
+Case 1: memory-served path (line 10). Reaching line 10 for candidate a requires the guard at line 6 to have eval-uated false, i.e. S( a) ⊆ P( d) holds for that a. Unfolding Equation 1, S( a) =  S ki=1 Ci
+
+ ∩ S , so S( a) ⊆ P( d) is equivalent to: for every step si ∈ a. lineage and every column c ∈ Ci ∩ S , c ∈ P( d). Contrapositively, there is no sensitive column c ∈ S with c / ∈ P( d) appearing in any 
+
+Ci—i.e., no such c appears anywhere in a’s derivation. Since Assumption 1 guarantees a. lineage records every column touched by the computation that produced a.value , this is precisely the safety property claimed for the value returned at line 10. 
+
+Case 2: fallback path (line 14). The input precondition to Algorithm 1 (stated in the signature) requires that fresh 
+
+is computed entirely within P( d) by the caller, before Algorithm 1 is invoked. Under Assumption 1, fresh .lineage 
+
+records every column of that computation, so every column recorded is, by the precondition, in P( d); in particular no sensitive column outside P( d) is touched. Both cases establish that the AMU returned to depart-ment d has a derivation containing no sensitive column outside P( d), for an arbitrary invocation with arbitrary 
+
+store contents. Since the two cases are exhaustive over all return statements, the claim holds for every invocation of Algorithm 1. 
+
+Corollary 2 (Robustness to unsafe store contents) . The guarantee holds even when store contains AMUs whose derivation touches columns outside P( d): such candidates fail the gate and are skipped, regardless of how many exist or where they occur. 
+
+Corollary 3 (Behaviour under policy updates) . The guaran-tee holds per policy version : if S( a) is cached under registry 
+
+S1 and the organisation transitions to S2 without recomput-ing existing AMUs, a column newly added to S2 may not appear in the stale cached tag. The guarantee is restored for all subsequent retrievals once S( a) is recomputed against 
+
+S2 for every AMU predating the change (formalising threat T3). 
+
+> A. COMPLEXITY AND STORAGE
+
+Let n = AMUs stored per metric, k = lineage steps, c =columns per step. Table 3 reports asymptotic and measured costs. The expected-case retrieve latency is constant regardless of store size; the worst case (all n candidates blocked) scales linearly, reaching 13 .82 μs at n=50 , but in a re-alistic production store n ≤ 5 (at most one AMU per department variant per metric), so both paths are effectively 
+
+O(1) and well below 2 μs—negligible relative to any real analytics query (ms–s). We chose the worst-case O(n)              
+
+> 5Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+> Requesting Agent
+> dept +metric_name
+> Lineage Gate
+> 1. Check requester permissions 2. AMU.lineage.sensitive_cols
+> ⊆permitted? 3. Flag if definition_hash conflict
+> AMU Store
+> metric_name, value / epoch, owner_dept, lineage:[steps], definition_hash, sensitivity_tags
+> Serve from Memory
+> reuse_rate +=1
+> Block +Fresh Compute
+> blocked_count +=1
+> Conflict Detector
+> Alg. 2: compares H( ·)
+> retrieve candidates safe blocked write new AMU checks H( ·)
+
+Figure 2. AMU architecture. An agent’s executed query is intercepted at the database cursor and its lineage extracted (left); the AMU is written to the shared store, where Algorithm 2 checks H( ·) against cross-department entries. On the read path (right), the lineage gate checks S( a) ⊆ P( d) before serving from memory; unsafe candidates are blocked and the agent falls back to a fresh in-scope computation, itself written back through the same path. 
+
+Table 3. Asymptotic complexity and measured latency (means over 2,000 iterations; k=2 –3, c=4 –7). Full runtime sweep in the Supplementary Material.                        
+
+> Operation Cplx. n=1 n=50
+> Gate-check predicate O(|S| )0.09 μs0.09 μsWrite — conflict detec-tion
+> O(n)0.28 μs1.63 μsRetrieve — worst case O(n)0.66 μs13 .82 μsRetrieve —expected case
+> O(1) 0.66 μs0.64 μs
+
+bound deliberately – it is not something we overlooked. Algorithm 1 scans most-recent-first so it returns the freshest safe value rather than an arbitrary one. An alternative design that indexed AMUs by (metric , S( a)) could reach O(1) 
+
+worst case, but at the cost of extra index-maintenance complexity and giving up the recency-preference guarantee. We passed on that design because n is small by construction: a metric name accumulates at most one AMU per distinct (department, lineage-variant) combination, and that held for 
+
+n ≤ 5 in every workload we observed (Experiments 1–2 and 6), where the O(n) worst case costs at most 1.74 μs– immaterial in practice. We still report the asymptotic bound honestly, though, because it would matter under a poorly bounded TTL policy, which is exactly why we recommend TTL eviction as a standing operational control. Relative to the O(1) dictionary lookup used by all prior systems [4], [5], [6], [7], [8], [9], lineage-gated retrieval trades at most 13 .82 μs in absolute terms for the safety guarantee of Theorem 1—a tradeoff Experiments 1–2 show buys elimination of an 18 .8–25 .5% structural leak rate at a 13 –14 percentage-point reuse cost. Storage overhead is modest: an AMU adds k tuples of table/column names, the filter string, and a 12-character hash—roughly 4–8× a bare value entry (200–600 bytes for a typical 2–4 table join), smaller than the SQL query most systems already persist alongside the result. 
+
+V. THREAT MODEL 
+
+We model principals as enterprise departments operating AI agents that are honest-but-potentially-over-privileged: they request metrics they have a legitimate business need for, but not all derivation paths fall within their column permissions. Two threats motivated this work in the first place, and they are the ones the mechanism directly addresses: T1, where an agent retrieves a cached result derived from a sensitive column it should not see (mitigated by the S( a) ⊆ P( d)
+
+gate), and T2, where two departments store conflicting def-initions of the same-named KPI (surfaced by the definition-hash conflict detector). The most important gap we do not address is T4, inference attacks: a derived feature that encodes sensitive information without naming the source column (say, a risk score computed from income ) will slip past the gate unless the dependency is explicitly recorded in the lineage graph. Table 4 summarises all eight threats; full prose descriptions of each are in the Supplementary Material. The threats the mechanism addresses (T1, T2) are exactly the two failure modes that motivated this work. The partially addressed threats (T3, T5, T8) share a common root cause: they all come down to relying on lineage completeness and integrity, which is why automatic, tamper-resistant lineage extraction helps with all three. The unaddressed threats (T4, T6, T7) mark where a memory-layer control simply runs out of reach – they need cooperation from the feature-engineering layer, a differential-privacy layer, or the infrastructure trust boundary that AMU does not control. In short, AMU is one layer in a defence-in-depth stack, and we do not claim it is a complete security solution by itself. Two further attack vectors fall outside T1–T8 and are worth naming explicitly rather than leaving implicit. Cross-metric correlation: a requester who is individually denied column 
+
+c may still triangulate it by combining several permitted AMUs whose values are jointly informative about c, since the gate reasons about one retrieval at a time, not about what a sequence of safe retrievals reveals in combination – a multi-request generalisation of T6. Departmental collusion:  
+
+> 6Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+
+Table 4. Threat summary. “Addressed” means Algorithms 1–2 mitigate the threat directly under the stated assumptions; “Partial” means the mechanism reduces but does not eliminate exposure; “No” means an external control is required.                               
+
+> ID Threat Status Production control
+> T1 Sensitive-column leakage via cached result Addressed Lineage gate (Alg. 1) T2 Silent metric-definition drift Addressed Conflict detector (Alg. 2) T3 Stale sensitive data after policy update Partial TTL + lazy S( a)recompute (Cor. 3) T4 Inference attacks (undeclared derived features) No Manual review of feature engineering; out of scope T5 Malicious/incomplete lineage fabrication Partial Automatic extraction (SQLG LOT /LINEAGEX), §VI-B T6 Aggregate inference across retrievals No Differential privacy layer (future work) T7 Insider threats on the store No Trusted infrastructure, audit logging T8 Prompt injection / timing side-channel on lineage Partial Automatic extraction; constant-time gate (op-tional)
+
+two departments each authorised for a disjoint subset of a sensitive derivation could share their individually safe cached results out-of-band to reconstruct the full picture, which no memory-layer control can prevent once results leave the store. Both are, like T6 and T7, beyond what a single-retrieval column gate can address by construction, and we flag them as motivation for pairing AMU with usage-auditing and differential-privacy controls at the organisa-tional level. 
+
+VI. EXPERIMENTS 
+
+We built a synthetic discrete-event simulator in pure Python that isolates the retrieval-and-conflict-detection mechanism from LLM inference, network latency, and query-optimiser confounds. Because every event’s ground-truth lineage, sen-sitivity, and department permissions are known exactly, we can measure leak and reuse rates without label noise. We compare three systems: No Memory (leak-free, zero reuse), 
+
+Naive Shared Memory (content-gated, representing prior systems), and Lineage-Aware (our proposal). All experi-ments report mean ± population standard deviation over 30 seeds, with bootstrap 95% confidence intervals and Mann-Whitney U significance tests; the full protocol and raw per-seed tables are in the Supplementary Material. 
+
+A. EXPERIMENTS 1–2: SYNTHETIC AND TPC-H SCHEMAS 
+
+Experiment 1 uses a 5-table synthetic schema (three depart-ments, sensitive columns S = {ssn , email , income },Table 5); Experiment 2 replicates it on the 8-table TPC-H decision-support benchmark [22] (|S TPC-H | = 9) to test whether findings generalise to a denser, more realistic schema. To be clear about what these numbers mean: the lineage-aware system’s 0% leak rate is a policy guarantee from Theorem 1, not something we discovered empirically. The actual empirical finding is that the naive baseline’s leak rate is structurally non-zero (effect size d ≈ 7.2–8.0, well past the conventional “large” threshold of 0.8), which reflects real retrievals of sensitive-derivation results by departments that could not have run the underlying queries themselves. That protection is not free: the governance cost is a 13 –14 
+
+Table 5. Department permissions, synthetic schema. The gate enforces restrictions only on columns in S; non-sensitive blocked columns represent full policy intent but are not currently gate-enforced.              
+
+> Dept. Permitted (summary) Blocked (in S)
+> Finance All columns None Marketing Commercial, order data ssn, income, email
+> Support Customer, ticket meta ssn, income, email
+
+Table 6. Leak and reuse rates, both schemas (30 seeds, mean ± std dev). All naive–LA differences: bootstrap 95% CI excludes zero, Mann-Whitney U , p < 0.001 . Full tables in the Supplementary Material.                                       
+
+> Synthetic (5-tab.) TPC-H (8-tab.) Metric Naive LA Naive LA
+> Leak rate (%) 18 .8±3.70.0±0.0†25 .5±4.50.0±0.0†
+> Reuse rate (%) 95 .8±0.082 .6±2.395 .8±0.081 .5±4.8
+> Conflict recall (%)
+> 0.0±0.0100 .0±
+> 0.00.0±0.0100 .0±
+> 0.0
+> †Formal guarantee (Theorem 1), not an empirical discovery.
+
+percentage-point reuse reduction, i.e., roughly 13 additional query executions per 100 requests. That cost shows up as additional compute rather than governance latency, since the gate-check predicate itself costs only 0.09 μs (§IV-A). This tradeoff held up consistently across two substantially different schemas (60 total seed runs), which suggests content-gated leakage is a structural property of the failure mode – any workload that mixes sensitive and non-sensitive derivation paths under shared metric names will show it, rather than this being an artefact of how we built the workload. The two schemas differ in sensitive-registry size (|S| =3 vs. 9) and join density. If we treat this as a cross-experiment ablation rather than two independent data points, holding the sensitive-variant proportion constant (2 of 5 metrics in both schemas) while tripling |S| and increasing join density lines up with the leak-rate increase from 18 .8% 
+
+to 25 .5% . That points to leak rate scaling with how many ways a query can incidentally touch a sensitive column, rather than with how many metrics are nominally sensitive – though this is consistent with a monotonic relationship, not proof of one. A dedicated 2×2×2 factorial sweep over 
+
+> 7
+
+Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents Synthetic 5-Table TPC-H 8-Table 0510 15 20 25 30 35    
+
+> Leak Rate (%)
+> 18.8% 25.5% 0% 0%
+> Leak Rate by Schema
+> Naive Shared Lineage-Aware
+> Synthetic 5-Table TPC-H 8-Table 020 40 60 80 100
+> Memory Reuse Rate (%)
+> 95.8% 95.8% 82.6% 81.5%
+> Reuse Rate by Schema
+> Naive Shared Lineage-Aware
+> Synthetic vs. TPC-H Schema Comparison (30 seeds each)
+
+Figure 3. Synthetic vs. TPC-H schema comparison (30 seeds each). TPC-H’s denser sensitive-column structure yields a higher naive leak rate; lineage-aware gating eliminates leakage in both configurations. 0.50 0.75 0.90 0.95 1.00 
+
+> Lineage Completeness (fraction of columns reported)
+> 0.0 2.5 5.0 7.5 10.0 12.5 15.0 17.5 20.0
+> Leak Rate (%)
+> Leak Rate vs. Lineage Completeness (mean ± std dev, 30 seeds each; completeness=1.0 is honest reporting)
+> Synthetic 5-Table TPC-H 8-Table Ideal (0% leak)
+
+Figure 4. Leak rate vs. lineage completeness ρ (30 seeds, mean 
+
+±1 std dev shading). Both schemas converge to 0% by ρ=0 .75 –
+
+0.90 ; at ρ=0 .50 the synthetic schema approaches the naive base-line. 
+
+step count, registry size, and sensitive-variant proportion (specified in the Supplementary Material) would settle the question directly, and we list it as the top empirical priority for follow-on work. 
+
+B. EXPERIMENT 3: LINEAGE-COMPLETENESS DEGRADATION 
+
+Assumption 1 is the load-bearing condition of Theorem 1; in practice agents may under-report lineage due to bugs or opaque query plans. We define completeness ρ ∈ [0 , 1] as the fraction of each step’s columns correctly reported, and measure the true leak rate via a shadow store that records full ground-truth sensitivity alongside the truncated lineage the system actually sees. At ρ=0 .50 , truncated lineage gives almost no protection (synthetic: 16 .3 ± 3.3% leak; TPC-H: 10 .3 ± 4.7% ). At 
+
+ρ ≥ 0.75 (synthetic) or ρ ≥ 0.90 (TPC-H), the system reaches 0% measured leak rate and converges on the formal guarantee. TPC-H needs higher completeness because its sensitive columns are spread across more join steps – join depth acts as a sensitivity multiplier on the completeness requirement, not just on raw leak rate. Our recommendation is ρ ≥ 0.9 as a minimum target, and we would lean toward automatic lineage extraction (Experiment 6) over agent self-
+
+Table 7. Extended fuzzy conflict-detection results (43 pairs). Full per-category breakdown in the Supplementary Material. 
+
+Detector Prec. Recall F1 LO correct 
+
+D1 — Exact hash 0.651 1.000 0.789 8/8 D2 — Jaccard ( τ =0 .70 ) 0.676 0.821 0.742 3/8 D3 — Column-graph 1.000 0.714 0.833 0/8 
+
+Figure 5. Extended fuzzy conflict-detection results. (a) Per-category detection rate: recall for TC/LO/CS, specificity for TV. D3’s perfect specificity on TV collapses to zero detection on LO. 
+
+(b) Overall F1/precision/recall with 95% bootstrap CI on F1.
+
+reporting, since self-reporting is hard to audit and degrades unpredictably under exactly the conditions – complex multi-hop joins – where it matters most. 
+
+C. EXPERIMENT 4: EXTENDED FUZZY CONFLICT-DETECTION STUDY 
+
+The exact-hash detector (Algorithm 2) flags any definition-hash mismatch as a conflict. We extended an original 10-pair evaluation to 43 hand-labelled lineage pairs across four categories—15 True Conflicts, 15 Threshold Variants, 8 Logic-Operator changes (AND →OR), and 5 Column-Subset cases—to test three detectors: D1 (exact hash), D2 (Jaccard filter, τ =0 .70 ), and D3 (column-graph). What we found is a blind spot nobody had reported before: D3, which achieved perfect F1=1 .00 on the original 10-pair set, misses all 8 Logic-Operator pairs once the dataset grows ( F1 drops to 0.833 on 43 pairs), because it ig-nores filter-string variation entirely. That is the right call for threshold recalibrations, but it leaves D3 blind to AND →OR changes that alter metric semantics without touching the column set. D1 catches all 8 LO pairs but pays for it with weak precision ( 0.651 , false-alerting on every threshold recalibration). Neither detector is production-ready on its own; we propose, though we have not yet evaluated, a composite D3+filter-logic-structure detector D4, specified in the Supplementary Material. The broader lesson here is that fuzzy-detection evaluations on small, narrow datasets can overstate performance simply by missing edge cases. 
+
+D. EXPERIMENT 5: EMPIRICAL RUNTIME ANALYSIS 
+
+We instrument all core operations with time.perf_counter() 
+
+over 2,000 iterations at five store sizes (n ∈{1, 5, 10 , 20 , 50 }), single-threaded in a standard container-ised Python environment with no specialised acceleration. 
+
+Hardware and environment: all measurements were col-lected on a 4-core Apple Silicon (ARM64) virtual machine 
+
+8Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents 
+
+with 3.8 GB RAM, running Ubuntu 22.04 LTS (Linux kernel 6.8) and CPython 3.10.12, inside a Docker container with no GPU, SIMD intrinsics, or JIT acceleration enabled; no other CPU-bound process ran concurrently during measurement. We report this configuration in full because the absolute microsecond values are platform-dependent. The safety-overhead argument in §IV-A only relies on the O(n)-vs-
+
+O(1) scaling behaviour, which is a property of the algorithm rather than of this particular machine – but we have not independently re-measured on a second hardware platform yet, so we list cross-platform confirmation as a repro-ducibility item (§VII-B). Table 3 already reports the key numbers: retrieve worst-case scales linearly from 0.66 μs(n=1 ) to 13 .82 μs (n=50 ), a 21 × increase confirming 
+
+O(n); best-case retrieve and early-exit conflict detection stay flat, confirming O(1) . Even the worst-case overhead is 2–3 orders of magnitude below typical production analytics-query latency (single-digit ms to seconds), confirming the mechanism’s practical deployability. The complete runtime sweep across all five store sizes, including per-iteration variance, is tabulated in the Supplementary Material. 
+
+> E. EXPERIMENT 6: REAL-AGENT INTEGRATION
+
+Experiments 1–5 assume complete lineage (Assumption 1). This experiment tests one practical route toward sat-isfying that assumption: we replace agent self-declared lineage with automatic extraction via sqlglot [23], apure-Python SQL parser, interposed between the agent and the database cursor—every table and column in the executed query’s abstract syntax tree (AST) is ex-tracted deterministically, so the agent cannot under-report because it never declares anything. We use the Northwind database [24] with four departments (Fi-nance, Sales, Operations, HR) and sensitive registry 
+
+{unitprice , freight , homephone , birthdate }, driven by a LangChain [25]+Ollama [26] agent issuing real (and demo-mode canned) SQL across three scenarios covering the gate’s three outcomes: safe reuse, blocked-with-conflict, and vacuous reuse on a metric with no sensitive columns. Across all 9 cross-department round-trips, zero sensitive-column leaks occur: 5 fresh SQL queries are executed and written (2 following a gate block), 4 requests are served en-tirely from cache, and 2 gate blocks precisely coincide with the 2 automatically detected metric-definition conflicts—i.e., every block corresponded to a genuine semantic divergence, not a false positive. Cache-hit latency ( 0.009 ms) comes in three to four orders of magnitude below the SQL it replaces, which lines up with the isolated benchmarks of §VI-D. This is a nine-round-trip proof-of-concept, not a large-scale trial: it shows automatic SQL lineage extraction can satisfy Assumption 1 for the SQL query patterns exercised here, with no change to agent logic and no LLM cooperation required. Whether it extends to broader SQL workloads is still an open question, particularly given the view-, stored-procedure-, and aliasing-related caveats we discuss in §VII, and the larger-scale validation we list as future work (§VII-B). Full scenario descriptions and the round-trip-by-round-trip table are in the Supplementary Material. 
+
+> VII. DISCUSSION AND CONCLUSION
+> A. ENTERPRISE VALUE AND WHAT THE EXPERIMENTS ESTABLISH
+
+§VI points to three benefits for enterprise deployments. On compliance posture, Theorem 1 turns a policy assertion into something mechanically checkable – an auditor can verify it by inspecting gate logic instead of trusting agent behaviour, which helps with EU AI Act explainability obligations [12]. On avoided breach exposure, eliminating an 18 .8–25 .5% 
+
+structural leak channel changes the risk profile materially given a $4.44M average breach cost [2]. And on bounded ef-ficiency cost, the 13 –14 point reuse reduction is a one-time, quantified governance tax rather than an open-ended latency regression, since the gate itself costs sub-microsecond time. Stepping back, the six experiments together show that content-gated memory systematically leaks across depart-ments (Experiments 1–2); that the 0% lineage-aware leak rate follows from the theorem, so the real empirical content is the reuse-cost tradeoff; that the safety guarantee degrades gracefully rather than catastrophically below full complete-ness (Experiment 3); that production conflict detection needs a composite detector (Experiment 4); that gating overhead is negligible (Experiment 5); and that automatic SQL lineage extraction is a practical mechanism for improving lineage completeness in a real agent stack, with zero observed leaks across the 9 round-trips exercised (Experiment 6). 
+
+> B. LIMITATIONS AND FUTURE WORK
+
+Limitations: Several of these are worth stating plainly. The 
+
+18 .8–25 .5% naive leak rates are properties of our work-load mixes, not universal base rates, though the structural argument holds regardless of the specific percentage. The mechanism does not catch inference attacks that encode sensitive information in a derived feature without naming the source column (T4, the most important gap for production use). The 43-pair fuzzy dataset is still small. And the runtime benchmarks (§VI-D) were measured on a single hardware/OS configuration, so the reported constants –though not the O(n)-vs-O(1) scaling – may shift on other platforms. 
+
+View, stored-procedure, and alias limitations of au-tomatic lineage extraction. Experiment 6’s automatic-extraction guarantee – closing Assumption 1 without need-ing agent cooperation – is only as complete as SQLGlot’s static AST parse of the executed SQL text, and that leaves three gaps worth flagging. First, when a query selects from a database view rather than a base table, SQLGlot records the view name as the lineage source unless it is also given the view’s defining SQL to expand. If the view definition does not get resolved (say it lives only in the database catalog and was never passed to the extractor), a sensitive base column hidden behind an innocuously-named view (v_customer_summary ) will not show  
+
+> 9Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+
+up in L, which quietly violates Assumption 1. Second, stored procedures and user-defined functions invoked from SQL (e.g., CALL compute_churn(...) ) are opaque to AST-level column extraction – the procedure body might touch sensitive columns internally that never appear as identifiers in the calling statement, so capturing lineage here means either inlining the procedure body before parsing or maintaining a separate column-level lineage annotation for each registered procedure. Third, column and table aliasing (SELECT c.income AS c1 , or self-joins that alias the same physical table twice) is usually resolved correctly by SQLGlot’s scope analysis, but deeply nested aliasing across several levels of subquery or common table expression (CTE) can defeat that resolution in practice, especially combined with SELECT * expansion against a catalog the extractor was not given. In all three cases, the system’s fail-closed design (§III-C) limits the damage to over-blocking – an AMU that should have been retrievable gets marked maximally sensitive – rather than actual leakage. Still, this is a completeness gap in Experiment 6’s zero-leak result that a purely syntactic extractor cannot close on its own; closing it needs catalog-aware view/procedure expansion, which we flag as future work rather than something the current implementation already does. 
+
+Future work, in priority order: (1) adversarial lin-eage testing—red-team queries that smuggle sensitive joins through derived features or view indirection, stress-testing Assumption 1; (2) non-SQL lineage extraction for vector-store, REST/GraphQL, and in-process derivations, and catalog-aware view/stored-procedure expansion for the SQL case; (3) a production deployment study on a real 20–50 table warehouse over weeks rather than seeds, on more than one hardware platform; and (4) implementing and evaluating the proposed D4 composite conflict detector against a larger real-analytics corpus, alongside open-sourcing the reference implementation. 
+
+C. CONCLUSION 
+
+Every current AI agent memory system governs what is stored and who may access it, but none of them track how the stored result was derived. Restricted to that scope – named, logged columns under reasonably complete lineage, not the T4 inference case discussed above – the Analytical Memory Unit schema and lineage-gated retrieval policy close that gap at a modest overhead: 4–8× storage, a sub-microsecond gate check, and at most 13 .8 μs worst-case retrieval latency – backed by a formal safety guarantee (Theorem 1) and six experiments that characterise its be-haviour, its degradation under incomplete lineage, and its preliminary feasibility on a small real-agent integration – not yet a demonstration of viability at production scale. As AI agents move from single-purpose assistants toward being interconnected participants in enterprise data workflows, we expect the systems that govern what those agents remember to matter more and more for what those agents end up being allowed to say, and to whom. Content-and-role gover-nance answers “who owns this memory”; what we think is the equally necessary question is one that derivation-gated governance can answer instead: could this requester have produced this result themselves? 
+
+VIII. REPRODUCIBILITY, DATA, AND ETHICS 
+
+Our reference implementation – Python code covering the AMU/lineage data model, three competing memory systems, an event-replay simulator, statistical analysis, and the sql-glot-based real-agent pipeline – reproduces every table and figure in this paper, and we containerised it via Docker Compose for one-command reproduction. Full module-by-module documentation is in the Supplementary Material. We did not use any proprietary or personally identifiable data: the synthetic and TPC-H-inspired schemas use generated or benchmark data, and the Northwind database (Experiment 6) is a decades-old public fictional dataset with no real individ-uals’ information in it. This work does not involve human subjects or data requiring ethical review. We were deliberate about making the threat model (§V) explicit about what the mechanism does not protect against, since overstating a safety guarantee’s scope is itself a governance risk. We will make source code, generated datasets, and raw per-seed results available at a public repository upon acceptance; in the interim they are available from the corresponding author on reasonable request. 
+
+CONFLICT OF INTEREST 
+
+The authors declare that they have no known competing financial interests or personal relationships that could have appeared to influence the work reported in this paper. 
+
+ACKNOWLEDGMENT 
+
+The authors thank no additional contributors beyond those listed in the author list. 
+
+References                              
+
+> [1] Digital Applied, “AI agent adoption 2026: 120+ enterprise data points,” Digital Applied, Tech. Rep., 2026, aggregating Gartner and S&P Global Market Intelligence/McKinsey survey data. [Online]. Available: https:// www.digitalapplied.com/blog/ai-agent-adoption-2026-enterprise-data-p oints [2] IBM Security, “Cost of a data breach report 2025,” IBM, Tech. Rep., 2025. [Online]. Available: https://www.ibm.com/reports/data-breach [3] F. El Yagoubi, G. Badu-Marfo, and R. Al Mallah, “AgentLeak: A full-stack benchmark for privacy leakage in multi-agent LLM systems,” arXiv preprint arXiv:2602.11510, 2026, doi: 10.48550/arXiv.2602.11510. [4] C. Packer, S. Wooders, K. Lin, V. Fang, S. G. Patil, I. Stoica, and J. E. Gonzalez, “MemGPT: Towards LLMs as operating systems,” arXiv preprint arXiv:2310.08560, 2023, doi: 10.48550/arXiv.2310.08560. [5] P. Rasmussen, “Zep: Atemporal knowledge graph architecture for agent memory,” arXiv preprint arXiv:2501.13956, 2025, doi: 10.48550/arXiv.2501.13956. [6] W. Xu, Z. Liang, K. Mei, H. Gao, J. Tan, and Y. Zhang, “A-MEM: Agentic memory for LLM agents,” in Proc. Adv. Neural Inf. Process. Syst. (NeurIPS), 2025, arXiv:2502.12110, doi: 10.48550/arXiv.2502.12110. [7] H. Taheri, “Governed memory: A production architecture for multi-agent workflows,” arXiv preprint arXiv:2603.17787, 2026, doi: 10.48550/arXiv.2603.17787. [8] C. Lam, J. Li, L. Zhang, and K. Zhao, “Governing evolving memory in LLM agents: Risks, mechanisms, and the stability and safety governed
+> 10 Sangaraju et al. : Lineage-Aware Memory Governance for Enterprise AI Agents
+
+memory (SSGM) framework,” arXiv preprint arXiv:2603.11768, 2026, doi: 10.48550/arXiv.2603.11768. [9] Oracle Corporation, “Oracle AI agent memory: A governed, unified mem-ory core for enterprise AI agents,” Oracle Developer Blog, Mar. 2026. [Online]. Available: https://blogs.oracle.com/developers/oracle- ai- a gent-memory-a-governed-unified-memory-core-for-enterprise-ai-agents [10] Colrows, “Why BI metrics do not match across dashboards,” Colrows Technical Blog, 2024. [Online]. Available: https://colrows.com/blogs/ why-bi-metrics-do-not-match-across-dashboards/ [11] Snowflake, Salesforce, dbt Labs, BlackRock, and RelationalAI, “Open Semantic Interchange (OSI): A vendor-neutral semantic layer specification for AI and BI,” Industry Standard Initiative, Sep. 2025. [Online]. Avail-able: https://www.snowflake.com/en/news/press-releases/snowflake-sales force-dbt-labs-and-more-revolutionize-data-readiness-for-ai-with-ope n-semantic-interchange-initiative/ [12] European Parliament and Council, “Regulation (EU) 2024/1689 laying down harmonised rules on artificial intelligence (EU AI Act),” Official Journal of the European Union, Jul. 2024. [Online]. Available: https: //eur-lex.europa.eu/legal-content/EN/TXT/?uri=CELEX:32024R1689 [13] P. Du, “Memory for autonomous LLM agents: Mechanisms, evaluation, and emerging frontiers,” arXiv preprint arXiv:2603.07670, 2026, doi: 10.48550/arXiv.2603.07670. [14] N. Abaev, D. Klimov, G. Levinov, D. Mimran, Y. Elovici, and A. Shabtai, “AgentGuardian: Learning access control policies to gov-ern AI agent behavior,” arXiv preprint arXiv:2601.10440, 2026, doi: 10.48550/arXiv.2601.10440. [15] P. Subramaniam and S. Krishnan, “DePLOI: Applying NL2SQL to synthe-size and audit database access control,” arXiv preprint arXiv:2402.07332, 2024, doi: 10.48550/arXiv.2402.07332. [16] L. Moreau, B. Clifford, J. Freire, J. Futrelle, Y. Gil, P. Groth, N. Kwas-nikowska, S. Miles, P. Missier, J. Myers, B. Plale, Y. Simmhan, E. Stephan, and J. Van den Bussche, “The open provenance model—core specification (v1.1),” Future Gener. Comput. Syst., vol. 27, no. 6, pp. 743– 756, 2011, doi: 10.1016/j.future.2010.07.005. See also W3C PROV-DM: https://www.w3.org/TR/prov-dm/. [17] M. Herschel, R. Diestelkämper, and H. Ben Lahmar, “A survey on prove-nance: What for? What form? What from?,” The VLDB J., vol. 26, no. 6, pp. 881–906, 2017, doi: 10.1007/s00778-017-0486-1. [18] S. H. Zhang, Z. Miao, and J. Wang, “LINEAGEX: A column lineage ex-traction system for SQL,” in Proc. 41st IEEE Int. Conf. Data Eng. (ICDE), Demo Track, 2025, arXiv:2505.23133, doi: 10.48550/arXiv.2505.23133. [19] A. Naik, J. Culligan, Y. Gal, P. Torr, R. Aljundi, A. Paren, and A. Bibi, “OMNI-LEAK: Orchestrator multi-agent network induced data leakage,” arXiv preprint arXiv:2602.13477, 2026, doi: 10.48550/arXiv.2602.13477. [20] M. Alizadeh, Z. Samei, D. Stetsenko, and F. Gilardi, “Simple prompt injection attacks can leak personal data observed by LLM agents during task execution,” arXiv preprint arXiv:2506.01055, 2025, doi: 10.48550/arXiv.2506.01055. [21] P. Wang, Y. Li, and Y. Tian, “Aligning provenance with authorization: A dual-graph defense for LLM agents,” arXiv preprint arXiv:2605.26497, 2026, doi: 10.48550/arXiv.2605.26497. [22] Transaction Processing Performance Council, TPC-H Benchmark Specifi-cation, Revision 3.0.1. TPC, 2021. [Online]. Available: http://www.tpc.or g/tpch/ [23] T. Mao and contributors, “sqlglot: SQL parser and transpiler,” 2023, MIT Licence, version 23+ used in this work. [Online]. Available: https://github .com/tobymao/sqlglot [24] Microsoft Corporation, Northwind Traders Sample Database, 2000, canonical fictional business dataset. [Online]. Available (open-source SQLite port): https://github.com/jpwhite3/northwind-SQLite3 [25] H. Chase and contributors, “LangChain: Building applications with LLMs through composability,” 2023, MIT Licence. [Online]. Available: https: //github.com/langchain-ai/langchain [26] Ollama contributors, “Ollama: Run LLMs locally,” 2024, MIT Licence, local LLM server used in Experiment 6. [Online]. Available: https://gith ub.com/ollama/ollama [27] A. Rezazadeh, Z. Li, A. Lou, Y. Zhao, W. Wei, and Y. Bao, “Col-laborative memory: Multi-user memory sharing in LLM agents with dynamic access control,” arXiv preprint arXiv:2505.18279, 2025, doi: 10.48550/arXiv.2505.18279. [28] Z. Ren, Y. Yang, Y. Chen, Z. Zhao, B. Fu, Z. Shu, B. Zhang, Y. Xu, D. Guo, and S. Yan, “GateMem: Benchmarking memory governance in multi-principal shared-memory agents,” arXiv preprint arXiv:2606.18829, 2026, doi: 10.48550/arXiv.2606.18829. 
+
+VENKATA SANGARAJU is an independent researcher working on mem-ory and data-governance architectures for enterprise artificial intelligence (AI) agents. His research interests include lineage and provenance tracking for AI agent systems, privacy-preserving retrieval, column-level access control, and the application of formal safety guarantees to shared multi-agent memory infrastructure. He is the corresponding author of this work (ORCID: 0009-0001-7716-1342). 
+
+SUDHIR VISSA is with SAGE7 AI, Georgetown, Texas, USA. His research interests include enterprise AI agent architectures, data gover-nance, and applied infrastructure for multi-agent deployments, including the metric-definition and access-control problems addressed in this work (ORCID: 0009-0003-7865-0863).
