@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-10</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-11</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 4 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
     <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-10 22:37:11 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-11 22:59:47 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今日精读3篇、速读1篇，主线集中在KV缓存复用与Agent推理服务的协同优化。最值得看的是《Request Order Matters》（8.0）揭示缓存历史顺序会显著影响滚动Agent的复用效果，以及《HEAR Protocol》（8.0）尝试打通Agent框架与推理引擎的通信。建议普通读者先读这两篇精读建立&quot;缓存顺序+跨层协议&quot;直觉，再用那篇多智能体持久记忆成本速读（7.0）补全视野。</p>
+<p>2026-10-11 日报精选 6 篇（精读 5、速读 1），聚焦 Agent 推理服务与 KV-Cache 优化。最值得看的是 9.0 分的《Request Order Matters》，揭示滚动 Agent 中 KV-Cache 复用的缓存历史敏感性；8.0 分的 HEAR 协议则关注 Agent 框架与推理引擎的互通。普通读者可先读这两篇，理解请求顺序如何影响缓存命中与推理效率。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +71,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">3 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash">Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell">Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -87,9 +87,9 @@
     <strong class="dpr-home-dashboard-count">1 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell">Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Agentic Semantic Sensing for Resource-Adaptive AI-RAN">Agentic Semantic Sensing for Resource-Adaptive AI-RAN</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
 </section>
 </div>
 
