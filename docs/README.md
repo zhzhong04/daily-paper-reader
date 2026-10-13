@@ -44,14 +44,14 @@
       <span class="dpr-home-dashboard-kicker">2026-10-13</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 01:32:21 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 23:51:18 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>2026-10-13日报：成功收录8篇（精读4、速读4），聚焦Agent推理服务、KV缓存与Serverless调度。</p>
-<p>最值得看的是两篇8分精读：Selective KV-Cache Reuse中“请求顺序/缓存历史”会影响Rolling Agents表现，以及HEAR协议尝试打通Agent Harness与推理引擎。</p>
-<p>普通读者可先读这两篇，再扫7分《SnapShare》理解Serverless快照去重，关注Agent服务效率与隔离性。</p>
+<p>今天从10篇推荐中精读5篇、速读5篇，重点锁定Agent服务里的KV Cache优化与跨模型复用。</p>
+<p>最值得看的是两篇9.0分工作：Lachesis做生命周期感知的KV Cache跨HBM与高带宽闪存放置，RaReCache用排名分歧选择性重算打通跨模型KV Cache复用。</p>
+<p>普通读者可先读这两篇的摘要与方法图，关注缓存分层、复用与重算策略，再按需扫速读里的快照去重、多模态记忆和自进化调度。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell">Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash">Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash</span></li><li><span class="dpr-home-dashboard-paper-title" title="RaReCache: Bridging the Gap in Cross-Model KV Cache Reuse via Rank disagreement-based Selective Recomputation">RaReCache: Bridging the Gap in Cross-Model KV Cache Reuse via Rank disagreement-based Selective Recomputation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">4 篇</strong>
+    <strong class="dpr-home-dashboard-count">5 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots">SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots</span></li><li><span class="dpr-home-dashboard-paper-title" title="Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems">Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Agentic Semantic Sensing for Resource-Adaptive AI-RAN">Agentic Semantic Sensing for Resource-Adaptive AI-RAN</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots">SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots</span></li><li><span class="dpr-home-dashboard-paper-title" title="MemPilot: Orchestrating On-Demand Multimodal Memory Curation for LLM Agents">MemPilot: Orchestrating On-Demand Multimodal Memory Curation for LLM Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems">Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 
