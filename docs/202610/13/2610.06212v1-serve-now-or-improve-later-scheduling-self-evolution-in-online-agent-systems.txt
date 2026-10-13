@@ -1,0 +1,973 @@
+Title: Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems
+
+URL Source: https://arxiv.org/pdf/2610.06212v1
+
+Published Time: Tue, 06 Oct 2026 03:34:00 GMT
+
+Number of Pages: 21
+
+Markdown Content:
+# Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems 
+
+Yangbo Wei 1,2 Junhong Qian 1 Zhen Huang 4 Zhenyu Su 1,2 Qifan Wang 1,2 Shaoqiang Lu 1,2 Rumin Zhang 3
+
+Chen Wu 3,* Lei He 2,* 
+
+> 1
+
+Shanghai Jiao Tong University 
+
+> 2
+
+Eastern Institute of Technology 
+
+> 3
+
+Ningbo Institute of Digital Twin, Eastern Institute of Technology 
+
+> 4
+
+University of Science and Technology of China 
+
+## Abstract 
+
+Online agents can improve future service by constructing reusable tools, guidance, or model states, but this work competes with current requests for the same GPUs. Exploit-ing idle compute for self-evolution faces a fundamental systems constraint: benefits arrive only after an artifact is published and used, while pausing evolution leaves service capacity waiting for memory release and runtime recovery. An investment worth completing may therefore be worth postponing. We present LearnSched, a state-aware sched-uler that brings the reuse window of a capability and the timely return of compute into a common investment model. LearnSched incorporates candidate progress, checkpoint overhead, and the current recovery path into action val-ues. Under the same information and capacity constraints, it uses one-step counterfactual rollout to choose progress, checkpointing, or waiting relative to a fully costed window policy. We characterize handoff costs through independent A100 component measurements and evaluate action selec-tion in 1920 paired finite-model scenarios. When cold re-covery is expensive, waiting for longer execution windows can improve net value by avoiding handoffs; in evaluated warm-recovery scenarios, the strong window policy already achieves the same value. Retaining recoverable state can shorten capacity return and reduce the need for complex evolution scheduling. 
+
+Keywords: online agents, self-evolution, resource schedul-ing, compute investment, capacity readiness, preemption 
+
+## 1 Introduction 
+
+An online coding agent repeatedly fails on the same class of requests. It can continue invoking a model for each request, or use prior trajectories to construct a reusable tool or guid-ance, validate it, and publish it for later use. Persistent de-mand can repay this investment through fewer model calls and better answers; short-lived demand may leave even a qualified artifact unused. When service and evolution share GPUs, construction also consumes compute and memory needed by current requests. The system must decide: should the next unit of compute serve now or improve later? 
+
+Figure 1. Serving and self-evolution compete for shared GPU capacity. LoRA adaptation illustrates the tradeoff: in-vest in future capability while returning compute in time to meet current request deadlines. Figure 1 illustrates this choice through LoRA adaptation: improving the model incurs training and recovery costs be-fore future requests can benefit. This decision couples two timescales. Foreground re-quests consume resources under latency deadlines, while capability construction incurs costs now for benefits spread across future requests. A useful artifact can reduce service work, but only after qualification, publication, and actual use. Its benefit cannot compensate for requests that have already missed their deadlines. The scheduling problem therefore involves both the value of the investment and the service capacity available along its execution path. Running evolution during idle periods and pausing it at the next burst is a natural starting point. Yet an idle inter-val has two distinct boundaries: the latest start that leaves enough reuse to amortize construction, and the latest re-turn that restores capacity before service needs it. A pause command may leave device memory occupied; releasing memory may still leave a serving runtime to reconstruct. 
+
+Stopping evolution, reclaiming memory, and making capac-ity ready to serve are distinct system events. Treating the end of background computation as the return of service capacity overstates the useful part of an execution window. arXiv:2610.06212v1 [cs.DC] 5 Oct 2026 0% 10% 25% 50% Static background duty MoE/SG MoE/vL Dense/SG Dense/vL 0 0 1.9 37.9 0 0 2.8 83.9 0 0.6 10.1 78.1 0 0 21.6 84.5 1 10 100 Cold Warm         
+
+> 69.99s 0.487s 4.775 +6.383
+> Token GPU 012
+> 0.26× 1.86×
+> (a) Capacity cliff (b) State-dependent return (c) Cost reversal
+> Bad requests (%) Ready latency · seconds (log) Host PSS breakdown · 11.158 GiB Base Added when parked GPU retained: 3.74 GiB Tool / no evolution (×) Token-based tool policy 48 runs · 3-seed strips SGLang · 3 measured runs 4 paired blocks
+
+Figure 2. Three investment constraints: (a) bad-request rates across four systems and four shares (three repeats; SG/vL: SGLang/vLLM); (b) cold/warm readiness means and min–max, with host PSS and GPU residency separate; (c) token and GPU cost ratios to no evolution, across four paired blocks. GPU activity excludes CPU costs. Runtime state connects these boundaries. Termination discards unsaved progress, checkpointing consumes time, and retaining service state trades memory for faster recov-ery. Consider a short idle window followed by one long enough to complete construction. Immediate progress can publish the artifact slightly earlier but incur an extra check-point and cold recovery. Waiting pays when the avoided handoff costs exceed the benefits lost to delay. Cheap warm recovery can reverse this choice without changing the can-didate or future demand. Thus, an investment worth complet-ing need not be worth starting now. 
+
+Expected future benefits have long guided adaptive com-pilation [2], inference and retraining allocation [4, 11], and agent learning during idle windows [21]. Evolution con-trol planes also incorporate cost signals [24]. We study the interaction between this investment perspective and the runtime mechanisms that preserve progress and restore ser-vice. With the same candidate, information, and execution mechanisms, when do durable progress and recovery costs change the best execution plan? Answering this question requires separating gains from better accounting, faster recovery, and different scheduling actions. We present LearnSched, a state-aware scheduler that compares remaining benefits and execution costs under a capacity-return constraint. Its model connects the useful lifetime of a capability to completed and durable progress, current service state, and the recovery path. These quan-tities determine whether to advance, checkpoint and re-turn, discard unsaved work, or wait. Execution components expose work pressure, publication and use, and capacity readiness to account for costs and benefits as they occur. LearnSched uses classical one-step rollout [3] relative to Costed Window, a reference that fully prices a greedy com-pletion plan. Both receive the same windows and recovery mechanisms. Comparing alternative continuations allows LearnSched to skip a costly short window or change execu-tion segments when this improves value; retaining the refer-ence action guarantees no loss in the accurate finite model. This formulation makes the added value of scheduling mea-surable against an already cost-aware reference. Our evaluation separates independent A100 component measurements and capability ledgers from paired finite-model scheduling. Across 1920 scenarios, full cost account-ing explains most of the benefit. Waiting adds value when cold recovery is expensive and longer windows lie ahead; all evaluated warm-recovery scenarios tie with Costed Win-dow. The resulting systems implication is that state reten-tion changes both return latency and the amount of value available to more complex planning. Runtime memory and investment policies thus require joint evaluation. Our contributions are: 
+
+• A model connecting capability break-even condi-tions, durable progress, and state-dependent capacity return to explain when waiting improves net value. 
+
+• A scheduler that compares progress and waiting un-der common constraints, with finite-model policy im-provement and an explicit scoring-error condition. 
+
+• Component measurements, capability ledgers, and paired evaluation isolating accounting and schedul-ing gains and their dependence on recovery state. 2 Why Timing and State Matter 
+
+Figure 2 examines three constraints on using shared GPUs for evolution. Positive expected return and available idle time alone do not determine the execution plan. 
+
+Capacity must be available when requests need it. 
+
+Raising the static background share from 10% to 25% in-creases bad requests across all four systems; at 50%, mean rates reach 37.88–84.48% (Figure 2(a)). An average resource budget hides the periods when foreground demand and background execution overlap. A profitable capability can therefore degrade service before its benefits arrive. The scheduler needs to control the timing of resource use as well as its volume: capacity borrowed under low load must be returned before the next service deadline, and future work savings cannot be credited before the artifact is used. 
+
+Runtime state changes the usable window. Cold ser-vice readiness takes 69.99 s on average, whereas same-process warm recovery takes 0.487 s (Figure 2(b)). These paths leave substantially different amounts of an idle win-dow for useful evolution work. Segmentation compounds the difference: each return can incur recovery, and inter-rupted construction may require checkpointing or recom-putation. Two plans that complete the same amount of work can consequently have different total costs and publication times. Warm recovery also raises host proportional set size (PSS) from 4.77 to 11.16 GiB and retains 3.74 GiB on the de-vice. Keeping state buys faster return by occupying memory that other work could use. Plan comparisons must jointly price recovery latency, durable progress, and residency; a fixed pause overhead cannot capture their tradeoff. 
+
+The constrained resource determines the cost of reuse. 
+
+Under sustained tool demand, token-based amortization re-duces token cost to 0.2624 times that of no evolution but raises GPU active time to 1.8623 times (Figure 2(c)). Con-struction and the service calls it replaces have different de-vice costs per token. Counting avoided calls or tokens can therefore reverse the resource-cost ranking. This observa-tion is a cost comparison; quality gains and CPU execution still matter to application utility. Likewise, publishing more artifacts creates value only when subsequent requests use them. Investment accounting must connect construction to realized use and price both in the constrained resource. These observations motivate a joint decision over a can-didate, an execution interval, and a return path. Starting im-mediately captures earlier benefits, while waiting can avoid checkpointing and repeated recovery. In the paired finite-model example of Section 6.1, delaying publication by 4.952 s saves 70.104 s-eq. in execution and handoff costs under the same candidate and calendar. The relevant comparison is be-tween complete feasible plans, including their return paths and the benefits forgone while waiting. 
+
+## 3 Delayed Returns and Switching Costs 
+
+We model one candidate capability on shared devices. Ac-tions change progress, publication time, and recovery state; request deadlines constrain capacity return. 
+
+3.1 State and Continuation Value 
+
+At time 𝑡 , the state is 
+
+𝑠 𝑡 = (𝑚 𝑡 , 𝑝 𝑡 ,̄ 𝑝 𝑡 , 𝑧 𝑡 , 𝑞 𝑡 ), 0 ≤̄ 𝑝 𝑡 ≤ 𝑝 𝑡 . (1) Here, 𝑚 𝑡 is service or evolution mode, 𝑝 𝑡 is completed progress, ̄ 𝑝 𝑡 is durable progress, 𝑧 𝑡 identifies resident ser-vice state and its recovery path, and 𝑞 𝑡 is foreground backlog. Termination loses 𝑝 𝑡 −̄ 𝑝 𝑡 ; checkpointing preserves it. Previ-ously paid compute is a sunk cost. Information ℐ𝑡 supports estimates of future demand, costs, and transitions. Actions wait, advance work, checkpoint and return, or discard unsaved work and return. Action 𝑎 takes 𝜏 (𝑠, 𝑎) ;
+
+𝒜 ret (𝑠, ℐ𝑡 ) contains actions meeting the capacity-return constraint. With benefit 𝑟 and cost 𝑐 in a common unit, 
+
+𝑉 ∗𝑡 (𝑠) = max 
+
+> 𝑎∈ 𝒜 ret
+
+{𝑟(𝑠, 𝑎) − 𝑐(𝑠, 𝑎) + 𝔼[𝑉 ∗𝑡+𝜏 (𝑠,𝑎) (𝑠 ′) ∣ 𝑠, 𝑎, ℐ𝑡 ]}. (2) Benefits arise after publication and use. Cost 𝑐 charges only the current action’s execution, checkpointing, recovery, and residency; later costs enter continuation value. In the deterministic single-candidate instance, with no execution choices after publication at 𝑡 𝑝 , the remaining benefit stream can be settled as terminal value Φ(𝑡 𝑝 ) = ∫ 𝐻 𝑡 𝑝 𝑔(𝑣) 𝑑𝑣 . The publication action still pays its return cost. 
+
+3.2 Effective Reuse and Break-Even 
+
+Fix a continuous path that qualifies and publishes after 𝜏 𝑒 ,at remaining cost 𝐶 𝑒 > 0 . Demand ends at 𝐻 ; matching re-quests arrive at rate 𝜆 , fraction 𝑎 use the artifact, and each use has expected net value 𝑢 relative to base service. Then 
+
+𝑉 (𝑡) = 𝑀(𝑡)𝑢 − 𝐶 𝑒 , 𝑀(𝑡) = 𝜆𝑎 (𝐻 − 𝑡 − 𝜏 𝑒 )+ . (3) For 𝜆𝑎𝑢 > 0 , positive direct return requires 
+
+𝑡 < 𝑡 ∗𝑒 = 𝐻 − 𝜏 𝑒 − 𝐶 𝑒 
+
+𝜆𝑎𝑢 . (4) The deadline reserves time for both completion and amorti-zation. Nonpositive unit value, absent reuse, or a start at or beyond this deadline prevents positive direct return along the fixed path. Changing segments or recovery paths re-quires evaluating their full continuation costs. For uncertain qualification, publication, and use, let 𝑌 𝑖 in-dicate their joint occurrence for request 𝑖 , with use value 𝑢 𝑖 :
+
+𝔼[𝑉 ∣ ℐ𝑡 ] = ∑ 
+
+> 𝑖
+
+Pr (𝑌 𝑖 = 1 ∣ ℐ𝑡 )𝔼[𝑢 𝑖 ∣ 𝑌 𝑖 = 1, ℐ𝑡 ]−𝔼[𝐶 𝑒 ∣ ℐ𝑡 ]. 
+
+(5) The joint event retains correlations between completion time and remaining use opportunities. The cost term in-cludes successful and failed construction paths. New obser-vations update this estimate at stage boundaries. 
+
+3.3 Request Deadlines and Lendable Capacity 
+
+Consider an initially empty, work-conserving FIFO fluid queue with one resource [13]. Request 𝑖 arrives at 𝑎 𝑖 , needs work 𝑤 𝑖 > 0, and has deadline 𝑑 𝑖 ≥ 𝑎 𝑖 ; service rate is 
+
+𝑐 cap (𝑣) . Timely completion requires and is guaranteed by 
+
+∑𝑖 𝑗=𝑘 𝑤 𝑗 ≤ ∫ 𝑑 𝑖  
+
+> 𝑎 𝑘
+
+𝑐 cap (𝑣) 𝑑𝑣 for every 𝑘 ≤ 𝑖 . Relative to base service on the same arrivals, define 𝑆 𝑘𝑖 as baseline capacity minus work over this interval, 𝑅 𝑘𝑖 as work actually avoided through capability use, and 𝐵 𝑘𝑖 as capacity lost to contention and handoff. Equivalently, 
+
+𝐵 𝑘𝑖 ≤ 𝑆 𝑘𝑖 + 𝑅 𝑘𝑖 , ∀𝑘 ≤ 𝑖. (6) Future benefits add no current capacity; use that adds work makes 𝑅 𝑘𝑖 negative. Stopping a candidate reduces 𝐵 𝑘𝑖 only when capacity returns to service. Our component approxi-mates pressure through in-flight work; batching and CPU queues need further modeling, and unknown arrivals pre-clude a hard deadline guarantee. 
+
+3.4 State-Dependent Return Deadlines 
+
+If additional serving capacity must be ready at 𝑡 𝑏 , a serial return path takes 
+
+𝜏 𝑟 = 𝜏 act + 𝜏 release + 𝜏 ready . (7) The terms denote command actuation, resource release, and runtime readiness. Overlapping steps follow the criti-cal path; residency can avoid runtime reconstruction. With deterministic delay, 
+
+𝑡 reclaim ≤ 𝑡 𝑏 − 𝜏 𝑟 . (8) Checkpointing further reduces execution time; discarding work makes later execution resume from durable progress. Recovery state therefore changes both feasible actions and their costs. Under uncertain bursts, early return trades progress against avoidable service loss, as the two-action model in Appendix C shows. 
+
+3.5 Common Pricing 
+
+If a policy gains Δ𝑄 timely correct answers on time at addi-tional cost Δ𝐶 𝑚 in resource unit 𝑚 , its incremental utility is 
+
+Δ𝑈 (𝑊 ) = 𝑊 Δ𝑄 timely − Δ𝐶 𝑚 (9) Here, 𝑊 is the application value of a timely correct answer, in 𝑚 /answer. Tokens, GPU active time, and host memory are measured separately and combined only through explicit prices. For background steps uncalibrated to capability ben-efits, we report the progress–bad-request frontier directly. Model costs use equivalent evolution seconds (s-eq.). 
+
+## 4 LearnSched: State-Aware Investment Scheduling 
+
+LearnSched compares progress, checkpointing, and waiting through their continuation values. Execution components estimate reuse, bound in-flight work, and manage handoff. Figure 3 connects the online control loop, rollout decision, and state-dependent return path. 
+
+4.1 Window Actions and the Reference 
+
+Known idle windows [ℓ 𝑘 , 𝑑 𝑘 ] define decision stages with state (𝑘, 𝑝,̄ 𝑝, 𝑚; 𝑧) . A macro-action advances 𝑢 quanta of duration 𝛿 and optionally checkpoints incomplete work, subject to 
+
+𝜏 load + 𝑢𝛿 + 1save 𝜏 ckpt + 𝜏 return ≤ 𝑑 𝑘 − ℓ 𝑘 . (10) Checkpointing and recovery consume exact wall-clock time. The next window starts in service mode; unsaved work is discarded, and published artifacts leave construction. Wait-ing in service mode adds no recovery cost. All policies share windows, benefits, and execution mech-anisms. Window advances as far as feasible and checkpoints. Costed Window ( 𝜋 0) prices all remaining benefits and costs of that greedy completion plan against abandoning the can-didate and returning capacity. It executes if completion has greater value; otherwise, it waits and reevaluates. Static ROI omits handoff costs from valuation only. 
+
+4.2 Rollout and Policy Improvement 
+
+LearnSched scores each safe current action by following the reference thereafter [3]: 
+
+𝑄 𝜋 0 (𝑠, 𝑎) = 𝑟(𝑠, 𝑎) − 𝑐(𝑠, 𝑎) + 𝑉 𝜋 0 (𝑠 ′), 𝜋 𝑅 (𝑠) ∈ arg max  
+
+> 𝑎
+
+𝑄 𝜋 0 (𝑠, 𝑎). (11) The candidate set includes 𝜋 0(𝑠) , retains it on ties, and is recomputed at each window. 
+
+Proposition 1: Policy improvement. With finitely many stages, accurate transitions, costs, and reference values, and a safe 𝜋 0(𝑠) , every reachable state satisfies 
+
+𝑉 𝜋 𝑅 (𝑠) ≥ 𝑉 𝜋 0 (𝑠). (12) Induction on remaining stages gives 𝑉 𝜋 𝑅 (𝑠) ≥ 𝑄 𝜋 0 (𝑠, 𝜋 𝑅 ) ≥ 𝑄 𝜋 0 (𝑠, 𝜋 0) = 𝑉 𝜋 0 (𝑠) , starting from equal terminal values. If |̂𝑄 − 𝑄 𝜋 0 | ≤ 𝜖 uniformly, accepting only changes with ̂𝑄(𝑠, 𝑎) >̂ 𝑄(𝑠, 𝜋 0) + 2𝜖 also ensures nondecreasing true scores. The evaluated model uses accurate scores; an online guarantee requires a validated error bound. 
+
+4.3 Waiting Value and Computation 
+
+Let immediate and delayed plans publish the same artifact at 𝑡 1 and 𝑡 2 ≥ 𝑡 1, before 𝐻 , with remaining costs 𝐶 1, 𝐶 2 and fixed subsequent benefit rate 𝑔 > 0 :
+
+𝑉 wait − 𝑉 now = (𝐶 1 − 𝐶 2) − 𝑔(𝑡 2 − 𝑡 1). (13) Requests                                  
+
+> Use
+> Agent serving
+> Responses
+> Backlog q Progress p, p
+> LearnSched
+> Observe state Choose action Evolution
+> Qualify
+> Artifacts
+> Store
+> Shared reference continuation π ₀
+> State s Idle windows
+> Feasible actions
+> Wait Advance u
+> Save / discard + return
+> Wait Advance u Return
+> π₀
+> Q1
+> π₀
+> Q2
+> π₀
+> Q3
+> Select max Q
+> Q = r − c + V π₀(s′)
+> Keep π ₀on ties; replan each window (a) Online agent (b) State-aware rollout
+> Shared
+> ?
+> qualified
+> Short window Longer window
+> Advance Wait
+> Work Save Return Work Return
+> Wait Work Return
+> Use Use
+> Same publish time; Wait avoids one save + one return.
+> GPU
+> Release
+> Return
+> resources Reuse
+> Idealized
+> Idle
+> Available artifacts
+> Tools Guidance Model state
+> State transition
+> Current progress p
+> Durable p Unsaved
+> Checkpoint Discard s′ (preserved) s′ (unsaved lost)
+> Return to serving
+> Stop Release memory Recover runtime Cold start Warm resume
+> or Capacity ready
+> treclaim ≤ t b− τ r
+> Artifact reuse
+> Qualify Publish Actual use Future benefit
+> No benefit before actual use
+> Work Save Return Publish
+> (c) Progress & return
+
+Figure 3. LearnSched overview. (a) Serving and evolution share GPU capacity; the scheduler observes backlog and progress, controls evolution, and returns resources to serving. Qualified artifacts are retained for reuse. (b) Safe actions are scored under the same reference continuation 𝜋 0. The idealized timelines align publication times: waiting avoids an extra checkpoint and return. (c) Checkpointing preserves progress; discarding loses only unsaved work. Capacity becomes ready after memory release and cold or warm recovery; benefits require actual artifact use. Waiting pays when avoided handoff and checkpoint costs exceed lost benefits. With one sufficiently long window, free switching and checkpointing, and no information updates, the choice reduces to comparing 𝑔(𝐻 − 𝑡 − 𝜏 𝑒 ) − 𝐶 𝑒 with zero. Figure 3(b) illustrates the equal-publication-time case, in which waiting saves one checkpoint and one return. The implementation enumerates 𝑂(𝐽 ) progress budgets over at most 𝐾 remaining windows and caches continuation val-ues for equal durable progress. Exact DP over all reachable states and actions gives the model optimum. 
+
+4.4 Observation and Admission 
+
+Candidates record task class, remaining stage and cost, com-pletion time, and reuse opportunities. Tool admission uses historical statistics and current arrivals; guidance uses class shares and quality proxies calibrated on independent his-tory. Hidden target tests and future task identifiers do not enter estimates. The prototypes reevaluate value while syn-thesis is pending and check windows and capacity there-after. Issued calls are charged through completion; full ROI optimization at each validation stage is not implemented. Admission estimates work as 𝑤 = 𝐿 max + 0.0625𝑃 , using prompt length 𝑃 and maximum output length 𝐿 max . A stage runs only if it fits with in-flight work within budgets of 1536 for tools and 1024 for guidance. This maximum-output reser-vation can be conservative. A separate contention controller uses arrival-aware additive increase and multiplicative de-crease (AIMD) to adapt the background share. 
+
+4.5 Handoff and Publication Accounting 
+
+Pollable waits insert control checks into long sleeps. Whole-GPU handoff checkpoints LoRA, terminates training, con-firms device-memory release, and starts a serving replica. Training resumes from the final durable file published after termination, avoiding a checkpoint-publication race. An al-ternative retains the serving process and restores its device state on return, trading resident memory for faster recovery. Tools publish solve(x) after passing eight public inputs; each configuration starts with an empty library. Guidance generates base and additional answers, preferring a base an-swer that passes public tests. Each request freezes its visible artifacts before dispatch. Model-call accounting charges ac-tual service, extra generation, construction, and validation: 
+
+𝐶 all = 𝐶 base + 𝐶 extra + 𝐶 build + 𝐶 validate . (14) Failed builds, unpublished candidates, and unused calls are charged; absent base calls are not. Unknown usage remains missing. CPU execution is timed separately; the handoff ledger records durable progress, unsaved work, readiness, and device and host memory. 
+
+## 5 Experimental Setup 
+
+Component experiments measure contention, execution costs, and effective reuse. Comparisons use the same capa-bilities and resources, except Cal.*, which receives the future arrival calendar. Additional ledgers and sensitivity details appear in the appendices. 5.1 Hardware and Workloads 
+
+Contention experiments cross Granite-3B-A0.8B (MoE) and Qwen2.5-Coder-7B (Dense) with vLLM and SGLang on one A100-80GB. Arrivals follow 4 →40 →4 requests/s for 10 s per phase, with at most 64 output tokens. SLOs are 1.2, 0.62, 1.8, and 1.2 s for MoE on SGLang and vLLM, then Dense on SGLang and vLLM. Bad requests include deadline misses from scheduled arrival and failures: the 60 runs contain 28,805 requests, including two failures. Background steps count synthetic GPU work without capability calibration. Tool experiments use Qwen3.5-9B on SGLang, a 512-token output limit, zero temperature, and no radix cache. In each 24 s window, sustained demand has 48 requests per block, stopped demand retains the same 12-request prefix, and sparse demand has requests at seconds 6 and 18. Con-figurations rebuild tools, isolate public tests from hidden evaluation, and run CPU paths in isolated workers. For guidance, we dispatch 114 known tasks from Live-CodeBench [10] under low–high–low arrivals. Five policies and five blocks each give 5700 requests. Whole-GPU handoff uses two A100s, Granite 3B, and rank-8 LoRA. One GPU serves; the other alternates be-tween training and a replica. The vLLM trace has 100 s of low load, a 60 s burst at 120 requests/s, and 30 s of low load, with at most 128 output tokens and a two-second SLO. Re-active handoff starts at burst onset; advance-notice handoff starts 90 s earlier, with experiment-specified notice. SGLang recovery is measured independently. 
+
+5.2 Software 
+
+Inference uses vLLM and SGLang. Python control uses asyn-cio and aiohttp for asynchronous dispatch and cost/latency recording; tool validation and execution use subprocesses with resource limits. The finite-state simulator implements Window, Costed Window, rollout, and exact DP under com-mon transition and cost models. 
+
+## 6 Evaluation 
+
+We evaluate plan selection, resource admission, capacity re-turn, and investment payback. Each experiment compares policies under its stated information and cost model. 
+
+6.1 Value of State-Aware Scheduling 
+
+All policies share complete window information, transitions, costs, and return constraints; exact DP gives the optimum in the finite macro-action model. 
+
+Scenarios and costs. The frozen grid crosses six calen-dars (80–480 s windows separated by 20 s), four work sizes (30/60/120/180 s), five benefit rates (0.1/0.25/0.5/1/2 s-eq./s), two benefit tails (120/480 s), cold/warm recovery, and four initial states: fresh, half-complete and unsaved, saved and active, or saved in service mode. This gives 1920 scenarios with a 5 s work quantum; Appendix D specifies the calen-dars. Cold/warm recovery uses three-run SGLang means of 69.988/0.487 s. Independent LoRA measurements over 20 runs give save/load costs of 68.075/47.748 ms for about 13.24 MB of state. Execution and recovery cost one s-eq. per second; warm recovery adds 6.383 GiB of host PSS priced at 0.01 s-eq. per GiB-second. These separate measurements are combined in the model; memory pricing is assumed, unmea-sured entry/release delays are zero, and resident-memory throughput effects are not fitted. 
+
+Aggregate value and distribution. Figure 4(a) reports mean DP gaps of 40.122 for Window, 28.819 for static ROI, 5.369 for Costed Window, and 0.246 s-eq. for rollout. Roll-out raises mean net value from 465.547 to 470.670, gaining 5.123 s-eq. (1.10%): full cost accounting explains most of the benefit. It improves 91 scenarios, ties in 1829, and never re-gresses. All improvements involve cold recovery: 71 back-loaded and 20 alternating calendars (Figure 4(b)); all 960 warm scenarios tie. Rollout matches DP in 1907 scenarios, but the remaining 13 have a maximum gap of 124.836. Every policy meets return deadlines because they share the same action constraint. Never can incur negative value from re-turning initially active states. At a 1 s quantum in 480 fresh-candidate scenarios, rollout improves 27 and ties in 453; its mean DP gap is zero, versus 5.869 for Costed Window. 
+
+Why waiting helps. The fresh case in Figure 4(c) has 30 s of work, benefit rate 0.25, a back-loaded calendar, horizon 1020 s, and cold recovery. Costed Window advances 5 s at 200, checkpoints, and finishes with 25 s at 300; it publishes at 325.048 s for cost 170.092. Rollout starts at 300 and publishes at 330 for cost 99.988. Waiting saves 70.104 s-eq., loses 1.238 in benefits, and gains 68.866 net. With warm recovery, both publish at 30 s in the first window. 
+
+6.2 Resource Allocation and Admission 
+
+Adaptive shares. Among static shares of 0, 10%, 25%, and 50%, only shares up to 10% satisfy the 1% bad-request limit in every repeat across four systems. Adaptive allo-cation achieves 42.0–52.8 steps/s, or 2.66–2.91 × the best measured feasible static policy, with no observed bad re-quests in 12 runs (Figure 5). Expanding under low load and contracting under bursts uses capacity that static policies reserve for peaks. Appendix A.1 reports SGLang tails. 
+
+Work-based admission. We sweep work budgets of 384–2048 and count thresholds of 0–12. Each setting dis-patches 181 tasks as 40/101/40 requests at 2/6/2 requests/s. Quality comes from fixed-answer replay; costs and laten-cies come from real calls. On vLLM, work budget 2048 and count threshold 4 both yield 2.21% deadline misses. Their quality gains are 3.87 versus 2.76 percentage points at 334.1 versus 345.0 additional tokens/request. On SGLang, both yield 1.10% misses, with gains of 2.76 versus 2.21 points 0 1 10 100 1k Mean gap to DP (s-eq.) Never Window Static ROI Costed W. LearnSched DP 488.54 40.12 28.82 5.37 0.25 0.00              
+
+> Warm Cold Front Back Altern. Frag. Uniform Cont. 00071 020 0000000100 200 Cost (s-eq.) Costed LearnSched 170.1 100.0
+> (a) All 1,920 cases (b) Strict wins / 160 (c) Why waiting helps
+> 91 wins · 1,829 ties · 0 losses Publish: 325.05 → 330.00 s Net gain: +68.87 s-eq. Work Return Other
+
+Figure 4. Paired finite-model results. (a) Mean DP gaps over 1920 scenarios (symlog). (b) Strict wins over Costed Window per 160 scenarios. (c) S0348, the first improved fresh case: waiting avoids one cold recovery. Other: save, load, residency. Static 0% 10% 25% 50% Adaptive 0.1 18.0 44.7 86.6    
+
+> 52.5
+> 0.1 19.2 47.0 90.9
+> 52.8
+> 0.1 15.5 38.6 76.2
+> 42.0
+> 0.1 15.8 39.0 76.0
+> 42.0
+> 001.91 37.88
+> 0
+> 002.79 83.90
+> 0
+> 00.61 10.13 78.09
+> 0
+> 0021.61 84.48
+> 0
+> 050 100%
+> 0100 steps/s
+
+(a) Background steps/s ↑ (b) Foreground bad requests ↓ 
+
+> MoE 3B SGLang
+
+2.91× 
+
+> MoE 3B vLLM
+
+2.75× 
+
+> Dense 7B SGLang
+
+2.71× 
+
+> Dense 7B vLLM
+
+2.66×     
+
+> MoE 3B SGLang MoE 3B vLLM Dense 7B SGLang Dense 7B vLLM
+> Gain¹ × seed >1% bad Means + 3 seeds · ¹vs best tested all-seed-feasible static
+
+Figure 5. Background progress and service risk across four systems. Numbers are three-seed means; strips show repeats, with crosses above 1% bad requests. Gain is relative to the best measured static policy meeting the limit in every repeat. at 333.6 versus 327.6 tokens/request. Work-based admis-sion gains more quality at the same risk, while cost advan-tages depend on the engine. Count threshold 12 raises miss rates to 12.15% and 11.05%. Figure 6 shows both frontiers. A count limit treats requests with different prompt and output lengths alike; reserving estimated work makes the admission budget more sensitive to the load each request can impose. Engine-dependent costs reinforce the need to assess quality, resource use, and service risk together. 
+
+6.3 Capacity Return and Recovery 
+
+Control response. Pollable waits cut the P95 delay from command issuance to acknowledgment from 116.6 to 51.8 ms under pulses and from 73.0 to 50.6 ms under bursts (Figure 7). Every transition is acknowledged; neither im-plementation shows deadline misses. Burst service P99 is 0.562/0.564 s and background throughput 63.2/62.3 steps/s. Acknowledgment still precedes resource release and service readiness. In an independent SGLang sweep, 50 requests/s produces 86.8% bad requests without failures, motivating deadline-risk triggers (Appendix A.2). 
+
+Early return and lost progress. No scaling, reactive scaling, and advance-notice scaling yield mean burst miss rates of 65.4%, 44.0%, and zero, with P99 of 2.94, 3.31, and 1.38 s (Figure 8). Reactive capacity is ready 34.7 s after burst onset; advance-notice capacity is ready 56.3 s before it. Both start in 33–34 s, and all six handoff runs restore training ex-actly from final durable state. Mean background progress falls from 579.0 to 312.7 and 32.0 steps. Under 𝐸 − 𝑤𝑁 bad ,reactive scaling beats no scaling only for 𝑤 ≥ 0.173 and advance-notice scaling only for 𝑤 ≤ 0.089 , so it is never selected on this mean frontier. These runs establish the value and progress cost of advance notice when the burst is known. Uncertain alerts additionally require deciding whether to act on that notice. 0 250 500 Extra tokens/req 024ΔPass@1 (pp)            
+
+> 01512 SLO miss (%)
+> 0250 500 Extra tokens/req 024ΔPass@1 (pp)
+> 01512 SLO miss (%)
+> (a) vLLM · cost (b) vLLM · risk (c) SGLang · cost (d) SGLang · risk
+> Token-work Queue-count
+
+Figure 6. Work-based versus count-based admission: all 26 settings, one 181-task run each. Left: cost–quality; right: risk–quality. A100 costs and latencies are measured; qual-ity uses fixed-answer replay. 
+
+Resident state. Parking SGLang reduces GPU usage from 79.7 to 3.7 GiB; LoRA alongside it uses 11.4 GiB, and resumption restores 79.7 GiB (Figure 9). All three runs re-sume the same process and complete a real request. Mean cold startup is 69.99 s, warm recovery 0.487 s, and recovery through first-request completion 0.520 s. Device usage in-cludes runtime reservations. Warm recovery holds 3.7 GiB on the GPU; host PSS rises from 4.77 to 11.16 GiB. These runs omit live prediction and value admission. 
+
+Acting on uncertain alerts. Figure 10 combines mea-sured recovery samples with calibrated synthetic alerts to isolate this decision. Early return trades the service loss avoided under a true burst against the evolution cost paid under a false alarm. The resulting threshold depends on both alert confidence and lead time; Appendix C gives the derivation, distributions, and assumed prices. On vLLM, re-active return, unconditional early return, and LearnSched incur 28.16, 15.76, and 14.61 s-eq./alert; SGLang yields 42.48, 30.21, and 28.87. Lead time explains most of the gain, with selective return adding savings. Pooling recovery samples across engines gives 14.63/28.90, close to engine-specific estimates. Thus, predicting earlier and pricing false alarms matter more here than refining recovery estimates. This return-only model uses synthetic events; it neither estab-lishes online prediction gains nor jointly prices residency. 0 60 120 Latency (ms) 0.0 0.5 1.0 CDF 0 70 140 Latency (ms) Pulse Burst     
+
+> 117 52
+> 73 51 0.94 1.00 1.06 Pollable / coarse P99 · pulse P99 · burst Steps · pulse Steps · burst
+> (a) Pulse response (b) P95 (c) Serving and progress ratios
+> Hollow: 3 pairs; filled: mean ratio Coarse Pollable
+
+Figure 7. Preemption under 5%/0% pulses and bursts, three runs per implementation, timed through execution acknowl-edgment. (a) Pulse CDF; (b) pulse/burst P95; (c) service P99 and background-rate ratios. Open/filled points show paired repeats/mean ratios; shading marks ±2% .
+
+6.4 Capability Investment and Payback 
+
+Demand persistence. Never does not invest; Window checks the remaining window; LearnSched’s value layer also estimates amortization. All share construction and public qualification. Under sustained demand, LearnSched spends 23447 tokens for 171/192 timely correct answers, versus Never’s 72351 for 53/192 and Window’s 24294 for 164/192 (Figure 11). Historical admission decisions match those of Window; 745 of the 847-token difference comes from service costs, so this difference does not establish improved investment selection. Under stopped demand, LearnSched and Window spend 16380/16418 tokens for 34/48 versus 30/48 timely correct an-swers. Under sparse demand, they spend 4624/7648 for 5/8 versus 4/8. LearnSched’s extra timely answer over Never costs 1660 tokens, requiring 𝑊 > 1660 for positive incre-mental utility. The construction outcomes in Figure 11(e) expose another cost: LearnSched and Window have 9 and 13 nonpositive-return builds, costing 5649 and 8711 tokens. Qualification alone does not ensure payback. Cal.* achieves the same sparse-demand quality as LearnSched with 2964 tokens, illustrating the remaining value of future demand information. Further ledgers appear in Appendix B. 
+
+From publication to effective reuse. Guidance makes the distinction between availability and use explicit (Fig-ure 12(a)). LearnSched has 53 ready opportunities and 27 None React Pred 040 80 Burst misses (%) 65.4 44.0 0.0 0 2500 5000 Bad burst requests 0300 600 LoRA steps 0 60 120 180 Trace time (s) 123Bin P99 (s)     
+
+> (a) Burst risk (b) Resource trade-off (c) Capacity-ready timeline
+> No scale Reactive Forecast
+
+Figure 8. vLLM capacity return on two A100s, three seeds per policy. None/React/Pred: no scaling, burst-triggered scaling, and a 90 s pre-alert. Panels show burst misses, progress–risk tradeoffs, and five-second P99/readiness for preselected seed 713, including client queuing. 0 40 80 GPU occupied (GiB) Awake Parked + LoRA Resumed 79.7 3.7 11.4 79.7 1 10 100 Capacity-ready time (s) Cold Resume 69.99s 0.49s 
+
+> (a) Memory across state handoff
+> Host PSS: 4.77 → 11.16 GiB
+> (b) Warm resume · 3 measured runs
+
+Figure 9. Same-process SGLang recovery on one A100, three runs. GPU occupancy and cold/warm readiness (means and min–max); host PSS is separate. Every resump-tion completes a real request. uses on vLLM, and 89 ready opportunities and 38 uses on SGLang. Its use/ready ratios are 50.9% and 42.7%, compared with Eager’s 37.8% and 32.2%. Many requests still do not use a visible artifact. Counting every post-publication request as reuse overestimates amortization; use probability and per-use quality need separate estimates. Construction savings must also survive the use path. In the conditional five-block SGLang ledger, service overhead offsets 28.24% of the 30420-token construction/validation savings, leaving 21830.529 tokens net (Figure 12(b)). Every block saves cost, with revised timely-correct differences of 0, 1, 2, 0, and 1. These results use the stated service-cost coefficient 𝛼 = 0.561 and separately measured use counts. They support accounting for both construction and service, rather than inferring net value from fewer builds alone. 
+
+Resource pricing. Thirty profiler-on/off pairs across 10 prompts have equal paired output usage. The 30 profiled calls comprise 20 service and 10 construction calls. Mean service/build GPU activity is 76.9/378.3 ms for Bits and 53.8/4294.2 ms for Pyramid. Assuming no additional use cost, positive payback requires ⌊𝐶/𝑐⌋+1 uses: 2 and 3 under token pricing, but 5 and 80 under GPU pricing (Figure 13). GPU activity is the union of kernel, copy, and memset inter-vals; CPU costs are separate. In an independent sustained batch, TokenROI uses 73.76% fewer tokens than Never but 86.23% more GPU activity. GPUROI saves 71.25% of that activity but loses 32 timely correct answers. Under stopped demand, it saves 86.16% with unchanged timely quality. Re-source savings and quality effects require joint assessment. 
+
+## 7 Discussion and Related Work 
+
+7.1 State Management and Scheduling Complexity 
+
+State management changes both feasible windows and plan values. With expensive cold recovery, checkpointing and segmented execution can incur substantial handoff costs, making a later, longer window more valuable. Warm recov-ery can bring a window policy close to the value of more complex planning. Runtime design and scheduling there-fore interact: retaining state must be valued through faster return, less repeated work, and residency costs. Planning and prediction should focus where they change actions. 
+
+7.2 Capability Maintenance and Long-Term Value 
+
+The current evaluation focuses on capability construction and subsequent reuse, without systematically accounting 0 30 60 Loss/alert (s-eq.) OOM Reactive Eager Shared LearnSched Oracle 0 60 120 Lead time (s) 15 30 45 Loss/alert   
+
+> 060 120 Lead time (s) 0.0 0.5 1.0 Min. confidence  Return above curve Wait below curve
+
+(a) Paired decision costs (b) Value of lead time (c) Return boundary  
+
+> Solid: LearnSched; dashed: reactive Return-only model · calibrated synthetic alerts vLLM SGLang
+
+Figure 10. Return decisions under synthetic alerts. (a) Mean losses of six rules and percentile ranges of seed means. (b) Seven lead times. (c) Return/wait boundaries. LearnSched estimates recovery cost per engine; Shared pools samples; Oracle knows events and actual durations. Loss is in s-eq./alert: one overflow-loss unit equals one second of equivalent evolution loss. Never Window Learn Sched   
+
+> Cal.* 0.0 0.5 1.0 Token cost / Never (×) 72,351 24,294 23,447 23,504
+
+(a) Steady · 48 req         
+
+> 27.6% 85.4% 89.1% 88.0% Never Window Learn Sched
+> Cal.* 0.0 0.5 1.0 18,067 16,418 16,380 13,256
+
+(b) Stopped · 12 req      
+
+> 29.2% 62.5% 70.8% 68.8% Never Window Learn Sched
+> Cal.* 01232,964 7,648
+> 4,624
+> 2,964
+
+(c) Sparse · 2 req                     
+
+> 50.0% 50.0% 62.5% 62.5%
+> 112 24 36 48 Never Window Learn Sched Cal.* Steady
+> 112 Stopped
+> 012 24 Window LearnSched Cal.* 11 13 8,711 15 95,649 13 1865 Instances Timely correct (%) above; n = 192 / 48 / 8 by load ·Four blocks ·24 s windows
+
+(d) Request outcomes 
+
+> Sparse Request index · 4 repeated runs per policy
+
+(e) Build outcomes      
+
+> Cost† † Nonpositive builds, tokens Serving tokens Construction tokens Four paired blocks LLM: other LLM: timely (dot) Tool: timely / positive build Nonpositive build
+
+Figure 11. Demand persistence and investment returns. (a–c) Total tokens, cost breakdowns, and timely correctness. Points show cost ratios from four historical blocks; quality uses revised summaries with denominators of 192, 48, and 8. (d) The 992 request slots arranged by aggregate counts. (e) Revised construction classes and costs of nonpositive-return builds. Cal.* knows the future calendar. for maintenance costs such as version updates, failure de-tection, and revalidation. As task requirements or tool in-terfaces change, published capabilities may become less ef-fective, so short-term cost savings may not translate into long-term net value. Future work should assess how ongo-ing maintenance and declining benefits affect investment decisions over the capability lifecycle. 0 57 114 Requests (114 per policy) vL/Eager vL/Slack vL/Ours SG/Eager SG/Slack SG/Ours 69 28 17 37.8% 64 32 18 36.0% 61 26 27 50.9% 27 59 28 32.2% 27 60 27 31.0% 25 51 38 42.7% B0 ΔQ=0 B1 ΔQ=+1 B2 ΔQ=+2 B3 ΔQ=0 B4 ΔQ=+1 −6 06Ours − Eager (ktokens) -5.786 -5.058 -2.771 -3.879 -4.337 
+
+(a) Pilot: readiness is not use (b) Repeats: full cost matters       
+
+> Use/ready SGLang · all five blocks Ours: LearnSched. Separate studies. ΔQ: timely-correct difference. Not ready Ready, unused Used Build + valid. Serving Total
+
+Figure 12. Effective guidance use and conditional net cost; Ours denotes LearnSched. (a) Three groups per engine, each with 114 requests; ratios are use/ready. (b) Cost differences from Eager in five SGLang blocks: construction differences retain the original records; service differences are scaled by 𝛼 = 0.561 .100 1k 10k GPU active time (ms; log) Bits / S Bits / C Pyr. / S Pyr. / C  
+
+> 76.9 378.3 53.8 4,294.2
+> (a) Measured: all 30 profiled calls
+> S: serving; C: construction · ◇ mean
+> (b) Conditional break-even uses
+> Identical-call replacement, floor(C/c) + 1
+> Bits
+
+# 2 → 5 
+
+> Pyramid
+
+# 3 → 80  
+
+> Token GPU Not online GPU savings; CPU / failures excluded.
+
+Figure 13. Device pricing and break-even reuse. Top: all 30 profiled calls, with diamonds marking means. Bottom: mini-mum uses needed to offset construction costs, assuming no additional cost per use. 
+
+7.3 Related Work 
+
+Jalapeño selects recompilation based on expected future ex-ecution benefits [2]; computation selection and metareason-ing study when to invest further computation [5, 9]. We in-clude qualification, actual use, and service-recovery paths in remaining investment value, and use classical rollout [3] to compare capacity-constrained execution plans. Ekya coordinates inference and retraining, RECL reuses historical models, and LeMix jointly schedules LLM training and inference [4, 11, 14]. MetaClaw learns during inactiv-ity and calendar windows [21]. Yan et al. propose a cost-aware evolution control plane with multiple actions and instantiate online weight updates through AReaL2.0 [24]. LearnSched focuses on break-even value, durable progress, and capacity-return timing for discrete capabilities, eval-uating plan differences under the same information and execution method. Gandiva time-slices and migrates training jobs, Tire-sias targets job completion time, and AntMan dynamically shares spare GPU resources [6, 22, 23]. Salus provides fast job switching and memory sharing, while REEF supports microsecond-scale preemption for DNN inference [8, 26]; these mechanisms inform the cost of lending and returning capacity. Clockwork uses predictable execution to meet in-ference latency targets [7]. Orca schedules at iteration gran-ularity, Sarathi-Serve uses chunked prefills, and DistServe separates prefill and decoding to improve LLM serving un-der latency constraints [1, 25, 30]. PagedAttention and SGLang improve execution effi-ciency [12, 29], while Reflexion and Self-Refine provide feedback-based improvement mechanisms [15, 17]. Voy-ager accumulates reusable executable skills [18]. Recent ad-vances extend these mechanisms to evolutionary program optimization and self-directed model adaptation [16, 31], as well as skill–tool co-evolution and adaptive workflow evolution [19, 20]. DGM and Hyperagents investigate agent self-modification, with the latter also making the meta-level improvement procedure itself editable [27, 28]. These ad-vances expand both the capabilities available for reuse and the mechanisms that construct them. Investment schedul-ing must therefore re-estimate construction and validation costs, expected reuse benefits, and capacity-return overhead as the system evolves. 
+
+## 8 Conclusion 
+
+LearnSched treats online evolution as a compute investment with delayed returns and state-dependent switching costs. Counterfactual rollout compares progress and waiting un-der capacity-return constraints. Measurements and finite-model results show that waiting can avoid costly cold hand-offs, while warm recovery reduces this advantage. Effective evolution scheduling must jointly account for future bene-fits and timely capacity return. References 
+
+[1] Amey Agrawal, Nitin Kedia, Ashish Panwar, Jayashree Mohan, Nipun Kwatra, Bhargav Gulavani, Alexey Tumanov, and Ramachandran Ramjee. 2024. Taming Throughput-Latency Tradeoff in LLM Infer-ence with Sarathi-Serve. In Proceedings of USENIX OSDI ’24 . USENIX Association, Santa Clara, CA, 117–134. https://www.usenix.org/ conference/osdi24/presentation/agrawal 
+
+[2] Matthew Arnold, Stephen Fink, David Grove, Michael Hind, and Pe-ter F. Sweeney. 2000. Adaptive Optimization in the Jalapeño JVM. In 
+
+Proceedings of ACM OOPSLA ’00 . ACM, Minneapolis, Minnesota, USA, 47–65. doi: 10.1145/353171.353175 
+
+[3] Dimitri P. Bertsekas, John N. Tsitsiklis, and Cynara Wu. 1997. Rollout Algorithms for Combinatorial Optimization. Journal of Heuristics 3(1997), 245–262. https://www.mit.edu/~dimitrib/rollout.pdf 
+
+[4] Romil Bhardwaj, Zhengxu Xia, Ganesh Ananthanarayanan, Junchen Jiang, Yuanchao Shu, Nikolaos Karianakis, Kevin Hsieh, Paramvir Bahl, and Ion Stoica. 2022. Ekya: Continuous Learning of Video An-alytics Models on Edge Compute Servers. In Proceedings of USENIX NSDI ’22 . USENIX Association, Renton, WA, 119–135. https://www. usenix.org/conference/nsdi22/presentation/bhardwaj 
+
+[5] Frederick Callaway, Sayan Gul, Paul M. Krueger, Thomas L. Grif-fiths, and Falk Lieder. 2018. Learning to Select Computations. In Pro-ceedings of UAI ’18 . AUAI Press, Corvallis, Oregon, 776–785. https: //www.auai.org/uai2018/proceedings/papers/269.pdf 
+
+[6] Juncheng Gu, Mosharaf Chowdhury, Kang G. Shin, Yibo Zhu, Myeongjae Jeon, Junjie Qian, Hongqiang Liu, and Chuanxiong Guo. 2019. Tiresias: A GPU Cluster Manager for Distributed Deep Learning. In Proceedings of USENIX NSDI ’19 . USENIX Association, Boston, MA, 485–500. https://www.usenix.org/conference/nsdi19/ presentation/gu 
+
+[7] Arpan Gujarati, Reza Karimi, Safya Alzayat, Wei Hao, Antoine Kauf-mann, Ymir Vigfusson, and Jonathan Mace. 2020. Serving DNNs like Clockwork: Performance Predictability from the Bottom Up. In Pro-ceedings of USENIX OSDI ’20 . USENIX Association, 443–462. https: //www.usenix.org/conference/osdi20/presentation/gujarati 
+
+[8] Mingcong Han, Hanze Zhang, Rong Chen, and Haibo Chen. 2022. Microsecond-scale Preemption for Concurrent GPU-accelerated DNN Inferences. In Proceedings of USENIX OSDI ’22 . USENIX Asso-ciation, Carlsbad, CA, 539–558. https://www.usenix.org/conference/ osdi22/presentation/han 
+
+[9] Nicholas Hay, Stuart Russell, David Tolpin, and Solomon Eyal Shi-mony. 2012. Selecting Computations: Theory and Applications. In 
+
+Proceedings of UAI ’12 . AUAI Press, Catalina Island, CA, 346–355. 
+
+https://auai.org/uai2012/papers/123.pdf 
+
+[10] Naman Jain, King Han, Alex Gu, Wen-Ding Li, Fanjia Yan, Tian-jun Zhang, Sida Wang, Armando Solar-Lezama, Koushik Sen, and Ion Stoica. 2024. LiveCodeBench: Holistic and Contamination Free Evaluation of Large Language Models for Code. arXiv:2403.07974 
+
+https://arxiv.org/abs/2403.07974 
+
+[11] Mehrdad Khani, Ganesh Ananthanarayanan, Kevin Hsieh, Junchen Jiang, Ravi Netravali, Yuanchao Shu, Mohammad Alizadeh, and Vic-tor Bahl. 2023. RECL: Responsive Resource-Efficient Continuous Learning for Video Analytics. In Proceedings of USENIX NSDI ’23 .USENIX Association, Boston, MA, 917–932. https://www.usenix.org/ conference/nsdi23/presentation/khani 
+
+[12] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Sto-ica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. arXiv:2309.06180 https://arxiv.org/ abs/2309.06180 
+
+[13] Jean-Yves Le Boudec and Patrick Thiran. 2001. Network Calculus: A Theory of Deterministic Queuing Systems for the Internet . Lecture Notes in Computer Science, Vol. 2050. Springer. doi: 10.1007/3-540-45318-0 
+
+[14] Yufei Li, Zexin Li, Yinglun Zhu, and Cong Liu. 2025. LeMix: Unified Scheduling for LLM Training and Inference on Multi-GPU Systems. arXiv:2507.21276 https://arxiv.org/abs/2507.21276 
+
+[15] Aman Madaan, Niket Tandon, Prakhar Gupta, Skyler Hallinan, Luyu Gao, Sarah Wiegreffe, Uri Alon, Nouha Dziri, Shrimai Prabhu-moye, Yiming Yang, Shashank Gupta, Bodhisattwa Prasad Majumder, Katherine Hermann, Sean Welleck, Amir Yazdanbakhsh, and Peter Clark. 2023. Self-Refine: Iterative Refinement with Self-Feedback. arXiv:2303.17651 https://arxiv.org/abs/2303.17651 
+
+[16] Alexander Novikov, Ngân Vũ, Marvin Eisenberger, Emilien Dupont, Po-Sen Huang, Adam Zsolt Wagner, Sergey Shirobokov, Borislav Kozlovskii, Francisco J. R. Ruiz, Abbas Mehrabian, M. Pawan Ku-mar, Abigail See, Swarat Chaudhuri, George Holland, Alex Davies, Sebastian Nowozin, Pushmeet Kohli, and Matej Balog. 2025. Al-phaEvolve: A Coding Agent for Scientific and Algorithmic Discovery. arXiv:2506.13131 [cs.AI] https://arxiv.org/abs/2506.13131 
+
+[17] Noah Shinn, Federico Cassano, Edward Berman, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. 2023. Reflexion: Language Agents with Verbal Reinforcement Learning. arXiv:2303.11366 https: //arxiv.org/abs/2303.11366 
+
+[18] Guanzhi Wang, Yuqi Xie, Yunfan Jiang, Ajay Mandlekar, Chaowei Xiao, Yuke Zhu, Linxi Fan, and Anima Anandkumar. 2023. Voy-ager: An Open-Ended Embodied Agent with Large Language Models. arXiv:2305.16291 https://arxiv.org/abs/2305.16291 
+
+[19] Yangbo Wei, Zhen Huang, Shaoqiang Lu, Junhong Qian, Qifan Wang, Chen Wu, and Lei He. 2026. SkillSmith: Co-Evolving Skills and Tools for Self-Improving Agent Systems. arXiv:2606.01314 [cs.AI] https: //arxiv.org/abs/2606.01314 
+
+[20] Yangbo Wei, Zhen Huang, Ronghao Xu, Hong Wang, and Wei W. Xing. 2026. EvoMAS: Heuristics in the Loop—Evolving Smarter Agen-tic Workflows. In Proceedings of the 43rd International Conference on Machine Learning (Proceedings of Machine Learning Research, Vol. 306) .PMLR, 133736–133763. https://proceedings.mlr.press/v306/wei26m. html 
+
+[21] Peng Xia, Jianwen Chen, Xinyu Yang, Haoqin Tu, Jiaqi Liu, Kaiwen Xiong, Siwei Han, Shi Qiu, Haonian Ji, Yuyin Zhou, Zeyu Zheng, Ci-hang Xie, and Huaxiu Yao. 2026. MetaClaw: Just Talk—An Agent That Meta-Learns and Evolves in the Wild. arXiv:2603.17187 https: //arxiv.org/abs/2603.17187 
+
+[22] Wencong Xiao, Romil Bhardwaj, Ramachandran Ramjee, Muthian Si-vathanu, Nipun Kwatra, Zhenhua Han, Pratyush Patel, Xuan Peng, Hanyu Zhao, Quanlu Zhang, Fan Yang, and Lidong Zhou. 2018. Gan-diva: Introspective Cluster Scheduling for Deep Learning. In Proceed-ings of USENIX OSDI ’18 . USENIX Association, Carlsbad, CA, 595–610. 
+
+https://www.usenix.org/conference/osdi18/presentation/xiao 
+
+[23] Wencong Xiao, Shiru Ren, Yong Li, Yang Zhang, Pengyang Hou, Zhi Li, Yihui Feng, Wei Lin, and Yangqing Jia. 2020. AntMan: Dynamic Scaling on GPU Clusters for Deep Learning. In Proceedings of USENIX OSDI ’20 . USENIX Association, 533–548. https://www.usenix.org/ conference/osdi20/presentation/xiao 
+
+[24] Ran Yan, Wei Fu, Jiale Li, Shusheng Xu, Zhiyu Mei, Jiaxuan Gao, Jiarui Zhang, Wentai Zhang, Hao Dai, Xujie Shen, Chuyi He, Zhen Pu, Jun Mei, Zhiyao Lin, Haitao Wang, Zhiqiang Ding, Jiawei Zhang, Huaijie Wang, Ruida Xu, Honghua Dong, Youhe Jiang, Yi Wu, Tongkai Yang, and Binhang Yuan. 2026. Next-Generation Agentic Reinforcement Learning Systems Enable Self-Evolving Agents. arXiv:2607.01120 
+
+https://arxiv.org/abs/2607.01120 
+
+[25] Gyeong-In Yu, Joo Seong Jeong, Geon-Woo Kim, Soojeong Kim, and Byung-Gon Chun. 2022. Orca: A Distributed Serving System for Transformer-Based Generative Models. In Proceedings of USENIX OSDI ’22 . USENIX Association, Carlsbad, CA, 521–538. https://www. usenix.org/conference/osdi22/presentation/yu 
+
+[26] Peifeng Yu and Mosharaf Chowdhury. 2020. Fine-Grained GPU Sharing Primitives for Deep Learning Applications. Proceedings of Machine Learning and Systems 2 (2020), 98– 111. https://proceedings.mlsys.org/paper_files/paper/2020/file/ d9cd83bc91b8c36a0c7c0fcca59228f2-Paper.pdf 
+
+[27] Jenny Zhang, Shengran Hu, Cong Lu, Robert Lange, and Jeff Clune. 2025. Darwin Gödel Machine: Open-Ended Evolution of Self-Improving Agents. arXiv:2505.22954 [cs.AI] https://arxiv.org/abs/ 2505.22954 
+
+[28] Jenny Zhang, Bingchen Zhao, Wannan Yang, Jakob Foerster, Jeff Clune, Minqi Jiang, Sam Devlin, and Tatiana Shavrina. 2026. Hyper-agents. arXiv:2603.19461 [cs.AI] https://arxiv.org/abs/2603.19461 
+
+[29] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody Hao Yu, Shiyi Cao, Christos Kozyrakis, Ion Sto-ica, Joseph E. Gonzalez, Clark Barrett, and Ying Sheng. 2024. SGLang: Efficient Execution of Structured Language Model Programs. arXiv:2312.07104 https://arxiv.org/abs/2312.07104 
+
+[30] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xu-anzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregat-ing Prefill and Decoding for Goodput-optimized Large Language Model Serving. In Proceedings of USENIX OSDI ’24 . USENIX Associa-tion, Santa Clara, CA, 193–210. https://www.usenix.org/conference/ osdi24/presentation/zhong-yinmin 
+
+[31] Adam Zweiger, Jyo Pari, Han Guo, Yoon Kim, and Pulkit Agrawal. 2025. Self-Adapting Language Models. In Advances in Neural Informa-tion Processing Systems , Vol. 38. Curran Associates, Inc., 74084–74115. doi: 10.52202/085713-2483 A Service Risk: Measurement and Interpretation 
+
+The service experiments quantify the capacity cost of back-ground work. This appendix specifies how latency, failures, and deadline violations enter that measurement, and distin-guishes the burst experiments from the independent capac-ity sweep. These observations support the capacity-return constraint in Section 3; they do not establish a deadline guar-antee under arbitrary arrivals. 
+
+A.1 Response Tails and Failure Accounting 
+
+Figure A.1 supplements Section 6.2. The SGLang experi-ments cross two models and five resource policies, with three repetitions per setting: 30 runs contain 14310 requests, of which 14308 succeed. The corresponding SLOs are 1.2 s for Granite-3B-A0.8B and 1.8 s for Qwen2.5-Coder-7B. Ar-rivals follow the low–high–low workload in Section 5. 
+
+Latency origin and normalization. For a successful re-quest 𝑖 , let 𝑎 𝑖 be its scheduled arrival, 𝑓 𝑖 its completion time, and 𝐷 𝑖 = 𝑑 𝑖 − 𝑎 𝑖 > 0 its latency budget. The normalized la-tency is 𝑥 𝑖 = (𝑓 𝑖 − 𝑎 𝑖 )/𝐷 𝑖 . Measuring from scheduled arrival includes client-side waiting before dispatch, so delaying dis-patch cannot hide a deadline violation. Normalization puts the SLOs on a common axis: 𝑥 𝑖 > 1 denotes lateness, while absolute latency still depends on the model. 0 1 2.5 1.01 .001 Response tail 0 1 2.5  
+
+> (a) MoE 3B (b) Dense 7B
+> Arrival-to-completion / SLO Static 0% 10% 25% 50% Adaptive
+
+Figure A.1. Successful-response latency distributions for the two SGLang models and five resource policies. Latency includes waiting from scheduled arrival and is divided by the model’s SLO. Failed requests are excluded from these curves and retained in the bad-request denominator. 
+
+Conditional tails versus total service risk. Partition the 𝑁 > 0 requests into disjoint failure and success sets ℱ
+
+and 𝒮 , with 𝑁 𝑓 = | ℱ| and 𝑁 𝑠 = | 𝒮 | = 𝑁 − 𝑁 𝑓 . For 𝑁 𝑠 > 0 ,define the empirical conditional tail ̂𝑆 𝑠 (𝑥) = |{𝑖 ∈ 𝒮 ∶ 𝑥 𝑖 > 𝑥}| |𝒮 |= 1𝑁 𝑠 
+
+∑
+
+> 𝑖∈ 𝒮
+
+1{𝑥 𝑖 > 𝑥}. 
+
+(A.1) Let 𝑁 ℓ = |{𝑖 ∈ 𝒮 ∶ 𝑥 𝑖 > 1}| count late successes, and let ̂𝑓 = 𝑁 𝑓 /𝑁 . A request is bad if it fails or succeeds late. Be-cause these events are disjoint, their counts give the exact decomposition ̂𝑏 = |ℱ| + |{𝑖 ∈ 𝒮 ∶ 𝑥 𝑖 > 1}| 𝑁 = 𝑁 𝑓 + 𝑁 ℓ
+
+𝑁 = 𝑁 𝑓 
+
+𝑁 + 𝑁 𝑠 
+
+𝑁 𝑁 ℓ
+
+𝑁 𝑠 
+
+=̂ 𝑓 + (1 −̂ 𝑓 )̂𝑆 𝑠 (1). 
+
+(A.2) If 𝑁 𝑠 = 0 , the conditional tail is undefined and the count formula directly gives ̂ 𝑏 = 1 . A successful-response curve alone cannot recover total risk without the failure fraction. Both failures in the SGLang experiments therefore remain in the denominator of Figure 5, although they have no finite successful-completion latency in Figure A.1. The identity applies within a run or to consistently pooled counts. Averaging per-run rates gives each repetition equal weight; pooling requests weights runs by their request counts. These summaries should not be interchanged when denominators differ. The three repetitions reveal observed variability, but an absence of bad requests in this finite workload does not establish zero risk for unseen bursts. 
+
+A.2 Independent Capacity Sweep 
+
+Figure A.2 sweeps offered load for SGLang with Granite 3B on one A100. It uses open-loop Poisson arrivals, a two-second SLO, and one run per rate. The open-loop workload does not reduce arrivals when responses slow down, allow-ing queueing pressure to accumulate. Its SLO and arrival process differ from the preceding burst experiment, so the curves are not additional repetitions of that experiment. Increasing arrivals from 40 to 50 requests/s raises the bad-request rate from 16.7% to 86.8% and P99 from 2.14 to 2.73 s, without failures at either rate. Failures first appear at 60 requests/s. Deadline violations thus expose a loss of useful capacity before the runtime begins failing requests. Failure-only control misses this earlier degradation. This sweep identifies an observed operating boundary for the specified workload, rather than a workload-independent capacity constant. One run per rate cannot characterize tail uncertainty or establish the exact saturation point. The scheduling implication is narrower: capacity admission and return should account for deadline pressure, including wait-ing outside the serving engine. 210 60 P99 (s)     
+
+> 30 50 70 100 Offered load (req/s) 050 100 Requests (%)
+> (a) Tail latency · SLO = 2 s (b) Bad requests versus failures
+> Bad Failed
+
+Figure A.2. Independent SGLang capacity sweep with open-loop Poisson arrivals and a two-second SLO. Each rate has one run. The vertical line marks 40 requests/s; the rise in deadline violations precedes observed request failures. 
+
+## B Investment Ledgers and Price Sensitivity 
+
+The ledgers separate the cost of constructing a capability from the cost and quality of using it. They complement the plan comparison in Section 6.1: a lower realized bill can arise from a different service path even when admission decisions are unchanged. The historical costs and revised quality sum-maries support aggregate comparisons. 
+
+B.1 Demand Persistence and Incremental Value 
+
+Table B.1 collects the comparisons underlying Figure 11. All token totals include charged construction and validation, in-cluding unsuccessful or unused work, as specified by Equa-tion (14). Timely correctness counts answers that meet both the correctness and deadline requirements. 
+
+Table B.1. Reported tool ledgers by demand pattern. Costs are historical token totals; timely-correct counts use the re-vised summaries. Cal.* knows future arrivals.                         
+
+> Demand Policy Tokens Timely correct Sustained Never 72351 53/192 Window 24294 164/192 LearnSched 23447 171/192 Stopped Window 16418 30/48 LearnSched 16380 34/48 Cal.* 13256 33/48 Sparse Window 7648 4/8 LearnSched 4624 5/8 Cal.* 2964 5/8
+
+Under sustained demand, LearnSched saves 67.59% of to-kens relative to Never and 3.49% relative to Window. Its seven additional timely correct answers over Window corre-spond to 3.65 percentage points. However, LearnSched and Window make identical historical admission decisions, and 745 of their 847-token cost difference comes from service. These totals demonstrate a realized cost–quality difference; they do not establish better plan selection. For a policy 𝑃 , let 𝑄 𝑃 count timely correct answers, 𝐶 𝑃 
+
+be the charged token cost, and 𝑊 ≥ 0 value one timely correct answer in token-cost units. On a common workload, 
+
+𝑈 𝑃 (𝑊 ) = 𝑊 𝑄 𝑃 − 𝐶 𝑃 gives 
+
+Δ𝑈 𝑃,𝑄 (𝑊 ) = 𝑈 𝑃 (𝑊 ) − 𝑈 𝑄 (𝑊 ) = (𝑊 𝑄 𝑃 − 𝐶 𝑃 ) − (𝑊 𝑄 𝑄 − 𝐶 𝑄 )= 𝑊 (𝑄 𝑃 − 𝑄 𝑄 ) − (𝐶 𝑃 − 𝐶 𝑄 ). 
+
+(B.1) For LearnSched relative to Cal.*, substitution of the stopped and sparse ledgers yields 
+
+Δ𝑈 stopped (𝑊 ) = 𝑊 (34 − 33) − (16380 − 13256) = 𝑊 − 3124, Δ𝑈 sparse (𝑊 ) = 𝑊 (5 − 5) − (4624 − 2964) = −1660. 
+
+(B.2) Under stopped demand, LearnSched’s incremental utility is therefore positive if and only if 𝑊 > 3124 ; equality gives a tie. Under sparse demand, equal aggregate quality and strictly greater cost favor Cal.* for every common 𝑊 . Cal.* has privileged knowledge of future arrivals, so neither com-parison holds information access fixed. Qualification also differs from amortization. Across the revised workload classifications, LearnSched and Window incur 5649 and 8711 tokens on nonpositive-return builds, respectively, a 35.15% difference. These costs remain in the ledger even when a candidate passes public tests. Passing those tests establishes eligibility for publication; positive re-turn requires sufficient reuse at a worthwhile unit value. 
+
+B.2 Conditional Guidance Costs 
+
+Figure 12(b) preserves construction and validation differ-ences from the five historical SGLang blocks, while multi-plying service differences by 𝛼 0 = 0.561 . Let 𝑆 𝑏 = 30420 
+
+be the aggregate construction saving and 𝐷 𝑠 the unscaled additional service cost. Holding these quantities fixed, the saving at a service-price coefficient 𝛼 ≥ 0 follows from 
+
+𝐷 𝑠 = 8589.471 𝛼 0
+
+= 8589.471 0.561 = 15311, 𝑆(𝛼) = 𝑆 𝑏 − 𝛼𝐷 𝑠 
+
+= 30420 − 15311𝛼. 
+
+(B.3) At the reported coefficient, 𝑆(0.561) = 21830.529 token-cost units: service offsets 28.24% of the construction saving. The revised timely-correct differences are 0, 1, 2, 0, 1 , giving four additional answers in aggregate. Consequently, 
+
+Δ𝑈 (𝑊 , 𝛼) = 𝑊 
+
+> 5
+
+∑
+
+> 𝑗=1
+
+Δ𝑄 𝑗 + 𝑆(𝛼) = 𝑊 (0 + 1 + 2 + 0 + 1) + 𝑆(𝛼) = 4𝑊 + 30420 − 15311𝛼. 
+
+(B.4) Since 𝐷 𝑠 = 15311 > 0 , the sign of incremental utility has the equivalent conditions 
+
+Δ𝑈 (𝑊 , 𝛼) > 0 ⟺ 15311𝛼 < 30420 + 4𝑊 ⟺ 𝛼 < 30420 + 4𝑊 15311 . (B.5) At 𝑊 = 0 , the boundary is 30420/15311 ≈ 1.9868 ; equality gives a tie. These sensitivities hold ledger outcomes fixed. They do not measure new operating points or account for behavioral, quality, or reuse changes induced by new prices. The use counts in Figure 12(a) come from a separate ex-periment. They demonstrate the distinction between artifact availability and actual use, but cannot be joined request by request to the conditional cost ledger. Per-use savings re-main unidentified, and missing usage remains unknown. 
+
+## C Return, Stopping, and Benefit Timing 
+
+This appendix examines three decision boundaries: return-ing capacity after an alert, stopping an in-flight computa-tion, and recognizing benefits after publication. Each is an instance of valuing remaining work. The experiments use different workloads and information, so their results char-acterize these boundaries separately rather than a single in-tegrated online policy. 
+
+C.1 Returning Capacity Under an Alert 
+
+Restrict Equation (2) to two feasible actions: return early or wait. Fix the information ℐ available at the decision, includ-ing warning lead time 𝐿 , and let 𝐸 denote a true burst, with 
+
+𝑝 = Pr (𝐸 ∣ ℐ) ∈ [0, 1] . All expectations below condition on this same information; write 𝔼 ℐ[⋅] = 𝔼[⋅ ∣ ℐ].Let ℓ𝑤 and ℓ𝑎 be integrable remaining losses under wait-ing and early return. Subtract a common event-dependent baseline from both losses so that waiting on a false alarm has conditional mean zero; this preserves their expected differ-ence. Under a true burst, the conditional means are 𝐶 𝑤 and 
+
+𝐶 𝑎 (𝐿) . Waiting includes the better feasible continuation of reactive scaling and no scaling under the information then available. Under a false alarm, early return has incremental mean cost 𝐶 𝑓 > 0 . The law of total expectation gives 
+
+𝑄 𝑤 = 𝔼 ℐ[ℓ 𝑤 1𝐸 ] + 𝔼 ℐ[ℓ 𝑤 1𝐸 𝑐 ]= 𝑝𝐶 𝑤 + (1 − 𝑝) 0 = 𝑝𝐶 𝑤 ,𝑄 𝑎 = 𝔼 ℐ[ℓ 𝑎 1𝐸 ] + 𝔼 ℐ[ℓ 𝑎 1𝐸 𝑐 ]= 𝑝𝐶 𝑎 (𝐿) + (1 − 𝑝)𝐶 𝑓 .
+
+(C.1) Here 𝑄 𝑤 and 𝑄 𝑎 are losses to minimize. Conditional costs include every remaining consequence of the specified con-tinuations; their dependence on ℐ is suppressed. At 𝑝 = 0 
+
+or 𝑝 = 1 , the zero-probability branch contributes zero. Pre-viously paid costs are common to both actions and cancel. Write 𝐵(𝐿) = 𝐶 𝑤 − 𝐶 𝑎 (𝐿) for the conditional benefit of acting early. For 𝐵(𝐿) > 0 , early return is strictly preferred if and only if 
+
+𝑄 𝑎 < 𝑄 𝑤 
+
+⟺ 𝑝𝐶 𝑎 (𝐿) + (1 − 𝑝)𝐶 𝑓 < 𝑝𝐶 𝑤 
+
+⟺ 𝑝𝐵(𝐿) > (1 − 𝑝)𝐶 𝑓 
+
+⟺ 𝑝[𝐵(𝐿) + 𝐶 𝑓 ] > 𝐶 𝑓 
+
+⟺ 𝑝 > 𝑝 ∗(𝐿) ∶= 𝐶 𝑓 
+
+𝐵(𝐿) + 𝐶 𝑓 
+
+.
+
+(C.2) Division preserves the inequality because 𝐵(𝐿) + 𝐶 𝑓 > 0 ,and 𝑝 ∗(𝐿) ∈ (0, 1) . If 𝐵(𝐿) ≤ 0 , then 𝑝𝐵(𝐿) − (1 − 𝑝)𝐶 𝑓 ≤ 0 
+
+for every 𝑝 ∈ [0, 1] , so early return cannot strictly improve the loss. Ties retain waiting. 
+
+Sensitivity and calibration. For 𝐵 > 0 and 𝐶 𝑓 > 0 ,apply the quotient rule while holding the other parameter fixed. The threshold decreases with avoidable loss and in-creases with false-alarm cost: 
+
+𝜕𝑝 ∗
+
+𝜕𝐵 = 0 ⋅ (𝐵 + 𝐶 𝑓 ) − 𝐶 𝑓 
+
+(𝐵 + 𝐶 𝑓 )2
+
+= − 𝐶 𝑓 
+
+(𝐵 + 𝐶 𝑓 )2 < 0, 𝜕𝑝 ∗
+
+𝜕𝐶 𝑓 
+
+= (𝐵 + 𝐶 𝑓 ) − 𝐶 𝑓 
+
+(𝐵 + 𝐶 𝑓 )2
+
+= 𝐵 (𝐵 + 𝐶 𝑓 )2 > 0. 
+
+(C.3) Longer lead time lowers the threshold only insofar as it in-creases 𝐵(𝐿) . Faster recovery can instead reduce the extra loss avoided by advance notice, making early intervention less valuable. Recovery latency should thus change the ac-tion value, not merely a fixed scheduling margin. Keep 𝐵 > 0 and 𝐶 𝑓 > 0 fixed, and suppose ̂ 𝑝 ∈ [0, 1] 
+
+satisfies |𝑝 −̂ 𝑝| ≤ 𝜖 𝑝 . Define the true advantage of early return as 𝐷(𝑝) = 𝑄 𝑤 − 𝑄 𝑎 = 𝑝𝐵 − (1 − 𝑝)𝐶 𝑓 . Expanding the difference and applying the probability-error bound gives 
+
+𝐷(𝑝) − 𝐷(̂𝑝) = (𝑝 −̂ 𝑝)𝐵 + (𝑝 −̂ 𝑝)𝐶 𝑓 
+
+= (𝑝 −̂ 𝑝)(𝐵 + 𝐶 𝑓 ), |𝐷(𝑝) − 𝐷(̂𝑝)| = |𝑝 −̂ 𝑝|(𝐵 + 𝐶 𝑓 )≤ 𝜖 𝑝 (𝐵 + 𝐶 𝑓 ), 𝐷(𝑝) ≥ 𝐷(̂𝑝) − 𝜖 𝑝 (𝐵 + 𝐶 𝑓 ). 
+
+(C.4) Thus 𝐷(̂𝑝) =̂ 𝑝𝐵 − (1 −̂ 𝑝)𝐶 𝑓 > 𝜖 𝑝 (𝐵 + 𝐶 𝑓 ) is sufficient for 
+
+𝐷(𝑝) > 0 and lower true loss. This conservative condition excludes cost-model errors. Synthetic events follow their stated probabilities, which does not validate conditional er-ror bounds for a live predictor. 
+
+C.2 Synthetic Alert Protocol and Its Scope 
+
+Figure 10 combines measured readiness and failed-wait sam-ples with synthetic alerts. Alert probabilities follow 𝑝 ∼
+
+Beta (2, 2) , and event occurrence is sampled with probabil-ity 𝑝 . Duration, lead time, and overflow rate follow lognor-mal distributions with the parameters in Table C.1. To pre-serve an arithmetic mean 𝑚 > 0 , write 𝑋 = 𝑒 𝜇+𝜎𝑍 with 
+
+𝑍 ∼ 𝒩 (0, 1) and 𝜎 ≥ 0 . Completing the square in the normal-density integral gives 
+
+𝔼[𝑋 ] = 𝑒 𝜇 
+
+√2𝜋 ∫
+
+> ℝ
+
+𝑒 𝜎𝑢−𝑢 2/2 𝑑𝑢 = 𝑒 𝜇+𝜎 2/2 ∫
+
+> ℝ
+
+𝑒 −(𝑢−𝜎) 2/2 
+
+√2𝜋 𝑑𝑢 = 𝑒 𝜇+𝜎 2/2 = 𝑚, 𝜇 = log 𝑚 − 𝜎 2/2. 
+
+(C.5) The shifted normal density integrates to one; taking loga-rithms is valid because 𝑚 > 0 .
+
+Table C.1. Synthetic alert parameters. Means are in the orig-inal scale; standard deviations are in log space. These distri-butions are modeling inputs.         
+
+> Quantity Arithmetic mean Log-space s.d. Burst duration 90 s 0.65 Warning lead time 45 s 0.35 Overflow rate 1.2 0.50
+
+Handoff loss is 13.84 s-eq., and competing policies share the same sampled events. One overflow-loss unit is priced as one second of equivalent evolution loss. Pairing holds the realized event sequence fixed when comparing decisions; it does not remove uncertainty in the underlying recovery measurements or validate the assumed loss conversion. Oracle knows event occurrence and actual duration, achieving 8.74/22.16 s-eq./alert on vLLM/SGLang. It is an information benchmark rather than an implementable pre-dictor. LearnSched’s corresponding losses are 14.61/28.87, versus 15.76/30.21 for unconditional early return. These results isolate the value of selective action after notice is available. Online prediction accuracy and warm-state mem-ory costs remain unevaluated. 
+
+C.3 Budget Stopping During Execution 
+
+Figure C.1 replays a Prefix rule frozen on development data against existing MBPP records. Failure of a public test on the cheap path triggers an upgrade. At step 512, the rule in-spects the first 64 reasoning characters: a prefix of Thinking Process: stops execution; otherwise, execution continues to step 1536. This format is a model-specific proxy, rather than a direct estimate of the value of further computation. 0 40 80 Prompt + output (ktokens) Cheap Always think Fixed 512 Fixed 1024 Fixed 1536 Fixed 2048 Fixed 3072 Prefix 10,278 30 87,934 27 19,983 31 26,304 33 31,424 33 36,188 34 45,257 35                                                                                               
+
+> 25,280 35 79* 86 177 183 219* 228 260 286 311 386 400 417* 442* 471* 489* 510 512 1024 1536 2048 3072 Pfx ·+···············+×··×··×++······+×··×··×++·····++×··×··×++·····++×+·×··×++······+×+·×··×++·····
+> (a) All 48 held-out check tasks
+> Tokens Q/48
+> (b) All 16 public-failure upgrades
+> Correct Wrong Budget
+
+Figure C.1. Cost and quality under stage stopping. (a) Ag-gregate token costs and correct counts for eight policies; Prefix’s 35/48 uses the revised summary. (b) Recorded out-comes for 16 upgrades after failed public tests, including six format-triggered stops. The per-task matrix remains only partly reconciled with the revised totals. In the revised summary, Prefix spends 25280 tokens for 35/48 correct answers, matching the fixed 3072-step bud-get’s aggregate correctness at 44.14% lower cost than its 45257 tokens. The fixed 1024-step budget spends 26304 to-kens for 33/48; Cheap and the fixed 512-step budget answer 30 and 31 tasks correctly. These counts measure correctness; Appendix B instead uses timely correctness. At an intermediate history ℎ, compare immediate stop-ping with a specified feasible continuation policy. Let 
+
+𝑌 𝑐 , 𝑌 𝑠 ∈ {0, 1} denote their eventual correctness and 𝐶 𝑐 , 𝐶 𝑠 
+
+their remaining charged costs, including any required ca-pacity return. Assume finite conditional expected costs, and let 𝑊 ≥ 0 value a correct answer. Both options have al-ready paid 𝐶 paid (ℎ) . With Δ𝑄 ℎ = 𝑌 𝑐 − 𝑌 𝑠 and Δ𝐶 ℎ = 𝐶 𝑐 − 𝐶 𝑠 ,0510 Requests/s 050 100 Duty (%) 0 6 12 18 24 Simulated time (hours) 075 150 Cum. value   
+
+> Demand → investment → payoff Exp. CE LearnSched
+
+Figure C.2. Compute expenditure and delayed benefit under synthetic demand. The displayed run uses seed 261000, 24 hours, 24 candidates, and a 12 GPU-hour budget. Exp. CE and the conservative rule share the simulator. Demand, resource shares, and cumulative values are simulated; the trace is not an online deployment measurement. linearity of conditional expectation gives 
+
+𝑈 𝑐 (ℎ) = 𝔼[𝑊 𝑌 𝑐 − 𝐶 𝑐 ∣ ℎ] − 𝐶 paid (ℎ), 𝑈 𝑠 (ℎ) = 𝔼[𝑊 𝑌 𝑠 − 𝐶 𝑠 ∣ ℎ] − 𝐶 paid (ℎ), 𝑈 𝑐 (ℎ) − 𝑈 𝑠 (ℎ) = 𝔼[𝑊 𝑌 𝑐 − 𝐶 𝑐 ∣ ℎ] − 𝔼[𝑊 𝑌 𝑠 − 𝐶 𝑠 ∣ ℎ] = 𝑊 𝔼[𝑌 𝑐 − 𝑌 𝑠 ∣ ℎ] − 𝔼[𝐶 𝑐 − 𝐶 𝑠 ∣ ℎ] = 𝑊 𝔼[Δ𝑄 ℎ ∣ ℎ] − 𝔼[Δ𝐶 ℎ ∣ ℎ]. 
+
+(C.6) Consequently, this continuation is strictly preferable exactly when 𝑊 𝔼[Δ𝑄 ℎ ∣ ℎ] > 𝔼[Δ𝐶 ℎ ∣ ℎ] . Previously consumed tokens cancel, while future costs remain. Global optimality would additionally require optimizing the continuation at every future history. Prefix uses a stopping signal without estimating these conditional values. Equal aggregate correctness also does not imply equal correctness on every task: Prefix truncates task 79, which the longer budget answers correctly. In a historical trans-fer across five task families, its cost for the same three skills is 5.26% higher than the fixed 1024-step budget. The revised 35/48 total has not been fully reconciled with per-task records. The evidence therefore supports a workload-specific aggregate tradeoff, not universal dominance or a validated stopping rule across models. 
+
+C.4 Benefit Accumulation After Publication 
+
+Figure C.2 uses a separate simulator with stable, single-burst, recurrent, and decaying demand in five-minute slots. The displayed run fixes seed 261000, a 24-hour horizon, 24 candidates, and a 12 GPU-hour budget. Benefits accrue af-ter the completion slot and decay with artifact age. Costs, completion delays, and queue replacement are shared. For the finite candidate set 𝒥 , let 𝑘 𝑗 be candidate 𝑗 ’s com-pletion slot, 𝑏 𝑗,𝑘 its simulated benefit in slot 𝑘 , and 𝑐 𝑘 the cost charged in that slot. Set 𝑘 𝑗 = ∞ for unfinished candidates. With initial value 𝐺(−1) = 0 , summing slot increments and exchanging finite sums yields 
+
+𝐺(𝐾 ) = 
+
+> 𝐾
+
+∑
+
+> 𝑘=0
+
+[𝐺(𝑘) − 𝐺(𝑘 − 1)] =
+
+> 𝐾
+
+∑
+
+> 𝑘=0
+
+[∑ 
+
+> 𝑗∈ 𝒥
+
+1{𝑘 > 𝑘 𝑗 }𝑏 𝑗,𝑘 − 𝑐 𝑘 ]= ∑ 
+
+> 𝑗∈ 𝒥 ∶ 𝑘 𝑗 <𝐾 𝐾
+
+∑ 
+
+> 𝑘=𝑘 𝑗 +1
+
+𝑏 𝑗,𝑘 −
+
+> 𝐾
+
+∑
+
+> 𝑘=0
+
+𝑐 𝑘 .
+
+(C.7) Completion slots are nonnegative integers when finite, and an empty sum is zero. The final expression includes only candidates completed before 𝐾 , with no benefit in the com-pletion slot. All charged costs remain, including costs of un-finished work. Zero background share can mean capacity gating, budget exhaustion, or no pending work; previously completed artifacts can still contribute benefits. Exp. CE uses an exponential-utility certainty equivalent, while the conservative rule discounts reuse, qualification, and unit benefit. Their final synthetic net values are 159.89 and 163.16 for this fixed seed. A single trace illustrates de-layed amortization and the accounting convention; it does not establish a distribution-wide policy ranking or measure real capability gains from the simulated work. D Finite Model: Specification and Guarantees 
+
+The finite experiment in Section 6.1 compares execution plans under common information, transitions, prices, and return constraints. Exact dynamic programming optimizes this action model; unmodeled arrivals, candidates, and run-time mechanisms remain outside its scope. 
+
+D.1 Scenario Grid and State Semantics 
+
+Each scenario contains one synthetic capability. Its work-size parameter is 30, 60, 120, or 180 s of construction and validation, with completed and durable progress set by the initial state. The primary grid uses a 5 s work quantum. Ta-ble D.1 lists the six ordered calendars; adjacent windows are separated by 20 s, and service must be restored by each win-dow’s end. We set the first window’s start to zero. 
+
+Table D.1. Ordered window durations in the finite model. Adjacent windows have a 20 s gap; the single continuous window has no inter-window gap.        
+
+> Calendar Window durations (s) Front-loaded 240, 80, 80, 80 Back-loaded 80, 80, 80, 240 Alternating 120, 240, 120, 240 Fragmented 80, 80, 80, 80 Uniform 160, 160, 160, 160 Continuous 480
+
+Post-publication benefit rates are 0.1, 0.25, 0.5, 1, or 2 s-eq./s, and the benefit horizon ends 120 or 480 s after the last window. Each combination is evaluated with cold and warm recovery and four initial states: fresh, half-complete with unsaved work, half-complete with saved work while active, and half-complete with saved work in service mode. The dis-tinction between completed and durable progress controls what survives interruption; active states incur return costs even when abandoned. The Cartesian product has 6×4×5×2×2×4 = 1920 scenar-ios. The configuration is frozen and hashed before computa-tion. Means over this complete grid describe its specified mixture of cases; they are not estimates of how frequently those cases occur in a production workload. 
+
+D.2 Transition Costs and Exact Evaluation 
+
+Cold and warm recovery take 69.988 and 0.487 s, using three-run SGLang means. Save and load take 68.075 and 47.748 ms from an independent LoRA microbenchmark. These de-lays remain exact wall-clock costs even though progress ad-vances in discrete quanta. Execution and recovery cost one s-eq. per second. Warm recovery additionally prices 6.383 GiB of incremental host PSS at 0.01 s-eq. per GiB-second, or 0.06383 s-eq. per second of charged residency. The measurements come from separate experiments. The memory price is assumed, unmeasured entry and release delays are zero, and resident-device-memory effects on throughput are not fitted. A residency bill depends on re-tained memory and retention time; recovery latency alone cannot determine net value. At window 𝑘 , a feasible macro-action must satisfy Equa-tion (10), including loading, checkpointing when selected, and the return path. Unsaved progress is discarded on a re-turn without checkpointing. Waiting in service mode adds no recovery cost. Publishing at 𝑡 𝑝 settles the remaining ben-efit as Φ(𝑡 𝑝 ) = 𝑔 (𝐻 − 𝑡 𝑝 )+ and still charges the publication action’s return. Abandonment earns no capability benefit but pays any required return. Never can therefore have neg-ative value when initially active. 
+
+Finite-stage assumptions. Index stages by 𝑘 = 0, … , 𝑇 − 1. The state contains the stage and all information determin-ing transitions and rewards. Each action set 𝒜 𝑘 (𝑠) is finite, nonempty, and return-feasible. Every nonterminal action advances one stage, excluding zero-duration cycles. Publi-cation and abandonment enter an absorbing state with zero subsequent rewards. All rewards are finite, and publication benefit is credited only to the publishing action. Let 𝐹 𝑘 (𝑠, 𝑎) be the successor and 𝑅 𝑘 (𝑠, 𝑎) the net reward. A feasible policy 𝜋 selects 𝑎 𝑘 = 𝜋 𝑘 (𝑠 𝑘 ) ∈ 𝒜 𝑘 (𝑠 𝑘 ). Starting from 𝑠 𝑘 = 𝑠 and following 𝑠 𝑗+1 = 𝐹 𝑗 (𝑠 𝑗 , 𝜋 𝑗 (𝑠 𝑗 )) , its value satisfies 
+
+𝑉 𝜋 𝑘 (𝑠) = 
+
+> 𝑇 −1
+
+∑
+
+> 𝑗=𝑘
+
+𝑅 𝑗 (𝑠 𝑗 , 𝜋 𝑗 (𝑠 𝑗 )) = 𝑅 𝑘 (𝑠, 𝜋 𝑘 (𝑠)) + 
+
+> 𝑇 −1
+
+∑
+
+> 𝑗=𝑘+1
+
+𝑅 𝑗 (𝑠 𝑗 , 𝜋 𝑗 (𝑠 𝑗 )) = 𝑅 𝑘 (𝑠, 𝜋 𝑘 (𝑠)) + 𝑉 𝜋 𝑘+1 (𝑠 𝑘+1 ). 
+
+(D.1) The empty terminal sum gives 𝑉 𝜋 𝑇 = 0 . For a proposed first action 𝑎 , write 𝑠 𝑎 = 𝐹 𝑘 (𝑠, 𝑎) and let 𝜌 range over feasible continuation policies from stage 𝑘 + 1 . Optimizing the first action and then its continuation gives 
+
+𝑉 ∗𝑘 (𝑠) = max  
+
+> 𝑎∈ 𝒜 𝑘 (𝑠), 𝜌
+
+{𝑅 𝑘 (𝑠, 𝑎) + 𝑉 𝜌 𝑘+1 (𝑠 𝑎 )} = max  
+
+> 𝑎∈ 𝒜 𝑘 (𝑠)
+
+{𝑅 𝑘 (𝑠, 𝑎) + max  
+
+> 𝜌
+
+𝑉 𝜌 𝑘+1 (𝑠 𝑎 )} = max  
+
+> 𝑎∈ 𝒜 𝑘 (𝑠)
+
+{𝑅 𝑘 (𝑠, 𝑎) + 𝑉 ∗𝑘+1 (𝑠 𝑎 )}. 
+
+(D.2) The finite reachable decision tree ensures that the maxima exist. Backward evaluation from 𝑉 ∗𝑇 = 0 gives the exact fea-sible optimum. Policy comparisons hold transitions, termi-nal values, and cost accounting fixed. D.3 Policy Improvement and Scoring Error 
+
+Retain the finite-stage assumptions above and the reference 
+
+𝜋 0 from Equation (11). At each state, let the candidate set 
+
+𝒞 𝑘 (𝑠) ⊆ 𝒜 𝑘 (𝑠) contain the feasible reference action 𝜋 0,𝑘 (𝑠) .Define the exact reference-continuation score and rollout choice by 
+
+𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎) = 𝑅 𝑘 (𝑠, 𝑎) + 𝑉 𝜋 0
+
+> 𝑘+1
+
+(𝐹 𝑘 (𝑠, 𝑎)), 𝜋 𝑅,𝑘 (𝑠) ∈ arg max   
+
+> 𝑎∈ 𝒞 𝑘 (𝑠)
+
+𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎). (D.3) Scores use accurate transitions, rewards, and reference val-ues. Ties retain the reference whenever it maximizes the score. The candidate set may omit other feasible actions without weakening the reference-relative guarantee. 
+
+Proof of Proposition 1. At stage 𝑇 , both policies have zero continuation value. Assume 𝑉 𝜋 𝑅 
+
+> 𝑘+1
+
+(𝑠 ′) ≥ 𝑉 𝜋 0
+
+> 𝑘+1
+
+(𝑠 ′) for every reachable state at the next stage. Fix a stage-𝑘 state 𝑠 and abbreviate 𝑎 𝑅 = 𝜋 𝑅,𝑘 (𝑠) , 𝑎 0 = 𝜋 0,𝑘 (𝑠) , and 𝑠 𝑅 = 𝐹 𝑘 (𝑠, 𝑎 𝑅 ).Then 
+
+𝑉 𝜋 𝑅  
+
+> 𝑘
+
+(𝑠) = 𝑅 𝑘 (𝑠, 𝑎 𝑅 ) + 𝑉 𝜋 𝑅 
+
+> 𝑘+1
+
+(𝑠 𝑅 )
+
+> (i)
+
+≥ 𝑅 𝑘 (𝑠, 𝑎 𝑅 ) + 𝑉 𝜋 0
+
+> 𝑘+1
+
+(𝑠 𝑅 )= 𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎 𝑅 )
+
+> (𝑖𝑖)
+
+≥ 𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎 0)= 𝑉 𝜋 0 
+
+> 𝑘
+
+(𝑠). 
+
+(D.4) The outer equalities evaluate each policy. Step (i) uses the induction hypothesis at 𝑠 𝑅 ; step (ii) uses score maximization and 𝑎 0 ∈ 𝒞 𝑘 (𝑠) . Backward induction gives 𝑉 𝜋 𝑅  
+
+> 𝑘
+
+(𝑠) ≥ 𝑉 𝜋 0 
+
+> 𝑘
+
+(𝑠) 
+
+at every reachable stage and state. □
+
+A gap to 𝑉 ∗𝑘 can remain because rollout scores use the reference continuation rather than an optimal continuation. 
+
+Bounded scoring error. Now let ̂ 𝑄 𝑘 estimate the same true scores. Assume a uniform bound |̂𝑄 𝑘 (𝑠, 𝑎) − 𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎)| ≤ 𝜖 with 𝜖 ≥ 0 , covering every candidate and reference action at all states reachable under the considered policies. At a fixed (𝑘, 𝑠) , suppress those indices and set 𝑒 𝑎 =̂ 𝑄(𝑎)−𝑄 𝜋 0 (𝑎) .Define 𝐴(𝑎) = 𝑄 𝜋 0 (𝑎) − 𝑄 𝜋 0 (𝑎 0) and ̂ 𝐴(𝑎) =̂ 𝑄(𝑎) −̂ 𝑄(𝑎 0).The two score errors imply 
+
+𝐴(𝑎) = [̂𝑄(𝑎) − 𝑒 𝑎 ] − [̂𝑄(𝑎 0) − 𝑒 𝑎 0 ]=̂ 𝐴(𝑎) − 𝑒 𝑎 + 𝑒 𝑎 0
+
+≥̂ 𝐴(𝑎) − |𝑒 𝑎 | − |𝑒 𝑎 0 |≥̂ 𝐴(𝑎) − 2𝜖. 
+
+(D.5) Define a guarded policy 𝜋 𝐺 that selects a replacement 𝑎 ∈ 
+
+𝒞 𝑘 (𝑠) only if ̂ 𝐴(𝑎) > 2𝜖 and otherwise retains 𝑎 0. An ac-cepted replacement has 𝐴(𝑎) > 0 by Equation (D.5); retain-ing 𝑎 0 gives 𝐴(𝑎 0) = 0 . Hence every decision has a true reference-relative score at least zero. 
+
+Policy guarantee with estimated scores. The terminal values again coincide. Assuming improvement at every next-stage state and writing 𝑎 𝐺 = 𝜋 𝐺,𝑘 (𝑠) , 𝑠 𝐺 = 𝐹 𝑘 (𝑠, 𝑎 𝐺 ), we obtain 
+
+𝑉 𝜋 𝐺  
+
+> 𝑘
+
+(𝑠) = 𝑅 𝑘 (𝑠, 𝑎 𝐺 ) + 𝑉 𝜋 𝐺 
+
+> 𝑘+1
+
+(𝑠 𝐺 )≥ 𝑅 𝑘 (𝑠, 𝑎 𝐺 ) + 𝑉 𝜋 0
+
+> 𝑘+1
+
+(𝑠 𝐺 )= 𝑄 𝜋 0 
+
+> 𝑘
+
+(𝑠, 𝑎 𝐺 )= 𝑉 𝜋 0 
+
+> 𝑘
+
+(𝑠) + 𝐴(𝑎 𝐺 )≥ 𝑉 𝜋 0 
+
+> 𝑘
+
+(𝑠). 
+
+(D.6) Backward induction therefore extends the local score condi-tion to the value of the whole guarded policy. This argument requires the error bound wherever the policy can visit, in-cluding states reached after earlier replacements. □
+
+The experiment uses accurate scores; bounds on online estimation errors require separate validation. 
+
+D.4 Paired Comparisons and Resolution 
+
+The informative policy difference is 𝑉 𝜋 𝑅 (𝑠) − 𝑉 𝜋 0 (𝑠) under identical state and calendar inputs. Separate gaps to 𝑉 ∗(𝑠) 
+
+reveal whether both policies are suboptimal. Table D.2 re-ports the full grid and the finer-quantum check. All 91 strict improvements in the primary grid involve cold recovery, while all 960 warm-recovery cases tie with Costed Window. Rollout matches DP in 1907 cases; the other 13 have a maxi-mum gap of 124.836 s-eq. A small mean gap therefore does not imply uniform near-optimality. 
+
+Table D.2. Rollout versus Costed Window, with no regres-sions. Mean DP gaps use s-eq.; 1 s cases start fresh.         
+
+> Evaluation Wins / ties Rollout gap Costed Window gap Full grid, 5 s 91 / 1829 0.246 5.369 Fresh only, 1 s 27 / 453 05.869
+
+The 1 s experiment refines only the 480 fresh-candidate cases, holding their other parameters fixed. Its zero rollout gap establishes agreement with DP on that finer finite action set. It does not establish an optimum in continuous time, cover partially completed initial states, or prove that rollout is optimal for other calendars.

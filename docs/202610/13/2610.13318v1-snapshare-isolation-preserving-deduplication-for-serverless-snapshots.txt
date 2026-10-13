@@ -1,0 +1,424 @@
+Title: SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots
+
+URL Source: https://arxiv.org/pdf/2610.13318v1
+
+Published Time: Mon, 12 Oct 2026 01:00:12 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots 
+
+## Leonid Kondrashov 
+
+NTU Singapore Singapore 
+
+## Likun Zhang 
+
+NTU Singapore Singapore 
+
+## André Filipe do Pilar de Jesus 
+
+Instituto Superior Técnico, University of Lisbon Portugal 
+
+## Hans Pistor 
+
+AWS United States 
+
+## Marco Cali 
+
+AWS United Kingdom 
+
+## Riccardo Mancini 
+
+AWS United Kingdom 
+
+## Rodrigo Bruno 
+
+INESC-ID, Instituto Superior Técnico, University of Lisbon Portugal 
+
+## Dmitrii Ustiugov 
+
+NTU Singapore Singapore 
+
+## Abstract 
+
+The efficiency of serverless computing fundamentally de-pends on rapid function startup, a challenge increasingly ad-dressed by restoring from virtual machine snapshots. How-ever, because content deduplication techniques can open timing-channel attacks that leak sensitive tenant data, pro-duction platforms like AWS Lambda instead enforce strict, zero-sharing isolation between snapshots of different ten-ants. While secure, this isolation precludes the deduplication of common infrastructure components, wasting per-worker cache capacity and exacerbating cold-start latency through inefficient remote fetching. Our characterization reveals that non-sensitive, shareable infrastructure accounts for roughly 70% of a typical snapshot’s contents and, on average, about 50% of its working set. We present SnapShare, a cluster-wide snapshot manage-ment system that co-designs storage and caching to exploit this commonality without compromising sensitive data isola-tion. SnapShare classifies a snapshot page as shareable only when its full content matches that of a page from a provider-approved source; any non-matching content is treated as iso-lated private content. Common infrastructure components are selectively deduplicated and pinned across the cluster’s worker nodes, while private data remains strictly isolated and is eagerly fetched as part of the tracked working set, falling back to on-demand retrieval only for pages that fall outside it. Implemented as an extension to Knative, Snap-Share reduces end-to-end tail request slowdowns by 10–29% compared to traditional working-set and chunk-based plat-forms. It also reduces remote storage requirements by 39% and local cache footprints by 38%, reducing network retrieval payloads and bounding worst-case fetch delays by 10 ×.Remote Chunk Storage Controller 
+
+> pass chunk(s)
+> Worker node
+> Page Fault Handler MicroVM
+> insert
+> the WS handle a
+> page fault retrieve chunk(s)
+> Guest memory
+> Local Chunk Cache
+> check the cache
+
+Figure 1. Snapshot restoration through a worker-local cache. A cold start fetches missing state from remote storage; du-plicate copies of common infrastructure consume capacity in both tiers. 
+
+## 1 Introduction 
+
+Serverless elasticity is limited by how fast function instances are created during workload changes [8]. Platforms such as AWS Lambda [6] accelerate function instance cold starts by restoring virtual machines from snapshots. As Figure 1 illustrates, workers cache snapshot chunks locally and fetch missing ones from remote storage. The capacity of this cache determines how much state can be reused during a cold start. However, snapshots of different functions contain duplicate copies of common infrastructure data found in popular con-tainer and base VM images. Duplicate snapshot data wastes remote storage and displaces useful state from worker caches, forcing more cold starts and remote state retrieval. Production platforms store VM snapshots encrypted in remote storage [6], but encryption alone does not prevent deduplication-induced disclosure: reusing a victim’s cached content can change an attacker’s retrieval time, revealing the presence of sensitive state or cryptographic keys [18, 42, 45, 50]. Production platforms thus take a conservative isolation approach that forces separate copies across secu-rity domains [3, 25], treating all snapshot state (including      
+
+> 1arXiv:2610.13318v1 [cs.DC] 9 Oct 2026 Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov 050 100
+> Mean composition (%) Full snapshot Working set
+> Base Snap Rootfs Image Rest
+
+Figure 2. Mean source composition of full snapshots and cold-start working sets. Base-snapshot, rootfs, and container-image matches account for roughly 70% of nonzero full-snapshot content and 50% of working sets. Source compo-sition is distinct from the duplicate-storage fraction in Fig-ure 4a. public infrastructure state) as private state (Figure 3a). While container-based platforms already share infrastructure ar-tifacts to accelerate cold starts [20], guest memory snap-shots complicate this opportunity by intermixing infras-tructure bytes with customer-specific run-time state. Prior snapshot-deduplication systems, including SnapStore [36] and Medes [41] depicted in Figure 3b, demonstrate the snap-shot deduplication potential but lack the critical capability to distinguish the state that is safe to share from the sensitive data. Instead, boths systems treat all content as shareable, opening up surface for timing attacks. 
+
+Key Insights. To quantify the shareable infrastructure snapshot state, we compare and classify the snapshot pages across three reference sources accessed during execution, when running a mix of 17 vSwarm [5] functions written in Go, Python, and Node.js (methodology detailed in §4.1). We differentiate all remaining pages ( Rest ) and conservatively at-tribute them to the application itself. These sources include the pages found in the booted guest-OS (base) snapshot, VM root filesystem, and function container image. Also, we record the working set , i.e., the pages accessed after restora-tion and initial request execution. Figure 2 shows that infras-tructure matches account for roughly 70% of a nonzero snapshot’s content and 50% of the working set in a mix of workloads. These matches identify potential sharing op-portunities, not automatic permission to share or bytes saved. Our detailed breakdown (§2.2) shows that base-snapshot and rootfs matches recur ubiquitously across functions, whereas image matches recur mainly among functions using the same language runtime. 
+
+Key contribution: page attribution that enables se-lective deduplication. We present SnapShare ,1 a snapshot management system that co-designs remote storage and worker-local caching around a page-level sharing boundary. When a function is deployed, a snapshot is taken and an of-fline classifier compares the contents of each 4 KB snapshot page against provider-approved references. Only complete matches are Shared; every other page is Private (Fig-ure 3c). A page loaded from an approved image but modified     
+
+> 1We will release the code and the toolchain upon publication. Shareable Private
+> VM1 VM2
+> Remote Storage Worker Node Cache
+> GM1 GM2 GM3 Virtual Machine Guest Memory File - Timing channel GM2 GM1
+
+(a) No cross-tenant sharing, as in AWS Lambda [14], REAP [47]. VM1 VM2  
+
+> Remote Storage Worker Node Cache
+> Shared Shared
+
+(b) Unrestricted deduplication, as in Medes [41], SnapStore [36]. Recording phase     
+
+> VM1 VM2
+> Remote Storage Worker Node Cache
+> Shared GM1 GM2 GM3 Sh. GM1 GM2 GM3
+> Approved content
+> GM1
+> Classifier
+
+(c) SnapShare. 
+
+Figure 3. Snapshot sharing policies and their capacity cost. (a) Separate copies duplicate common infrastructure. (b) Un-restricted deduplication also shares private content. (c) Snap-Share deduplicates approved reference content while retain-ing separate private content. to contain application state stays private. The SnapShare classifier checks what the page contains at snapshot time; it does not assume that all pages loaded from an approved image remain shareable. Independently, deployment-time 
+
+userfaultfd profiling identifies the Working Set for eager retrieval and the remaining Lazy pages. 
+
+Attribution exposes a useful, operator-controlled sharing boundary. The trusted operator approves reference content and acceptable disclosure of its use; private pages remain tenant-separated even when equal (§2.3). Operators can exclude libraries or images, including in response to published CVEs. The source-recurrence study (§2.2) explains why this remains useful: common base-snapshot and rootfs pages supply much of the reuse. With container-image shar-ing disabled, cache savings relative to the best safe baseline, Sabre [31], decline from 38% to 31% (§4.3.1). Image sharing therefore provides an additional benefit, but is not required to obtain substantial savings. SnapShare stores approved shared components once across snapshots and pins common components in worker caches according to operator policy. Private components remain 
+
+> 2SnapShare
+
+cacheable for reuse by their owning function, but retain ten-ant and function-version identity rather than being shared across tenants. Both storage and caches distinguish shared and private working-set files from shared and private lazy pages. During a cold start, the controller reuses resident shared components and eagerly fetches the missing private working set; the page-fault handler serves accesses outside the recorded working set on demand at 4 KB granularity. This avoids placing every initial page fetch on the criti-cal path while preserving the sharing boundary. SnapShare builds on working-set coalescing and eager restoration from REAP [47] and FaaSnap [15]. Selective sharing adds capacity for more private working sets and avoids repeated infrastruc-ture fetches on misses; the smaller payload also complements compression techniques such as Sabre [31]. We implement SnapShare atop vHive [47] and Firecracker [14], evaluating 17 vSwarm [5] functions and a workload driven by 700 Azure Functions [43] trace profiles. All evaluated systems use streaming compression. Relative to the tenant-isolated Sabre [31] baseline, which combines coalesced working-set retrieval with streaming compression, SnapShare reduces remote storage by 39% and cache footprint by 38% (§4.3.1). SnapShare reduces the geometric mean of per-function P99 request slowdowns by 29% versus the chunk-based baseline representative of a production AWS Lambda baseline [4] and 10% versus Sabre (§4.2). Its storage and cache footprints remain within 6% and 3% of the idealized unsafe, fully dedu-plicated baseline, which also shares all snapshot content. Our contributions include: 
+
+• A characterization study showing that common infras-tructure accounts for approximately half of cold-start work-ing sets, exposing substantial reuse opportunities even when private application state cannot be shared. 
+
+• A page-attribution method that enables policy-controlled sharing through complete matches to approved reference content, with all other pages private by default. 
+
+• A classification-driven storage and cache co-design de-livering 39% lower remote-storage requirements and 38% smaller cache footprints than Sabre, with 10–29% lower aggregate tail request slowdown than safe baselines. Stor-age and cache footprints remain within 6% and 3% of un-safe fully deduplicated baseline, respectively. Even without container-image sharing, the system reduces cache foot-print by 31% relative to Sabre [31]. 
+
+## 2 Background and Motivation 
+
+Snapshot restoration trades repeated initialization for state retrieval. Its efficiency depends on how much state workers can reuse locally and how much they must fetch remotely. We first explain why duplicated guest memory makes this trade-off expensive and quantify the opportunity to recover capacity through selective deduplication. Then we identify the security constraints and define our security model. No-dedup Full-dedup 0.0 0.5 1.0        
+
+> Relative storage (nonzero pages)
+> 43.9%
+> Unique Duplicates
+> (a) Nonzero snapshot storage. 02468
+> Cache per worker (GiB)
+> 010 20
+> Mean hit rate (%)
+> No-dedup Full Dedup (b) Working-set cache hit rate.
+
+Figure 4. Cost of retaining duplicate content. (a) Duplicates occupy 43.9% of nonzero snapshot storage without dedu-plication. (b) Full deduplication improves mean cache hit rate at constrained per-worker capacities; the gap narrows as capacity increases. Full deduplication is an unsafe oracle that also shares private content. 
+
+2.1 Duplication and Local Cache Efficiency 
+
+Serverless platforms create new instances as demand grows. Functions are commonly deployed as container images and executed in lightweight VMs such as Firecracker [14], with image contents made available through the VM’s filesys-tem [1, 20]. A snapshot captures initialized guest memory and virtual disk state, avoiding repeated OS and application startup. As Figure 1 shows, the selected worker retrieves snapshot content through its local cache and fetches miss-ing state remotely. Local cache contains snapshot content organized in chunks, pages, or working sets [15, 47]. 2
+
+In production platforms, upon a cold start, the system retrieves state in chunks [4, 16], potentially transferring un-accessed pages alongside accessed ones. REAP [47] and FaaS-nap [15] reduce this overhead by recording and coalescing 
+
+working-set pages for eager retrieval. However, each tenant’s working set still contains duplicate copies of the same infras-tructure. Providers also limit snapshot-retrieval bandwidth to leave capacity for application traffic [3], making avoidable remote fetches particularly undesirable. Duplication consumes capacity in both remote storage and worker caches. Figure 4a compares storage of a sys-tem with no cross-snapshot deduplication against a system with unrestricted full deduplication: duplicate copies account for 43.9% of the nonzero page content. Full deduplication eliminates these copies but also shares private content; we use full deduplication as an unsafe oracle for estimating the capacity-saving opportunity, not as a deployable policy. On a worker, duplicate copies compete with other func-tions’ working sets for a fixed cache budget. As requests alter-nate among functions, admitting one working set can evict another despite their common content, causing repeated evic-tion and refetching. Figure 4b quantifies this effect using the      
+
+> 2A working set comprises the pages accessed while restoring an instance and serving its initial execution; it is a subset of the full snapshot. 3Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov 050% 100%
+> Composition of whole snapshots
+> Base Snap Rootfs Image Rest Ubiquitous Occasional Unique AES-Go AES-Py AES-NJS Auth-Go Auth-NJS Auth-Py Fib-Go Fib-NJS Fib-Py Currency Email Prod. Cat. Shipping ImgRot-Go ImgRot-Py VideoProc VideoAn 050% 100%
+> Composition of working sets
+
+Figure 5. Existing characterization of full snapshots (top) and cold-start working sets (bottom), broken down by match-ing reference source and recurrence across functions. The full-snapshot breakdown excludes zero pages. Ubiquitous content occurs in all tested functions; occasional content oc-curs in several; unique content occurs in one. Source matches identify sharing opportunities subject to provider approval. trace-driven workload described in §4.1. A hit requires the entire working set to be local; otherwise, restoration must fetch missing content. At approximately 2 GiB per worker, full deduplication achieves a mean hit rate of about 21%, compared with about 14% without deduplication. The curves approach similar hit rates at larger capacities: duplication is most costly when cache space is constrained. Isolation per-mits reuse by the same function, but prevents its cached copy from serving equal content belonging to another tenant. 
+
+2.2 The Measured Opportunity for Selective Sharing 
+
+Using the same methodology (§4.1) as in Figure 2, we ex-amine recurrence within each source category by captur-ing page accesses using userfaultfd . The base snapshot is captured before adding the function image; rootfs and image references contain the corresponding filesystem con-tent. Unmatched content is labeled Rest ,3 independently of whether a page belongs to the working set or the lazy re-mainder. We classify content as ubiquitous if it appears in all tested functions, occasional if it appears in multiple but not all functions, or unique if it appears in only one. Source matching measures correspondence to reference bytes; re-currence measures reuse potential. Neither recurrence nor source membership alone constitutes a security approval. Figure 5 expands the aggregate composition in Figure 2 into per-function source and recurrence breakdowns. The full-snapshot population describes stored content, whereas   
+
+> 3The Rest category is distinct from the access-based division into working-set and lazy pages: unmatched pages may occur in either.
+
+the working-set population describes content relevant to lo-cal caching and restoration. Their recurrence patterns reveal which source matches can yield reuse across functions. Infrastructure matches account for roughly 70% of nonzero snapshot content and 50% of working sets (Figure 2). Figure 5 further shows that most base-snapshot and rootfs matches are ubiquitous, whereas image matches recur less uniformly, often among functions using the same runtime: with up to 52% of the content that is present in all of the snapshots and 67% of the content present in more than half of them. Simi-larly, the working set has up to 29% of ubiquitous content. The aggregate source fractions quantify the opportunity; the recurrence breakdown explains why common base infras-tructure is especially useful for cross-function reuse. 
+
+2.3 Security Model for Snapshot Sharing 
+
+Our security model focuses on confirming private snapshot content through cross-tenant deduplication. We trust the provider, its snapshot service, and its reference-approval policy. An adversarial tenant can execute arbitrary code in its own VM, influence its snapshot contents, and measure timing while co-located with a victim on the same worker. It cannot directly read victim memory or internal provider cache metadata. An attacker can place candidate content in its snapshot and use the timing difference between local reuse and remote retrieval to infer whether a victim populated a matching cache entry. Such confirmation-of-presence attacks [18, 42, 45, 50] motivate production restrictions on cross-domain memory sharing [19, 25, 40]. Encryption alone does not hide observable reuse. Private snapshot content must remain tenant-separated even when its bytes match; reuse by the owning function remains permitted. Our model permits disclosure of the pres-ence or use of approved content, which the operator must deem acceptable. Container-image sharing [20] motivates this boundary, but does not establish protection for arbi-trary guest-memory access patterns. Secrets embedded in approved artifacts and secret-dependent runtime accesses are outside the scope of this work and require exclusion or additional safeguards. We do not claim protection against all shared-hardware or resource-contention timing channels; conservative approval and private treatment by default are explicit assumptions. These observations motivate separating sharing eligibility from retrieval granularity. Approved infrastructure can be stored once and common components retained locally, while private content remains tenant-separated. Independently, working-set profiling determines which pages to retrieve eagerly. SnapShare carries these decisions through its storage layout, worker caches, and restoration path, with sharing eligibility governed by the provider’s policy. 
+
+> 4SnapShare
+
+## 3 SnapShare 
+
+The characterization in §2.2 motivates co-designing stor-age and cache layouts that enable reuse of approved infras-tructure content, retain tenant identity for private content, and independently use working-set profiles to choose ea-ger rather than lazy retrieval. SnapShare incorporates these decisions through three design principles: 
+
+• Content-Match Classification over Opaque Chunks: 
+
+Rather than treating snapshot memory as an opaque blob, SnapShare compares each page’s complete content against provider-approved sources. Only exact matches are shared; all non-matches are private. 
+
+• Selective Sharing: By decoupling the public data from the private state, SnapShare allows non-sensitive compo-nents to be aggressively deduplicated and pinned across worker nodes, while maintaining strict, function-exclusive isolation for sensitive components. 
+
+• Integration with Profile-Guided Fetching: SnapShare incorporates working-set coalescing as in REAP [47] and FaaSnap [15] to retrieve entire working sets of pages effi-ciently at once, with individual 4 KB fetches on demand for the remainder. At a high level, SnapShare operates across both the con-trol plane and the data plane. In the control plane, an offline classifier partitions the snapshot data into two dimensions (Figure 6): exact content matches against provider-approved sources and access patterns. A page is Shared only if its complete content exactly matches a page from an approved source; every non-matching page is Private . Profiling identi-fies pages accessed during initialization and initial requests, as in prior works [15, 47], that are coalesced into Working-Sets that optimize retrieval; the remaining pages ( Lazy ) are fetched on-demand at the page-level granularity. In the data plane, this classification dictates the physical layout of both 
+
+Remote Storage and the worker local caches (see Figure 7). During a cold start, the local Controller checks the cache for the shared components and orchestrates the targeted retrieval of the missing private components. A Page Fault Handler then utilizes userfaultfd (uffd ) to map both the cached shared state and the fetched private state into the VM’s memory, allowing execution to resume once the re-quired state is available. 
+
+3.1 Offline Snapshot Content Classification 
+
+When a new function version is deployed, SnapShare exe-cutes an asynchronous recording phase. This profiling occurs entirely off the critical path of live user invocations, similar to the deployment-time snapshotting in AWS Lambda Snap-Start [6]. To execute the recording, the control plane provi-sions a dedicated profiling MicroVM on a worker node. This instance is bootstrapped by restoring a VM from a generic, non-sensitive base image (comprising the booted guest OS Memory Snapshot Classifier Access Pattern     
+
+> Shareable Private Working Sets Lazy Pages
+> Commom infrastructure content can be deduplicated and cached Sensitive content is not shared across tenants Frequently accessed content is coalesced and eagerly loaded upon restore Infrequently accessed content is lazily served
+> vs. vs.
+> Content Provenance
+
+Figure 6. Offline snapshot classification by approved-content matching and membership in the recorded working set. A page is shareable when its current contents match an approved reference under the MD5-based match criterion; a modified page remains private if it no longer matches. and rootfs), then takes a snapshot after mounting the func-tion’s specific container image. To precisely capture the mem-ory access patterns, a local profiling agent monitors the VM’s guest memory using userfaultfd (uffd ). As the VM initial-izes the language runtime and loads the application code, every access to an unmapped memory page triggers a page fault, which the agent intercepts and logs. To record the working set for the profiling requests, the platform then routes a series of initial requests, such as developer-provided test payloads or synthetic health probes, to the running function [15, 47] The agent continues to trace all uffd faults during this request-serving window. The ag-gregate set of all pages faulted in during both the initializa-tion and the initial execution phases is explicitly recorded; these observed pages define the function’s profiled Working Set . Later requests may access additional pages, which are served on demand. Once recorded, the offline classifier computes an MD5 digest over each non-empty snapshot page and compares it with the digests of provider-approved reference pages, in-cluding the base snapshot and rootfs. The implementation uses equal MD5 digests as its page-content match criterion. Providers may also approve the exact contents of selected libraries or container images. The classification tests the snapshot page’s current contents, not which image origi-nally supplied it: only a page whose full content matches an approved source page is tagged Shared ; every unmatched page is tagged Private , including the pages initially supplied by a container image whose modified contents no longer match approved references. Second, pages accessed during the recording phase are tagged as the Working Set , while the unaccessed remainder is tagged as Lazy .
+
+3.2 Memory Management Granularity 
+
+Current production systems segment memory into rigid chunks (e.g., 512 KB), leading to data amplification and retrieval-granularity mismatch [17]. To avoid this established limi-tation, SnapShare incorporates profile-guided working-set coalescing [47] alongside its content-match classification.       
+
+> 5Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov Remote Storage
+> request
+> a page
+> Controller
+> retrieve the WS pass the WS
+> Worker node
+> Page Fault Handler MicroVM
+> insert
+> the WS
+> handle a page fault
+> retrieve a page
+> Guest memory
+> Restoration path Lazy paging path
+> Local Cache Working Sets Pages Private Private Shared Shared
+> check the cache
+> Working Sets Pages Private Private Shared Shared
+
+Figure 7. SnapShare’s storage and cache co-design that com-bines selective sharing and dual-granularity fetching. 
+
+Working Sets for Eager Loading: Following prior profile-guided retrieval designs [47], the recorded working-set pages are coalesced into files that preserve their shared or private classification. Coalesced working-set transfers amortize re-trieval overhead without fetching surrounding pages merely because they share a chunk. The profile predicts which pages to load eagerly; accesses outside that profile use the lazy path. 
+
+Lazy Pages for On-Demand Fetching: The pages that are not accessed during the recording phase are not coa-lesced. Instead, they are stored and managed at the granular-ity of individual 4 KB pages. Because these pages fall outside the predicted working set, they are fetched on demand if a post-restore page fault occurs, limiting transfer size without requiring the profile to cover every subsequent access. 
+
+3.3 Co-designed Cache and Storage Layout 
+
+To leverage the classifier output and effectively apply selec-tive sharing and dual-granularity fetching, SnapShare offers a co-designed storage and caching hierarchy (see Figure 7). Sharing eligibility is determined from snapshot-page con-tents before compression. On a cold start, the worker node overlaps transfer with decompression, so it must extract memory contents before loading them into guest memory. Compression changes the storage and transfer represen-tation, not a page’s shared/private ownership or working-set/lazy classification. 
+
+3.3.1 Remote Storage. The centralized repository is split into Working Set Storage , holding the coalesced files for the restoration path, and Lazy Pages Storage , holding individual pages for lazy retrieval. Shared lazy pages use content-based identifiers to enable reuse across snapshots; identifying equal content must satisfy the classifier’s content matching con-tract. Private components, however, are indexed alongside their unique tenant and function version identifiers to guar-antee tenant-level isolation. In sum, the remote storage lay-out is logically divided into four distinct sections: Shared Working Sets, Private Working Sets, Shared Lazy Pages, and Private Lazy Pages. 
+
+3.3.2 Worker Local Caches. On each worker node, the local cache mirrors the remote structure but is logically par-titioned based on content provenance. Crucially, SnapShare maps guest memory via userfaultfd (uffd ), hence the lo-cal cache operates entirely in user space. This architectural flexibility allows the local agent to implement a custom, provenance-aware caching/eviction policy: 
+
+Shared partition: stores content approved for cross-tenant reuse. The controller pins common base-snapshot and rootfs components to retain their reuse across functions. In our measurements, this pinned base state occupies less than 1% of cache capacity; this is a workload-specific footprint, not a bound on an arbitrary approved registry. 
+
+Private partition: stores every page that does not ex-actly match an approved source page, including sensitive, application-specific pages, and unapproved libraries. These pages remain strictly isolated per function. Private working sets are managed with LRU eviction under cache pressure, while pinned shared components remain resident. Sharing approval determines whether content may be reused across tenants; pinning separately determines which approved com-ponents are retained. 
+
+3.3.3 Restoration Flow. During a cold start, the controller checks which shared and private working-set components are resident and retrieves the missing components from re-mote storage. The page-fault handler restores the working set from these cached files. Subsequent accesses outside the recorded working set trigger individual page fetches through the local cache, with remote retrieval on a miss. Shared con-tent remains eligible for cross-tenant reuse; private content retains its tenant identity throughout this path. 
+
+3.4 Enforcing the Sharing Boundary 
+
+Our security model (§2.3) defines the trusted provider, the attacker’s capabilities, and the permitted leakage. SnapShare enforces that boundary through hash-based matching against approved references and tenant-scoped identifiers for private content. Equal private pages are not reusable across tenants; approved pages may be shared per provider policy. Source approval does not establish that an artifact con-tains no secrets or that its run-time accesses are secret-independent. Components with these risks require exclu-sion or additional safeguards, consistent with §2.3. Screen-ing tools [26, 30, 51] may inform that policy, but are not protections established by the page classifier itself. We emphasize that SnapShare is intended for use by op-erators as a framework for defining dynamic policies that determine which components are safe to share. Operators 
+
+> 6SnapShare
+
+can revise the registry of approved reference content as their security assessment changes. If a newly disclosed vulner-ability makes a component’s presence sensitive, operators must withdraw its sharing eligibility. Enforcing that pol-icy requires handling existing cached copies and snapshot references as well as future classifications. A possible re-vocation procedure is to disable cross-tenant cache reuse for the affected content while regenerating snapshot meta-data to point to tenant-private copies. This procedure should close the possible timing channel attack nearly instanta-neously. We evaluate both image-sharing policies: SnapShare includes deduplication of container-image content, whereas SnapShare- excludes it, as the lower and upper bounds of possible policies. The most restrictive image-sharing pol-icy leads to only a 10% increase in cache size (§4.3.1); the tail-slowdown comparison appears in §4.2. These compar-isons quantify the performance cost of a stricter policy, not revocation correctness or latency. 
+
+3.5 Implementation 
+
+We implement SnapShare atop vHive [47], extending its Knative and Kubernetes infrastructure. Function sandboxes execute as Firecracker MicroVMs [14]. We bypass Knative’s standard container initialization, redirecting cold-starts di-rectly into our custom snapshot retrieval pipeline. 
+
+Controller: We modify Knative’s Activator to intercept cold-start requests and route them to our custom node-level controller. Written in ∼3,000 lines of Go, the controller or-chestrates the control-plane restoration logic and executes the offline Classifier and the coalescer routine. The controller has no state that cannot be recovered from the global cluster state, making it easy to reconstruct after failures. 
+
+Remote Storage: We build the centralized repository using MinIO. To optimize the high-throughput, small-I/O workload required for serving individual 4 KB pages, we format the underlying storage nodes with the XFS filesystem, which empirically outperformed standard ext4 in our small-object retrieval evaluations. We set up remote storage to provide ms-scale chunk retrieval latencies, comparable to datacenter/AZ-level storage tier used for snapshots in AWS Lambda [20]. We apply compression to all of the content in the remote storage to match the storage savings and network transfer performance to match state-of-the-art works [31]. 
+
+Local Cache: The node-level cache runs as a user-space daemon managing NVMe drives. As designed in §3.3, the daemon explicitly pins shared components. Production en-vironments exhibit extremely low cardinality for the base state, 4 thus this pinned shared state consumes a negligible 
+
+> 4Major providers typically support only 5-7 standard language runtimes [10, 11, 13]. Developers overwhelmingly prefer these official images for their optimized performance and regular vulnerability checks [13, 17, 27, 38].
+
+fraction ( < 1%) of the node’s cache capacity in our eval-uations. The daemon enforces strict LRU eviction for all remaining private and on-demand state. 
+
+Page Fault Handler: Implemented in ∼1,000 lines of Go, the handler interfaces with Firecracker’s userfaultfd API. During eager restoration, it supplies decompressed working-set page contents to guest memory. For lazy accesses, it resolves faulting guest addresses through the recipe metadata and obtains the required page through the cache or remote retrieval path. 
+
+## 4 Evaluation 
+
+We evaluate SnapShare to demonstrate that selective, struc-tural snapshot deduplication enables rapid serverless cold-starts without compromising tenant isolation. Our experi-ments focus on answering thee main questions. First, what is the end-to-end tail latency and local cache hit efficiency of-fered by SnapShare (§4.2)? Second, what is SnapShare’s stor-age impact and performance breakdown during a cold-start (§4.3)? Third, validate working set estimation and measure how sensitive is SnapShare to network bandwidth (§4.4)? 
+
+4.1 Methodology 
+
+Hardware and Software Setup: We evaluate SnapShare on a CloudLab [7] cluster comprising 10 c6620 bare-metal nodes, except for latency and footprint profiling experiments, which are performed on a single worker and a single MinIO node. Each node is equipped with a 28-core Intel Xeon Gold 5512U (Emerald Rapids) processor clocked at 2.1 GHz, 128 GB of DDR5 RAM, and a 780 GB NVMe SSD. To accurately mimic a multi-tenant production cloud environment—where network bandwidth must be strictly provisioned to guarantee perfor-mance for user logic—we throttle the 100 Gbps NICs to 10% (10 Gbps) for all snapshot state downloads, unless otherwise specified. For the compression comparison in §4.4.2, we use a phoenixNAP [12] s5.x6.c3.medium bare-metal instance equipped with a 24-core Intel Xeon 6527P processor clocked at 2.1 GHz with SMT disabled, four Intel IAA devices, 256 GB of DDR5 memory, and two 2 TB NVMe SSDs. Worker nodes run Ubuntu Linux 24.04 (kernel v6.8). The cluster infrastructure is orchestrated using vHive v1.8.1, with Knative v1.13 running on Kubernetes v1.29. Function sand-boxes are instantiated as Firecracker MicroVMs v1.13 with kernel v5.10 inside, each configured with 1 vCPU and 512 MB of RAM (except for video processing and video analytics, which need 2 and 3 GiB, respectively). 
+
+Workload: For the trace-driven experiments (§4.2), we sample 700 Azure Functions [43] invocation profiles using In-Vitro [46], preserving the trace’s inter-arrival-time and execution-duration distributions. We map 17 vSwarm [5] benchmarks written in Go, Python, and Node.js to these pro-files by execution duration and memory footprint, replicat-ing them as independent functions. We replay the resulting 
+
+> 7Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov
+
+workload with In-Vitro v1.1 [2] to exercise cache contention and concurrent snapshot retrieval. For other experiments, we measure each function’s snapshot footprint and cold-start latency individually at one request per second. 
+
+Common Compression Settings: We apply compression to all evaluated systems as state-of-the-art methodology of improving the fetching [31]. We use zstd as fast, streaming software compression, overlapping with network transmis-sion latency. We use 8 decoders to parallelize the decom-pression. We evaluate the impact of choosing this specific compression against IAA-accelerated compression in §4.4.2. 
+
+SnapShare Configurations: We evaluate two versions of SnapShare: SnapShare , which deduplicates all the com-mon components, including container image, and SnapShare-,which does exclude the container-image content. These con-figurations estimate the best- and worst-case performance after applying the mitigations discussed in §3.4. 
+
+Baselines: We compare SnapShare with four baseline stor-age management and retrieval strategies for guest-memory snapshots. Chunks, Pages, and Sabre retain separate content across functions and permit reuse by requests of the same function; Full-Dedup is the explicitly unsafe exception. Snap-Share and SnapShare- share only provider-approved content, according to the policies above. 
+
+• Chunks: A chunk-based transfer unit and storage layout in both the remote storage and local cache, mirroring the de-sign of production systems like AWS Lambda SnapStart [4]. We configure the chunk size to 128 KB. 5
+
+• Pages: A page-based transfer unit and storage layout. This baseline minimizes redundant state transfers by fetch-ing state at the strict granularity of individual 4 KB pages, perfectly matching the underlying Linux memory manage-ment system. 
+
+• Sabre: A system representing state-of-the-art serverless cold start optimization system [31]. Implemented by inte-grating the working set into a single file [15, 47] and ap-plying streaming zstd compression. We evaluate the choice of the compression against original IAA-accelerated com-pression separately in §4.4.2. On a cache miss, it retrieves the full working set file and decompresses it on the fly. Re-maining on-demand page faults are served as individual 4 KB granularity. 
+
+• Full-Dedup: A system that employs full deduplication, representing prior works [36, 41] and estimating best-case performance. By construction, it does not satisfy our secu-rity model (§2.3), acting as an upper bound for performance. 
+
+4.2 End-to-End Performance 
+
+We first quantify the bottom-line reduction in end-to-end tail slowdown for user requests. To explain these performance 
+
+> 5We empirically determined 128 KB chunks to be the best-performing size because they saturate I/O bandwidth while limiting unnecessary data move-ment due to the chunk layout. Chunks Pages Sabre SnapShare-SnapShare Full Dedup 0.0 2.5 5.0 7.5 10.0
+> P99 slowdown (×)
+> ↑42×
+
+(a) End-to-End slowdown. 0 2 4 6 8 
+
+> Cache per worker (GiB)
+> 010 20
+> Mean function hit rate (%)
+> Sabre SnapShare− SnapShare Full Dedup
+
+(b) Working-set cache hit rate. 
+
+Figure 8. (a) Aggregate 99 -th percentile request slowdown on the 700-function trace under a 4 GB per-node cache limit. SnapShare reduces tail latency by combining dense caching with optimized remote fetch payloads. Lower is better. (b) Cache hit rate under varying per-node capacity limits for a realistic 700-function trace, spanning increasing levels of deduplication from Sabre through SnapShare-, SnapShare, and unsafe Full Dedup . Deduplication improves cache den-sity under constrained capacity, while all configurations ap-proach a similar saturation point. Higher is better. gains, we then examine how our structural deduplication improves local cache hit rates by maximizing storage density. 
+
+4.2.1 Tail Request Slowdown. To evaluate the ultimate impact of SnapShare’s architectural optimizations on user-facing performance, we measure the worst-case slowdown across all evaluated systems under a strictly fixed cache limit of 4 GB per worker node. Figure 8a illustrates the ag-gregate 99 -th percentile slowdown. 6 SnapShare reduces tail slowdown to 5.2, a 10% reduction relative to Sabre and a 29% reduction relative to Chunks . It performs close to the more restrictive SnapShare- configuration and the unsafe Full Dedup baseline: within 8%. SnapShare uses the limited local cache capacity to maximize immediate hits while minimizing the payload fetched on a miss, a network dynamic explored in §4.3.2. By bounding restoration penalties on both paths, SnapShare improves tail latency in multi-tenant serverless deployments. 
+
+4.2.2 Cache Hit Rate Efficiency. The end-to-end latency improvements observed above are heavily driven by cache density under strict capacity limits. To demonstrate this, we vary the local cache capacity for configurations spanning the deduplication spectrum: Sabre , SnapShare-, SnapShare, and unsafe Full Dedup . We omit Chunks and Pages because their per-chunk and per-page tracking mechanisms produce incomparable hit-rate definitions. In this experiment, a cache  
+
+> 6We calculate the per-invocation slowdown as the ratio of the end-to-end delay to the unloaded ideal execution latency for the function. We then compute the 99 -th percentile across all invocations for each function, taking the geometric mean of these tail slowdowns across the entire trace. 8SnapShare Chunks Pages Sabre SnapShare-SnapShare Full Dedup 0.0 0.1 0.2 Relative storage size
+> Snapshots Working sets
+
+(a) Remote storage usage Chunks Pages Sabre SnapShare-SnapShare Full Dedup 0.0 0.5 1.0 1.5 Relative cache requirements  ↑4.39× (b) Local cache requirements 
+
+Figure 9. (a) Remote storage capacity and (b) worker-node lo-cal cache capacity requirements for storing snapshots and co-alesced working set files across 17 representative serverless benchmarks. Values are normalized against the full snapshot sizes and Sabre baseline footprint for (a) and (b) respectively. By deduplication and explicitly pinning only low-cardinality shared components, SnapShare approaches the footprint of full deduplication. Lower is better. hit occurs if the restoration procedure finds the entire work-ing set contents (both shareable and private) in the local worker cache. On the other hand, a cache miss happens if part of the working set needs to be fetched from remote snapshot storage. Figure 8b shows that increasingly aggres-sive deduplication improves the hit rate when cache ca-pacity is constrained: SnapShare- shares provider-approved base infrastructure, SnapShare additionally shares approved container-image pages, and Full Dedup provides the unsafe upper bound. These configurations primarily differ before saturation. Once the cache is large enough to retain the work-load’s reusable working sets, all deduplicating configurations converge to a similar saturation point, with a maximum mean function hit rate of 24%. Thus, deduplication changes how efficiently the cache reaches the workload-imposed ceiling, rather than materially changing that ceiling. The satura-tion comes for all three deduplication policies at cache sizes within 10% of each other, and at half the cache size of Sabre .
+
+4.3 Per-Component Analysis 
+
+To pinpoint the exact sources of SnapShare’s improvements, we analyze both storage requirements and restoration per-formance. We start by estimating the storage and cache foot-prints. Following this, we decompose the cold-start latency into stages and evaluate which ones our system accelerates, supported by an analysis of the network retrieval sizes. 
+
+4.3.1 Storage Requirements. We first analyze the static storage footprint of the collected snapshots and coalesced working sets to quantify the space savings enabled by our selective deduplication architecture. 
+
+Remote Storage: Figure 9a illustrates remote-storage re-quirements normalized to full snapshot size. Chunks , Pages ,and Sabre require 17.5%, 17.4%, and 18.5% of the normalized Chunks Pages Sabre SnapShare-SnapShare Full Dedup All-local 0100 200 300     
+
+> Cold-start components (ms)
+> 121.2 293.1 54.4 44.3 43.4 43.8 30.6 Page Faults Execution Restoration Fetch + Decompression
+
+Figure 10. Cold-start latency breakdown when restoring the aes-go benchmark entirely from remote storage. Every configuration uses streaming compression, with decompres-sion overlapped with the network fetch and reported as one combined stage. SnapShare reduces this stage primarily by minimizing the compressed data transferred. Image-Go Image-Py Video Proc. VideoAn AES-Go AES-Py AES-NJS Auth-Go Auth-NJS Auth-Py Fib-Go Fib-NJS Fib-Py Currency Email Prod. Cat. Shipping Mean     
+
+> 0.00 0.25 0.50 0.75 1.00
+> E2E time (norm. to Pages)  Chunks Sabre SnapShare-SnapShare Full Dedup
+
+Figure 11. End-to-end cold-start latency across 17 diverse serverless benchmarks in a worst-case remote-only fetch scenario. Values are normalized to Pages (not shown). Snap-Share outperforms Chunks and Sabre by securely eliminating redundant infrastructure downloads. Lower is better. capacity, respectively. Avoiding container-image deduplica-tion increases SnapShare’s footprint from 11.2% to 12.6% for SnapShare-. The coalesced working-set component adds 6.2% to Sabre ’s snapshot storage. By globally deduplicating non-sensitive shared pages across all 17 benchmarks, SnapShare reduces storage by 39% relative to Sabre and remains within 6% of the unsafe Full Dedup lower bound. 
+
+Local Cache Footprint: Figure 9b shows the capacity required to cache active working sets. Chunks requires 4.39 ×
+
+the Sabre footprint because of its granularity mismatch, while 
+
+Pages requires 1.1 ×. By pinning shared components once per node, SnapShare reduces the cache footprint by 38.4% relative to Sabre ; SnapShare- achieves a 31.2% reduction. SnapShare remains within 3.2% of unsafe Full Dedup .
+
+4.3.2 Cold-Start Latency. To evaluate worst-case cold-start performance, we measure restoration latency while fetching required state from remote storage and bypassing the local cache. We apply streaming compression to every evaluated configuration. Decompression proceeds concur-rently with the network transfer, so the breakdown reports     
+
+> 9Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov Image-Go Image-Py Video Proc. VideoAn AES-Go AES-Py AES-NJS Auth-Go Auth-NJS Auth-Py Fib-Go Fib-NJS Fib-Py Currency Email Prod. Cat. Shipping Mean
+> 0.0 0.1 0.2 0.3 0.4
+> Fetch size (norm. to Chunks) Pages Sabre SnapShare-SnapShare Full Dedup
+
+Figure 12. Normalized network fetch sizes required for cold-start restoration across 17 serverless benchmarks. Values are normalized against the Chunks baseline (not shown). Snap-Share achieves network efficiency comparable to aggressive software compression purely through structural deduplica-tion. Lower is better. their overlapping critical-path cost as a single Fetch + De-compression stage rather than adding two serial costs. The re-maining stages are Restoration , which instantiates the VMM and configures uffd mappings; Execution , the benchmark’s ideal execution time; and Page Faults , the cost of serving on-demand remote faults. Figure 10 shows the cold-start breakdown for the represen-tative string-encryption benchmark aes-go . Total latency is 121.2 ms for Chunks , 293.1 ms for Pages , and 54.4 ms for 
+
+Sabre . Because all configurations use the same overlapped compression pipeline, the differences in Fetch + Decompres-sion primarily reflect the amount and layout of compressed state transferred rather than whether compression is enabled. Removing redundant infrastructure transfers lowers total latency to 44.3 ms for SnapShare- and 43.4 ms for SnapShare, close to the unsafe Full Dedup result of 43.8 ms. The 30.6 ms 
+
+All-local result shows the remaining restoration, execution, and page-fault cost when no remote fetch is required. Figure 11 extends the analysis across all benchmarks. Snap-Share reduces end-to-end cold-start time by 39.8% relative to Chunks and by 27.5%, with a mean reduction of 6.1%, rela-tive to Sabre . The gap between SnapShare- and SnapShare quantifies the additional benefit of deduplicating approved container-image pages, while Full Dedup provides an unsafe lower bound. 
+
+4.3.3 Analysis of Snapshot Data Transfers. Figure 12 shows the volume of snapshot data transferred during a cold start, normalized to Chunks . Pages and Sabre reduce the mean fetch size to 25% and 23%, respectively. Structural deduplication reduces the mean further to 15% for SnapShare-and 10% for SnapShare, within 0.5% of unsafe Full Dedup .
+
+4.4 Sensitivity and Efficiency Analysis 
+
+To assess SnapShare’s broader efficiency and robustness, we analyze its performance under constrained network band-width and validate the accuracy of the working set estimation. 1 2 5 10 
+
+> Network bandwidth (Gbit/s)
+> 10 2
+> 10 3
+> Fetch + decompression latency (ms)
+> Chunks Pages Sabre SnapShare-SnapShare Full Dedup
+
+Figure 13. Average cold-start fetch time across 17 bench-marks under varying network bandwidth limits. SnapShare degrades the slowest as network bandwidth decreases, matching the unsafe Full-dedup baseline across all band-width settings. Lower is better. AES-Go Image-Go Image-Py VideoProc VideoAn 020 40 60 80  
+
+> Latency, ms
+> Zstd (c6620) IAA (s5.x6.c3)
+
+Figure 14. Decompression latency for identical private work-ing sets across five representative benchmarks, compar-ing our software zstd configuration (eight parallel decoder threads) against Sabre’s Intel IAA accelerator (default single-queue configuration). Zstd matches or lowers latency on four of the five workloads. Lower is better. Furthermore, we demonstrate the complementary benefits of integrating state-of-the-art snapshot compression. 
+
+4.4.1 Network Bandwidth Sensitivity. To evaluate re-silience under network constraints, we throttle the band-width available for snapshot downloads from 10 Gbps down to 1 Gbps. Figure 13 plots average fetch-plus-decompression latency across the benchmark suite. Pages benefits little from additional bandwidth because its many small transfers under-utilize the link. At 10 Gbps, SnapShare completes this stage in 31.8 ms, a 6.8 × improvement over Chunks . At 1 Gbps, SnapShare requires 57.7 ms compared with 469.3 ms for 
+
+Chunks . Across the sweep, SnapShare remains close to un-safe Full Dedup ; the 12–19% gap between SnapShare- and SnapShare (not visible in the figure) again isolates the benefit of approved container-image sharing. SnapShare reduces the raw data volume required for restoration, so operators can confidently allocate the vast majority of the cluster network bandwidth to active user workloads rather than to infrastruc-ture provisioning, e.g., leaving 90% of a typically deployed NIC’s 100Gbps for application use. 
+
+> 10 SnapShare
+
+4.4.2 Compression Algorithm Sensitivity. Throughout this evaluation, the Sabre baseline applies streaming soft-ware zstd compression rather than reproducing Sabre’s orig-inal Intel In-Memory Analytics Accelerator (IAA) hardware pipeline [31]. Before relying on this substitution, we check that it does not put Sabre at an unfair disadvantage in our comparisons, i.e., that zstd is a representative proxy for the decompression latency Sabre’s design would achieve. On the IAA-equipped server described in §4.1, we measure decompression latency for identical private working sets un-der our zstd configuration (eight parallel decoder threads, as used throughout the rest of the evaluation) and under Sabre’s IAA accelerator in its default, single-queue config-uration. Figure 14 shows that zstd matches or achieves up to 25% lower decompression latency than IAA on four of the five workloads. Software zstd is therefore at least as fast as Sabre’s original hardware-accelerated pipeline in raw de-compression latency, confirming that the improvements we report over Sabre elsewhere in this evaluation (§4.3.2, §4.4.1) do not stem from replacing its compression stage with a software-based substitute. 
+
+4.5 Summary and Discussion 
+
+SnapShare resolves the tension between rapid instantiation and strict tenant isolation. Selective global deduplication re-duces remote-storage requirements by 39% and local-cache requirements by 38% relative to Sabre . It reduces mean net-work retrieval volume by 56% and improves end-to-end tail slowdown by 10% over Sabre and 29% over Chunks .Unlocking these efficiencies requires acknowledging op-erational boundaries. While SnapShare’s offline profiling effectively coalesces working sets for idiomatic microser-vices, highly dynamic monoliths (e.g., JVM frameworks) may miss code paths during deployment-time probes, increasing on-demand remote fetches. This fragility can be mitigated in production via adaptive asynchronous profiling [4], which samples live page faults to seamlessly update working sets in the background without penalizing the critical path. Additionally, maximizing cache density necessitates a nu-anced threat model. SnapShare structurally isolates sensi-tive tenant data but accepts execution metadata leakage by permitting timing channels on globally deduplicated, non-sensitive infrastructure (e.g., the guest OS). While an adver-sary could in theory infer that a co-located victim is using a non-sensitive infrastructure component, this trade-off is necessary for microsecond-scale efficiency and mirrors the industry-accepted standard of deduplicating public container layers in multi-tenant public clouds [20]. 
+
+## 5 Related Works 
+
+Extensive research has focused on reducing serverless cold-starts. This section explores the main areas of prior work, highlighting the gap that SnapShare addresses. 
+
+Optimizing the Execution Environment: A significant body of work has focused on minimizing serverless cold-starts by re-architecting the underlying execution environ-ment. This includes developing lean, serverless-tailored hy-pervisors such as Firecracker [14] and gVisor [9], which strip away unnecessary OS overhead to reduce boot times. Other approaches leverage specialized unikernels [34] or lightweight container runtimes like RunD [32] to further accelerate sandbox initialization. Alternatively, systems like Faasm [44] and Hydra [29] introduce concurrent sandboxes that execute multiple invocations within a single process to minimize isolation costs. However, across all of these exe-cution environments, memory snapshots have emerged as the mechanism of choice to bypass application-level initial-ization and further reduce cold-start latency. While these execution frameworks drastically reduce the time to provi-sion a sandbox, they do not resolve the cache efficiency issues and snapshot fetching overheads associated with managing massive application states. In sum, environment-level im-provements are orthogonal but complementary to the secure snapshot deduplication mechanism proposed by SnapShare. 
+
+Optimizing Snapshot Restoration: Another line of work introduces various snapshot optimizations to accelerate state initialization by mitigating I/O bottlenecks during the restore process. Systems like REAP [47] coalesce memory work-ing sets to improve spatial locality during fetch operations, while FaaSnap [15] combines this with on-demand paging. Remote and local fork architectures, such as SEUSS [21], Cat-alyzer [24], AFaaS [22], and MITOSIS [49], similarly deliver memory pages on-demand to overlap function execution with data transfer. Additionally, Sabre [31] further optimizes the data movement pipeline through hardware-accelerated decompression, which we used in our evaluation §4.4.2. Cru-cially, to accelerate restoration, these systems inherently rely on duplicated state—either by maintaining warm in-stances for forking or by storing per-function working sets. SnapShare can directly improve the memory or storage re-quirements of such systems by deduplicating the common infrastructure without sacrificing sensitive state isolation. 
+
+Snapshot Deduplication and Security: A third line of work optimizes the remote storage layer by deduplicating snapshot data. Because many serverless functions share com-mon base images, language runtimes, and libraries, their memory snapshots contain a large amount of redundant data. Systems such as SnapStore [36], SnapBPF [37], and TrEnv [28] capitalize on this redundancy by implementing chunk-based deduplication to minimize the storage footprint in the remote registry, enabling worker nodes to sparsely re-trieve only the necessary memory pages in a single, highly ef-ficient network I/O operation. However, traditional content-based deduplication is fundamentally unsafe in zero-trust, multi-tenant environments: memory deduplication can intro-duce cross-domain side channels that let a co-located tenant 
+
+> 11
+
+Leonid Kondrashov, Likun Zhang, André Filipe do Pilar de Jesus, Hans Pistor, Marco Cali, Riccardo Mancini, Rodrigo Bruno, and Dmitrii Ustiugov 
+
+confirm the presence of specific content [18, 45, 50]. Accord-ingly, production systems such as Firecracker recommend disabling memory deduplication when strong tenant isola-tion is required [25]. Other approaches retain deduplication while limiting cross-domain leakage, e.g., VUsion [35] and Slicedup [48], while later work revisits the security of same-domain deduplication [23]. Closer to our setting, CPC [33] coordinates a shared page cache across serverless functions, and UPM [39] propose user-guided page merging for server-less memory deduplication; both rely on functions or tenants to supply hints about which pages are safe to share. Snap-Share addresses this gap directly: it permits deduplication only when a page’s complete content exactly matches a page in a provider-approved source—without requiring tenant hints or attempting to infer historical provenance from the page content—thereby preventing private snapshot pages from ever being shared across tenants. 
+
+## 6 Conclusion 
+
+SnapShare selectively deduplicates only snapshot pages whose complete contents exactly match provider-approved infras-tructure sources, while strictly isolating all other, tenant-specific data as private. This conservative content-match rule enables high cache density and storage deduplication without sacrificing sensitive data isolation. Implemented as an extension to Knative, SnapShare reduces remote-storage requirements by 39% and local-cache footprints by 38% rela-tive to the tenant-isolated Sabre baseline, closely matching the efficiency of an idealized unsafe full-deduplication de-sign (within 6% and 3% for storage and cache, respectively). These savings translate into a 6.8 × reduction in cold-start fetch latency over chunk-based systems like AWS SnapStart, and a 10–29% reduction in end-to-end tail request slowdown relative to safe baselines. 
+
+## References 
+
+[1] [n. d.]. Grab your lab coat – we’re building a microVM from a container. 
+
+https://actuated.com/blog/firecracker-container-lab . Accessed 2026. [2] [n. d.]. In-Vitro. https://github.com/vhive-serverless/invitro/blob/ main/docs/sampler.md . Accessed 2026. [3] [n. d.]. Private communication with a major cloud provider. 2026. [4] [n. d.]. Under the hood: how AWS Lambda SnapStart optimizes function startup latency. Available at https: //aws.amazon.com/blogs/compute/under-the-hood-how-aws-lambda-snapstart-optimizes-function-startup-latency/ .[5] [n. d.]. vSwarm - Serverless Benchmarking Suite. Available at https: //github.com/vhive-serverless/vSwarm .[6] 2025. AWS Lambda SnapStart. Available at https://docs.aws.amazon. com/lambda/latest/dg/snapstart.html .[7] 2025. CloudLab. Available at https://www.cloudlab.us/ .[8] 2025. State of serverless. Available at https://www.datadoghq.com/ state-of-serverless/ .[9] 2025. The container Security Platform. Available at https://gvisor.dev/ .[10] 2026. Creating Lambda container images. Available at https://docs. aws.amazon.com/lambda/latest/dg/images-create.html .[11] 2026. Deploying container images to Cloud Run. Available at https: //cloud.google.com/run/docs/deploying .[12] 2026. PhoenixNAP. Available at https://phoenixnap.com/ .[13] 2026. Work with Azure Functions in Containers. Avail-able at https://learn.microsoft.com/en-us/azure/azure-functions/ functions-how-to-custom-container .[14] Alexandru Agache, Marc Brooker, Alexandra Iordache, Anthony Liguori, Rolf Neugebauer, Phil Piwonka, and Diana-Maria Popa. 2020. Firecracker: Lightweight Virtualization for Serverless Applications. In 
+
+Proceedings of the 17th Symposium on Networked Systems Design and Implementation (NSDI) . 419–434. [15] Lixiang Ao, George Porter, and Geoffrey M. Voelker. 2022. FaaSnap: FaaS made fast using snapshot-based VMs. In Proceedings of the 2022 EuroSys Conference . 730–746. [16] AWS. [n. d.]. AWS Lambda Under the Hood. https://www.infoq.com/ presentations/aws-lambda-arch/ . Accessed 2026. [17] AWS Compute Blog. 2021. Optimizing Lambda functions pack-aged as container images. https://aws.amazon.com/blogs/compute/ optimizing-lambda-functions-packaged-as-container-images/ .[18] Erik Bosman, Kaveh Razavi, Herbert Bos, and Cristiano Giuffrida. 2016. Dedup Est Machina: Memory Deduplication as an Advanced Exploitation Vector. In IEEE Symposium on Security and Privacy . 987– 1004. [19] Broadcom. [n. d.]. Security considerations and disal-lowing inter-Virtual Machine Transparent Page Sharing. 
+
+https://knowledge.broadcom.com/external/article/318959/security-considerations-and-disallowing.html . Accessed 2026. [20] Marc Brooker, Mike Danilov, Chris Greenwood, and Phil Piwonka. 2023. On-demand Container Loading in AWS Lambda.. In Proceedings of the 2023 USENIX Annual Technical Conference (ATC) . 315–328. [21] James Cadden, Thomas Unger, Yara Awad, Han Dong, Orran Krieger, and Jonathan Appavoo. 2020. SEUSS: skip redundant paths to make serverless fast. In Proceedings of the 2020 EuroSys Conference . 32:1– 32:15. [22] Xiaohu Chai, Tianyu Zhou, Keyang Hu, Jianfeng Tan, Tiwei Bie, Anqi Shen, Dawei Shen, Qi Xing, Shun Song, Tongkai Yang, Le Gao, Feng Yu, Zhengyu He, Dong Du, Yubin Xia, Kang Chen, and Yu Chen. 2025. Fork in the Road: Reflections and Optimizations for Cold Start Latency in Production Serverless Systems. In Proceedings of the 19th Symposium on Operating System Design and Implementation (OSDI) . 199–218. [23] Andreas Costi, Brian Johannesmeyer, Erik Bosman, Cristiano Giuf-frida, and Herbert Bos. 2022. On the Effectiveness of Same-Domain Memory Deduplication. In 15th European Workshop on Systems Secu-rity (EuroSec) . 29–35. doi: 10.1145/3517208.3523754 
+
+[24] Dong Du, Tianyi Yu, Yubin Xia, Binyu Zang, Guanglu Yan, Chenggang Qin, Qixuan Wu, and Haibo Chen. 2020. Catalyzer: Sub-millisecond Startup for Serverless Computing with Initialization-less Booting. In Proceedings of the 25th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXV) . 467–481. [25] Firecracker Project. [n. d.]. Production Host Setup Recommenda-tions. https://github.com/firecracker-microvm/firecracker/blob/main/ docs/prod-host-setup.md . Accessed 2026. [26] Antoine Geimer, Mathéo Vergnolle, Frédéric Recoules, Lesly-Ann Daniel, Sébastien Bardin, and Clémentine Maurice. 2023. A Sys-tematic Evaluation of Automated Tools for Side-Channel Vulnera-bilities Detection in Cryptographic Libraries. In Proceedings of the 2023 ACM SIGSAC Conference on Computer and Communications Se-curity (CCS ’23) . Association for Computing Machinery, 1690–1704. doi: 10.1145/3576915.3623112 
+
+[27] Google Cloud Medium. 2026. To Build, or Not to Build: 3 (+1 New) Ways to Deploy Containers on Cloud Run. 
+
+https://medium.com/google-cloud/to-build-or-not-to-build-3-1-new-ways-to-deploy-containers-on-cloud-run-260b79c880d1 .[28] Jialiang Huang, Mingxing Zhang, Teng Ma, Zheng Liu, Sixing Lin, Kang Chen, Jinlei Jiang, Xia Liao, Yingdi Shan, Ning Zhang, Mengting 12 SnapShare 
+
+Lu, Tao Ma, Haifeng Gong, and YongWei Wu. 2024. TrEnv: Trans-parently Share Serverless Execution Environments Across Different Functions and Nodes. In Proceedings of the 30th ACM Symposium on Operating Systems Principles (SOSP) . 421–437. [29] Serhii Ivanenko, Vasyl Lanko, Rudi Horn, Vojin Jovanovic, and Ro-drigo Bruno. 2025. Hydra: Virtualized Multi-Language Runtime for High-Density Serverless Platforms. In Proceedings of the 2025 ACM Symposium on Cloud Computing (SOCC) . 644–658. [30] Rishabh Iyer, Katerina Argyraki, and George Candea. 2024. Auto-matically Reasoning About How Systems Code Uses the CPU Cache. In 18th USENIX Symposium on Operating Systems Design and Imple-mentation (OSDI 24) . USENIX Association, Santa Clara, CA, 581–598. 
+
+https://www.usenix.org/conference/osdi24/presentation/iyer 
+
+[31] Nikita Lazarev, Varun Gohil, James Tsai, Andy Anderson, Bhushan Chitlur, Zhiru Zhang, and Christina Delimitrou. 2024. Sabre: Hardware-Accelerated Snapshot Compression for Serverless Mi-croVMs. In Proceedings of the 18th Symposium on Operating System Design and Implementation (OSDI) . 1–18. [32] Zijun Li, Jiagan Cheng, Quan Chen, Eryu Guan, Zizheng Bian, Yi Tao, Bin Zha, Qiang Wang, Weidong Han, and Minyi Guo. 2022. RunD: A Lightweight Secure Container Runtime for High-density Deployment and High-concurrency Startup in Serverless Computing. In Proceedings of the 2022 USENIX Annual Technical Conference (ATC) . 53–68. [33] K. S. Lim, Y. Hong, J. Jeong, S. Son, D. Kim, Y. Park, J. W. Lee, and J. Jeong. 2025. CPC: Coordinated Page Cache for Serverless Com-puting. In Proceedings of the 34th International Conference on Parallel Architectures and Compilation Techniques (PACT) . 84–96. [34] Anil Madhavapeddy, Richard Mortier, Charalampos Rotsos, David J. Scott, Balraj Singh, Thomas Gazagnaire, Steven Smith, Steven Hand, and Jon Crowcroft. 2013. Unikernels: Library Operating Systems for the Cloud. In Proceedings of the 18th International Conference on Archi-tectural Support for Programming Languages and Operating Systems (ASPLOS-XVIII) . 461–472. [35] Marco Oliverio, Kaveh Razavi, Herbert Bos, and Cristiano Giuffrida. 2017. Secure Page Fusion with VUsion. In Proceedings of the 26th ACM Symposium on Operating Systems Principles (SOSP) . 531–545. doi: 10.1145/3132747.3132781 
+
+[36] Abhisek Panda and Smruti R. Sarangi. 2023. SnapStore: A Snapshot Storage System for Serverless Systems. In Proceedings of the 2019 International Middleware Conference . 261–274. [37] Stratos Psomadakis, Dimitrios Siakavaras, Chloe Alverti, Symeon Porgiotis, Orestis Lagkas Nikolos, Christos Katsakioris, Konstantinos Nikas, Georgios I. Goumas, and Nectarios Koziris. 2025. SnapBPF: Exploiting eBPF for Serverless Snapshot Prefetching. In Proceedings of the 17th ACM Workshop on Hot Topics in Storage and File Systems .9–16. [38] Public Cloud Group. 2023. Should you use Lambda containers? https: //pcg.io/insights/lambda-containers/ .[39] W. Qiu, M. Copik, Y. Wang, A. Calotoiu, and T. Hoefler. 2023. User-Guided Page Merging for Memory Deduplication in Serverless Sys-tems. In 2023 IEEE International Conference on Big Data (BigData) .[40] Red Hat. [n. d.]. Kernel Same-page Merging (KSM). https: //docs.redhat.com/en/documentation/red_hat_enterprise_linux/7/ html/virtualization_tuning_and_optimization_guide/chap-KSM .Accessed 2026. [41] Divyanshu Saxena, Tao Ji, Arjun Singhvi, Junaid Khalid, and Aditya Akella. 2022. Memory deduplication for serverless computing with Medes. In Proceedings of the 2022 EuroSys Conference . 714–729. [42] Martin Schwarzl, Erik Kraft, Moritz Lipp, and Daniel Gruss. 2022. Remote Memory-Deduplication Attacks. In 29th Annual Network and Distributed System Security Symposium (NDSS 2022) . The Internet Society. https://www.ndss-symposium.org/ndss-paper/auto-draft-235/ 
+
+[43] Mohammad Shahrad, Rodrigo Fonseca, Iñigo Goiri, Gohar Irfan Chaudhry, Paul Batum, Jason Cooke, Eduardo Laureano, Colby Tres-ness, Mark Russinovich, and Ricardo Bianchini. 2020. Serverless in the Wild: Characterizing and Optimizing the Serverless Workload at a Large Cloud Provider. In Proceedings of the 2020 USENIX Annual Technical Conference (ATC) . 205–218. [44] Simon Shillaker and Peter R. Pietzuch. 2020. Faasm: Lightweight Isolation for Efficient Stateful Serverless Computing. In Proceedings of the 2020 USENIX Annual Technical Conference (ATC) . 419–433. [45] Kuniyasu Suzaki, Kengo Iijima, Toshiki Yagi, and Cyrille Artho. 2013. Implementation of a Memory Disclosure Attack on Memory Dedu-plication of Virtual Machines. IEICE Transactions on Fundamentals of Electronics, Communications and Computer Sciences E96-A, 1 (2013), 215–224. doi: 10.1587/transfun.E96.A.215 
+
+[46] Dmitrii Ustiugov, Dohyun Park, Lazar Cvetkovic, Mihajlo Djokic, Hongyu Hè, Boris Grot, and Ana Klimovic. 2023. Enabling In-Vitro Serverless Systems Research. In Proceedings of the 4th Workshop on Resource Disaggregation and Serverless . 1–7. [47] Dmitrii Ustiugov, Plamen Petrov, Marios Kogias, Edouard Bugnion, and Boris Grot. 2021. Benchmarking, analysis, and optimization of serverless function snapshots. In Proceedings of the 26th International Conference on Architectural Support for Programming Languages and Operating Systems (ASPLOS-XXVI) . 559–572. [48] Fernando Vañó-García and Hector Marco-Gisbert. 2018. Slicedup: A Tenant-Aware Memory Deduplication for Cloud Computing. In UBI-COMM 2018: The Twelfth International Conference on Mobile Ubiquitous Computing, Systems, Services and Technologies . 15–20. [49] Xingda Wei, Fangming Lu, Tianxia Wang, Jinyu Gu, Yuhan Yang, Rong Chen, and Haibo Chen. 2023. No Provisioned Concurrency: Fast RDMA-codesigned Remote Fork for Serverless Computing. In 
+
+Proceedings of the 17th Symposium on Operating System Design and Implementation (OSDI) . 497–517. [50] Jidong Xiao, Zhang Xu, Hai Huang, and Haining Wang. 2013. Security Implications of Memory Deduplication in a Virtualized Environment. In Proceedings of the 43rd Annual IEEE/IFIP International Conference on Dependable Systems and Networks (DSN) . doi: 10.1109/DSN.2013. 6575349 
+
+[51] Yuanyuan Yuan, Zhibo Liu, and Shuai Wang. 2023. CacheQL: Quantifying and Localizing Cache Side-Channel Vulnerabilities in Production Software. In 32nd USENIX Security Symposium (USENIX Security 23) . USENIX Association, Anaheim, CA, 2009–2026. 
+
+https://www.usenix.org/conference/usenixsecurity23/presentation/ yuan-yuanyuan-cacheql 
+
+13

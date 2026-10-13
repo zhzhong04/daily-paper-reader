@@ -41,17 +41,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-11</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-13</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 6 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 8 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
     <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>1</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>4</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>4</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-11 22:59:47 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 01:32:21 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,7 +62,9 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>2026-10-11 日报精选 6 篇（精读 5、速读 1），聚焦 Agent 推理服务与 KV-Cache 优化。最值得看的是 9.0 分的《Request Order Matters》，揭示滚动 Agent 中 KV-Cache 复用的缓存历史敏感性；8.0 分的 HEAR 协议则关注 Agent 框架与推理引擎的互通。普通读者可先读这两篇，理解请求顺序如何影响缓存命中与推理效率。</p>
+<p>2026-10-13日报：成功收录8篇（精读4、速读4），聚焦Agent推理服务、KV缓存与Serverless调度。</p>
+<p>最值得看的是两篇8分精读：Selective KV-Cache Reuse中“请求顺序/缓存历史”会影响Rolling Agents表现，以及HEAR协议尝试打通Agent Harness与推理引擎。</p>
+<p>普通读者可先读这两篇，再扫7分《SnapShare》理解Serverless快照去重，关注Agent服务效率与隔离性。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -71,12 +73,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
 <ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving">Can Agent Harnesses and Inference Engines Hear Each Other? The HEAR Protocol for Agentic LLM Serving</span></li><li><span class="dpr-home-dashboard-paper-title" title="Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell">Persistent Memory in Multi-Agent LLM Inference: What It Costs, What It Buys, and When You Can Tell</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>2</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -84,12 +86,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">1 篇</strong>
+    <strong class="dpr-home-dashboard-count">4 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Agentic Semantic Sensing for Resource-Adaptive AI-RAN">Agentic Semantic Sensing for Resource-Adaptive AI-RAN</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots">SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots</span></li><li><span class="dpr-home-dashboard-paper-title" title="Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems">Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="Agentic Semantic Sensing for Resource-Adaptive AI-RAN">Agentic Semantic Sensing for Resource-Adaptive AI-RAN</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>1</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
 </section>
 </div>
 
