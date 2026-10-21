@@ -1,0 +1,1963 @@
+Title: MemPrice: Online Memory Allocation via Adaptive Pricing for Long-Horizon Agents
+
+URL Source: https://arxiv.org/pdf/2610.24955v1
+
+Published Time: Tue, 20 Oct 2026 01:15:00 GMT
+
+Number of Pages: 23
+
+Markdown Content:
+Preprint 
+
+# MEM PRICE : ONLINE MEMORY ALLOCATION VIA 
+
+# ADAPTIVE PRICING FOR LONG -H ORIZON AGENTS 
+
+Yiming Zong ∗ Shiyuan Piao ∗ Jiashuo Jiang † Fugee Tsung †
+
+Department of Industrial Engineering & Decision Analysis, HKUST 
+
+{yzongac,shiyuan.piao }@connect.ust.hk {jsjiang,season }@ust.hk 
+
+## ABSTRACT 
+
+Long-horizon LLM agents face a fundamental allocation problem as interaction histories grow: which information to retain, how much context to devote to it, and at what granularity. Existing memory mechanisms largely focus on relevance, retrieval, or compression, leaving this allocation trade-off implicit. We introduce MEM PRICE , which treats active context as a shared resource and dynamically allocates it across memories and representation levels. M EM PRICE turns accumu-lated memory pressure into an adaptive price on context, encouraging detail only when its estimated retention value justifies the additional footprint. This pres-sure persists across memory refreshes, allowing the contents of memory to evolve while preserving long-run control over context usage. We show that irreversible compression can force linear worst-case regret against hindsight following its own memory trajectory, and introduce a same-state benchmark to evaluate allocation on M EM PRICE ’s realized memory states. M EM PRICE enforces the hard context budget at every round and regulates long-run occupancy through adaptive pric-ing, without prior knowledge of the interaction horizon. Under priced-frontier regularity, its average allocation-regret bound against this benchmark vanishes when accumulated estimation error is sublinear. We evaluate the framework un-der matched memory budgets on LongMemEval, LoCoMo, AppWorld, and Web-Shop across three foundation models, spanning both query-blind memory con-struction and goal-directed agent context management. The complete experimen-tal code and reproduction scripts are available in our anonymous repository at 
+
+https://anonymous.4open.science/r/ICLR2027-MemPrice .
+
+## 1 INTRODUCTION 
+
+Foundation models are increasingly deployed as long-horizon agents that reason, act, and interact over extended trajectories (Yao et al., 2023; Shinn et al., 2023). As these interactions grow, the accumulated history can quickly exceed the active context available to the model, making memory management a central component of agent design. Existing systems address this challenge through persistent memory, hierarchical storage, retrieval, summarization, and adaptive context construction (Park et al., 2023; Packer et al., 2023; Xu et al., 2025). More recent methods further predict which past information will matter for upcoming decisions or dynamically compress interaction trajectories to control context growth (Wei et al., 2026; Ye et al., 2026). Together, these advances substantially improve an agent’s ability to operate beyond a fixed context window. However, most existing approaches formulate memory management primarily as a problem of re-trieval, relevance estimation, or compression , leaving the underlying allocation of context capacity largely implicit. Knowing that a memory is relevant does not determine whether it is worth the space it consumes: a detailed record may provide only slightly more value than a compact sum-mary while occupying substantially more context, and retaining one item necessarily reduces the capacity available to others. Similarity, importance, or predicted relevance scores therefore do not directly capture the opportunity cost of memory occupancy. Moreover, this trade-off changes over time as new information arrives and the user’s informational needs evolve. Once information has 
+
+> ∗
+
+Equal contribution. 
+
+> †
+
+Corresponding author. 
+
+1arXiv:2610.24955v1 [cs.AI] 18 Oct 2026 Preprint been compressed or discarded, early allocation mistakes may also be irreversible until the memory is refreshed. We argue that these effects are better understood by treating active context explicitly as a limited resource: rather than only asking what information is relevant , an agent must decide which information deserves memory, at what granularity, and at what cost .To this end, we introduce M EM PRICE , a memory-allocation framework that makes the opportu-nity cost of active context explicit. Each memory can be retained at multiple levels of detail, while a persistent virtual queue turns accumulated occupancy pressure into a shared price on context. M EM -PRICE then jointly chooses representations under the hard context budget, retaining finer detail only when its estimated retention value warrants the additional footprint. Crucially, the queue persists across memory refreshes, so retrieval can change what is brought back into context without erasing the resource pressure accumulated over the interaction. Irreversible compression changes which rep-resentations remain available, so hindsight may benefit from having preserved different information, not just from better allocation. We therefore evaluate allocation on M EM PRICE ’s realized memory-state trajectory, while still allowing hindsight to redistribute occupancy across time. MEM PRICE 
+
+always satisfies hard capacity and, under bounded utilities and estimation error, drives excess aver-age occupancy to zero without knowing the interaction horizon. Under priced-frontier regularity, its average-regret bound against this same-state benchmark also vanishes when estimation error accu-mulates sublinearly. We evaluate the framework under two complementary regimes: Query-Blind Memory , where the eventual question is revealed only after a long interaction, and Goal-Observable Memory , where the target is known from the outset and relevant evidence must be accumulated over time. Our main contributions are: • We formulate long-horizon agent memory management as an explicit online resource-allocation problem, and propose M EM PRICE , which combines capacity-feasible represen-tation selection with persistent memory pricing to adapt allocation over time while decou-pling semantic refresh from resource accounting. • We prove a linear worst-case regret lower bound against independent-state hindsight and introduce a same-state benchmark. Under stated assumptions, M EM PRICE admits regret bounds with explicit estimation-error and priced-frontier terms, and O(√T ) cumulative occupancy violation. • We evaluate memory allocation under two complementary settings: Query-Blind , where future information needs are unknown during memory construction, and Goal-Observable ,where the task goal is known from the outset and can guide evidence accumulation. Our method achieves strong results in both settings. 
+
+Relation to prior work. Long-horizon agents often rely on persistent memory to preserve and re-cover useful information over time (Shinn et al., 2023; Park et al., 2023; Packer et al., 2023; Chhikara et al., 2025; Xu et al., 2025). Recent work further adapts the contents and granularity of working context through trajectory folding and relevance-aware context construction (Sun et al., 2025; Ye et al., 2026; Wei et al., 2026). We view active context as a shared resource and formulate memory management as an online allocation problem across competing memories and representation lev-els, connecting agent memory to online resource allocation and long-term constrained optimization (Devanur & Jain, 2012; Agrawal et al., 2014; Jenatton et al., 2016; Yu et al., 2017; Zong & Jiang, 2026). MemPrice realizes this view through adaptive pricing and persistent resource accounting across memory refreshes. A detailed discussion of related work is provided in Appendix A. 
+
+## 2 PROBLEM FORMULATION 
+
+Agent memory allocation. We study online allocation of an agent’s active context over an interac-tion of unknown length. At each round, the allocator selects representations using only information available so far. Because compression may be irreversible, past decisions can restrict future feasible allocations. The horizon T denotes an arbitrary evaluation prefix and is unknown to the allocator. Let B > 0 denote the hard active-context capacity, and let α ∈ (0 , 1] specify the target average occu-pancy ratio. At round t, the allocator chooses at ∈ A t(B), where At(B) is the feasible set induced by the current memory state. Let Ut(at) and Gt(at) denote retention utility and memory occupancy, and define gt(at) = Gt(at)/B . For a non-anticipating policy π, the finite-prefix reference objective 2Preprint Existing work:  what  to remember, but not  how much  to allocate 
+
+Retrieval -based methods 
+
+Find relevant memories when needed. 
+
+Summarization / compression 
+
+Compress history to fit the context window. 
+
+Relevance / importance prediction 
+
+Predict which memories will be useful. 
+
+> This looks relevant!
+> Agent
+> Memory store
+> Does not decide how much space
+> to allocate or what granularity to keep.
+> Summary
+> I’ll summarize
+> past events!
+> Agent
+> Often compresses without explicitly
+> reasoning about the trade -off with other
+> information.
+> This will be important
+> in the future!
+> Agent
+
+…
+
+> Relevance ≠ worth the space.
+> Does not capture the opportunity cost
+> under limited context capacity.
+
+Our work:  allocate the  right amount  of memory, at the  right time     
+
+> What should I keep,
+> and in what form?
+> Agent Detailed
+> (1200 tokens) Summary
+> (300 tokens) Key facts
+> (100 tokens)
+> Choose the best representation
+> under capacity and future value
+> Active context (limited capacity)
+> 680 / 1,000 tokens
+> Keep what’s valuable,
+> not just what’s relevant!
+> Agent
+> Explicitly models
+> memory as a limited resource
+> Balances utility and memory cost
+> via adaptive pricing
+> Makes dynamic, capacity -feasible
+> decisions over the long horizon
+
+Long -horizon interaction (unknown horizon) 
+
+Figure 1: Comparison of existing works and ours. is 
+
+max 
+
+π Eπ
+
+" TX
+
+t=1 
+
+Ut(at)
+
+#
+
+s.t. at ∈ A t(B) ∀t, Eπ
+
+"
+
+1
+
+T
+
+TX
+
+t=1 
+
+gt(at)
+
+#
+
+≤ α, (1) The feasible sets At(B) are induced by the memory-state trajectory generated by π.
+
+Memory representation choices. Let Rt denote the set of memory items currently resident in active context at round t. Each item can be retained at one of five representation levels, 
+
+raw ≻ summary (sum) ≻ abstract (abs) ≻ keywords (key) ≻ deletion (del) 
+
+ordered from more detailed to more compressed representations. Let c−
+
+i (t) denote the representation of item i available immediately before the round-t allocation. Between memory refreshes, compres-sion is one-way: the allocator may keep an item’s current representation or move to a coarser level, but cannot recover discarded detail. For item i at representation level j, let s(j)
+
+i,t denote its mem-ory footprint. Coarser representations use no more memory, with deletion having zero footprint. For an allocation a = ( ci)i∈R t , its total memory occupancy is Gt(a) = P
+
+i∈R t s(ci)
+
+i,t . The feasible allocation set in Eq. equation 1 is therefore 
+
+At(B) = a = ( ci)i∈R t : ci ⪯ c−
+
+i (t) ∀i ∈ R t, G t(a) ≤ B .
+
+Let u(j)
+
+i,t denote the true retention utility of keeping item i at representation j. We assume that retention utility does not increase under further compression and vanishes upon deletion. At each round, an LLM oracle provides utility estimates bu(j)
+
+i,t for the feasible representation choices. Let 
+
+Ut(a) = X
+
+i∈R t
+
+u(ci)
+
+i,t , bUt(a) = X
+
+i∈R t
+
+bu(ci)
+
+i,t .
+
+Throughout the analysis, Ut denotes the allocation-level retention objective; Section 5 evaluates how the resulting memory policies translate to downstream task performance. 3Preprint 1 Within -window online allocation loop  (round  t)   
+
+> New interaction
+> (at round t)
+> ···
+> Resident set ℛt
+> Carried history ℋ
+> ···
+
++             
+
+> New items ℱ
+> ···
+> Multi -granularity
+> representations
+> Document
+> ···
+> Dialogue
+> ···
+> Raw Summary Compressed
+> (higher utility, larger size lower utility, smaller size)
+> Oracle estimation
+> ût,i ŝt,i
+> ût,i ŝt,i
+> Estimated utility
+> and memory size
+> Priced selection
+> under hard capacity
+> at=arg max [ Ût(a) − λtgt(a)]
+> a
+> ∈𝒜 t
+> s.t. Gt(a) ≤ B
+> (multiple -choice knapsack)
+> Active context
+> ···
+> Total :Gt(a t) ≤ B
+
+2 Adaptive pricing  
+
+> from occupancy pressure
+> Persistent virtual queue
+> Qt(across time/windows)
+> ·· ·
+> Adaptive global price
+
+λt = ηtQt   
+
+> High pressure
+> → high price
+> Queue update
+> Qt+1 = [ Qt+gt(a t) − α ]+
+> gt(a t) > α
+> ↑ pressure
+> gt(a t) ≤ α
+> ↓ pressure
+
+3 Window boundary refresh  (every  L rounds)      
+
+> End of window w
+> Zw
+> (raw transcript)
+> Compress Archive DwRetrieve Next window history
+
+ℋ     
+
+> ···
+> (for window w + 1 )
+> Semantic memory refreshes
+> (based on past windows)
+> Resource pressure persists
+> (Q tλtcontinue unchanged)
+> Updated price λt+1 for next round
+> Queue and price state
+> persist across windows
+
+Figure 2: An overview of our MemPrice framework. 
+
+Memory refresh. The interaction is organized into consecutive refresh windows of L rounds, ex-cept possibly for the final window. Within each window, the resident set Rt consists of the context carried from the previous boundary together with newly observed interaction items. Motivated by persistent-memory designs that retain interaction history for later retrieval, we store raw transcripts in an external archive and use a fixed compression–retrieval pipeline at refresh boundaries to con-struct the carried context for the next window. Thus, compression is irreversible within a refresh window but archived information can be recovered at subsequent boundaries. Memory occupancy and retention utility are defined over the active context only. 
+
+## 3 ALGORITHM 
+
+MemPrice controls active-context allocation through a history-dependent memory price. At each round, accumulated occupancy pressure determines the current memory price. The allocator then jointly selects a representation for each resident memory, retaining additional detail only when its estimated value justifies the corresponding context cost. This pressure carries across memory re-freshes, allowing the agent to refresh its active context without forgetting how heavily context has been used. Algorithm 1 summarizes the full procedure. 
+
+Adaptive memory pressure. Although the hard capacity B prevents context overflow, enforcing a fixed fraction of B at each round would be unnecessarily rigid: the active context at some rounds contains information that warrants substantially more detailed retention than at others. MemPrice therefore uses αB as a long-run occupancy target, allowing temporary increases in context usage when additional memory detail is valuable. A virtual queue Qt tracks accumulated occupancy pres-sure relative to this target and converts it into a memory price: 
+
+ηt = c
+
+√t , λ t = ηtQt, Q t+1 = [ Qt + gt(at) − α]+ ,
+
+where [x]+ = max {x, 0} and c > 0 controls the strength of the pricing feedback: larger c makes the allocator respond more aggressively to accumulated occupancy pressure. Occupancy above the target increases Qt, while lighter usage gradually releases this pressure. The resulting memory price λt is shared across all resident memories: when pressure is low, detailed representations are relatively cheap; as pressure accumulates, retaining extra detail requires correspondingly higher estimated utility. 4Preprint 
+
+Algorithm 1 MemPrice: Online Memory Allocation with Adaptive Pricing 
+
+Require: Hard capacity B, target occupancy ratio α, pricing constant c, window length L
+
+1: Initialize round t ← 1, pressure Q1 ← 0, carried context H ← ∅, current-window items F ← ∅
+
+2: while true do 
+
+3: for k = 1 , . . . , L do 
+
+4: Observe a new interaction item θt, add it to F at level raw , and form the resident set Rt ← { H} ∪ F 
+
+5: For each i ∈ R t, query the LLM oracle for admissible representations and utility estimates {bu(j) 
+
+> i,t
+
+};record their sizes {s(j) 
+
+> i,t
+
+}
+
+6: Set ηt ← c/ √t and λt ← ηtQt
+
+7: Select at by solving Eq. 3 8: Apply at and update 
+
+Qt+1 ← [Qt + gt(at) − α]+
+
+9: if the conversation ends then 
+
+10: Archive the current-window interaction history and terminate 
+
+11: end if 
+
+12: t ← t + 1 
+
+13: end for 
+
+14: Archive the current-window interaction history and perform M EMORY REFRESH to obtain the carried context H for the next window; set F ← ∅
+
+15: end while 
+
+Price-aware joint allocation. Given the global price λt, MemPrice selects the capacity-feasible representation assignment that maximizes a price-adjusted retention objective: 
+
+at ∈ arg max 
+
+> a∈A t(B)
+
+n bUt(a) − λtgt(a)
+
+o
+
+. (2) The price controls how much detail is worth retaining rather than simply filtering memories by relevance. In particular, λt/B can be viewed as a per-token context price: additional detail is re-tained only when its estimated value justifies its extra footprint. Since all resident memories share the same context budget, their representation choices are coupled: a detailed representation may be worthwhile when competition for context is light, but not when more valuable information is com-peting for the same space. Therefore, Eq. equation 2 becomes a multiple-choice knapsack problem (MCKP), which jointly selects one admissible representation for each resident memory: 
+
+(ci(t)) i∈R t ∈ arg max  
+
+> (ci)i∈R t∈A t(B)
+
+X
+
+> i∈R t
+
+bu(ci) 
+
+> i,t
+
+− λt
+
+B s(ci)
+
+> i,t
+
+
+
+. (3) 
+
+Persistent memory pressure across refreshes. At each refresh boundary, the raw transcript from the current window is added to the persistent archive, and a fixed compression–retrieval pipeline constructs the carried context for the next window. This refresh can reintroduce information that was previously compressed out of the active context, making earlier detail available again when needed. The refreshed context remains subject to the hard capacity B, while the virtual queue Qt
+
+and global round index t are carried across the boundary. 
+
+## 4 THEORETICAL ANALYSIS 
+
+Our analysis distinguishes two sources of hindsight advantage: access to representations preserved along a different memory trajectory, and the ability to redistribute occupancy across time under a global budget. We first characterize the effect of compression-induced state divergence, then evaluate allocation quality on MemPrice’s realized memory-state trajectory. To formalize the first effect, consider an independent-state hindsight comparator : an optimal policy that observes the full T -round interaction prefix and follows its own memory trajectory under the same fixed refresh pipeline. Its allocations bt are subject to the hard capacity B at every round and the cumulative occupancy budget PTt=1 gt(bt) ≤ αT . Let OPT ind  
+
+> T
+
+denote its optimal cumulative retention utility, and define 
+
+Reg ind  
+
+> T
+
+:= E
+
+"
+
+OPT ind  
+
+> T
+
+−
+
+> T
+
+X
+
+> t=1
+
+Ut(at)
+
+#
+
+.
+
+5Preprint The following proposition establishes a linear worst-case regret lower bound for every capacity-feasible, non-anticipating allocator, even with exact utility estimates. 
+
+Proposition 1 (Linear regret under independent-state comparison) . Let B > 0, α ∈ (0 , 1] , and 
+
+M := ⌊1/α ⌋ + 1 . For any non-anticipating allocator with at ∈ A t(B) for all t and integers 
+
+L, T > M , there exists a T -round instance with exact utility estimates such that 
+
+Reg ind  
+
+> T
+
+≥ T − MM (M + 1) . (4) Proposition 1 identifies an information-loss barrier rather than an estimation barrier. Before future relevance is revealed, hard capacity forces the online allocator to discard some candidate detail, whereas hindsight preserves the candidate that will later matter. Importantly, the hindsight policy in the construction uses at most αB at every round, so the lower bound does not rely on redistribut-ing occupancy across time. To isolate the allocation component, we next introduce a same-state comparator that evaluates hindsight decisions on the realized feasible-state trajectory. For each round t, let Aalg  
+
+> t
+
+(B) denote the feasible allocation set induced by MemPrice’s realized memory state. We define the global same-state (GSS) hindsight benchmark over a T -round prefix as 
+
+OPT gss  
+
+> T
+
+:= max 
+
+> b1,...,b T
+> T
+
+X
+
+> t=1
+
+Ut(bt) s.t. bt ∈ A alg  
+
+> t
+
+(B), ∀t, 
+
+> T
+
+X
+
+> t=1
+
+gt(bt) ≤ αT. (5) The GSS benchmark performs counterfactual reallocation on MemPrice’s realized memory states. It retains full hindsight and may redistribute occupancy across the entire prefix, but its alternative choices do not propagate to future states. Thus, GSS regret measures allocation loss conditional on the states reached by MemPrice, rather than the long-term cost of generating those states. The occupancy budget is imposed pathwise on the realized prefix, and Appendix B gives the expectation-feasible counterpart aligned with Eq. 1. 
+
+Reg gss  
+
+> T
+
+= E
+
+"
+
+OPT gss  
+
+> T
+
+−
+
+> T
+
+X
+
+> t=1
+
+Ut(at)
+
+#
+
+, Viol T = B
+
+" TX
+
+> t=1
+
+ gt(at) − α#
+
+> +
+
+. (6) To account for errors in the LLM oracle’s retention-utility estimates, we make the following bounded-error assumption. 
+
+Assumption 1 (Bounded utility and estimation error) . There exist finite constants U > 0 and 
+
+ϵ ≥ 0 such that, for every t, almost surely, 0 ≤ Ut(a) ≤ U for all a ∈ Aalg  
+
+> t
+
+(B) and 
+
+et := sup a∈A alg   
+
+> t(B)
+
+| bUt(a) − Ut(a)| ≤ ϵ.We write ET := PTt=1 E[et] for the expected accumulated estimation error. Under a global oc-cupancy budget, hindsight may redistribute memory usage across time. To control this temporal advantage, define the priced frontier 
+
+Φt(λ) := max  
+
+> a∈A alg
+> t(B)
+
+Ut(a) − λ gt(a) − α .
+
+Assumption 2 (Priced-frontier regularity) . There exists a deterministic sequence ∆T = o(T ) such that, for every T , almost surely, 
+
+inf 
+
+> λ≥0
+> T
+
+X
+
+> t=1
+
+
+
+Φt(λ) − inf  
+
+> μ≥0
+
+Φt(μ)
+
+
+
+≤ ∆T .
+
+Priced-frontier regularity requires the realized utility–occupancy frontiers to admit an approximately common minimizing price. In particular, ∆T = 0 whenever the round-wise frontiers share a mini-mizer, even if the resident memories and optimal allocations vary across rounds. Appendix C gives a sufficient condition allowing dispersion in these minimizing prices. This condition controls the re-maining hindsight advantage from reallocating occupancy across time and is not required for hard-capacity feasibility or long-run occupancy control. The following result gives the corresponding same-state allocation and occupancy guarantees. 6Preprint Table 1: Results for Setting I under matched hard memory budgets. All budget-constrained methods use the same persistent-memory budget, retrieval protocol, and answer model within each backbone block. Best and second-best results among budget-constrained methods are shown in 
+
+bold and underline, respectively. Full Context † is an unconstrained reference and is excluded from ranking.                                                                                                                                                                                                          
+
+> LongMemEval-S ( B= 16k ), QA Acc. (%) LoCoMo ( B= 8k ), F1 (%) Method S-Hop
+> n= 156
+> M-Hop
+> n= 133
+> Temp.
+> n= 133
+> K-Upd.
+> n= 78
+> Overall
+> n= 500
+> S-Hop
+> n= 841
+> M-Hop
+> n= 282
+> Temp.
+> n= 321
+> Overall
+> n= 1444
+> GLM-5.3-Flash
+> Full Context †94 .980 .589 .587 .288 .462 .548 .853 .357 .8
+> Recent / FIFO 43 .224 .729 .139 .834 .035 .223 .727 .131 .2
+> Uniform Allocation 54 .139 .845 .240 .645 .839 .430 .229 .735 .4
+> Content Salience 78 .664 .372 .868 .971 .742 .835 .934 .739 .7
+> Dense Salience 72 .359 .465 .162 .765 .546 .637 .840 .543 .5
+> LRE-SelfSup 75 .261 .769 .866 .468 .849 .941 .343 .046 .7
+> MemPrice (Ours) 80 .066 .879 .677 .376 .049 .441 .948 .847 .8
+> DeepSeek-V4.1-Flash
+> Full Context †92 .881 .887 .488 .187 .758 .952 .048 .755 .3
+> Recent / FIFO 40 .527 .126 .841 .233 .431 .925 .226 .629 .4
+> Uniform Allocation 52 .644 .142 .842 .246 .137 .528 .131 .834 .4
+> Content Salience 76 .166 .270 .468 .770 .840 .934 .739 .039 .3
+> Dense Salience 69 .260 .564 .359 .864 .144 .239 .145 .343 .4
+> LRE-SelfSup 73 .563 .468 .766 .968 .547 .240 .644 .845 .4
+> MemPrice (Ours) 77 .473 .073 .475 .174 .847 .345 .044 .146 .1
+> Qwen3.8-Flash
+> Full Context †95 .482 .090 .888 .289 .563 .749 .955 .859 .2
+> Recent / FIFO 42 .428 .326 .134 .533 .134 .824 .724 .530 .5
+> Uniform Allocation 55 .338 .949 .050 .248 .538 .129 .633 .035 .3
+> Content Salience 78 .263 .973 .568 .471 .643 .534 .236 .740 .2
+> Dense Salience 72 .559 .368 .266 .867 .049 .138 .541 .945 .4
+> LRE-SelfSup 75 .462 .171 .067 .969 .548 .842 .742 .046 .1
+> MemPrice (Ours) 80 .467 .580 .272 .075 .648 .543 .048 .147 .3
+
+Theorem 1 (Same-state allocation and occupancy guarantees) . Algorithm 1 maintains Gt(at) ≤ B
+
+at every round by construction. Under Assumptions 1 and 2, for any evaluation prefix T ≥ 1,
+
+Reg gss  
+
+> T
+
+≤ c√T + 2 ET + ∆ T , Viol T ≤ B
+
+ U + 2 ϵαc 
+
+√T + 1 
+
+
+
+a.s. (7) Theorem 1 establishes same-state allocation and occupancy guarantees on MemPrice’s realized memory-state trajectory. MemPrice never exceeds the hard capacity B, whereas αB acts as a long-run operating target rather than a per-round cap; consequently, the excess average occupancy vanishes at rate O(T −1/2). The regret bound decomposes into the online pricing term c√T , the ac-cumulated estimation error ET , and the priced-frontier deviation ∆T . For fixed c, ET + ∆ T = o(T )
+
+yields vanishing average GSS regret, while ET , ∆T = O(√T ) gives O(√T ) cumulative GSS regret. Larger c strengthens occupancy feedback, tightening the O(√T /c ) occupancy bound at the cost of a larger O(c√T ) online pricing term. 
+
+## 5 EXPERIMENTS 
+
+5.1 EXPERIMENTAL SETTINGS 
+
+Experimental settings. We evaluate memory allocation under two information regimes. Setting I is query-blind : the terminal query is hidden while memory is constructed, and the allocator can use only the chronological history observed so far. We evaluate on LongMemEval-S (Wu et al., 2025) and LoCoMo (Maharana et al., 2024). We compare with query-blind controls including Re-cent/FIFO , Uniform Allocation , Content Salience , Dense Salience , and LRE-SelfSup (Lia & Mazumder, 2026). Full Context is reported separately as an unbudgeted reference. Setting II is 
+
+goal-observable : the task goal is visible from reset and may guide allocation, while future observa-tions, tool outputs, and evaluator information remain hidden. We evaluate on AppWorld (Trivedi et al., 2024) and WebShop (Yao et al., 2022), comparing against ReAct/FIFO History (Yao et al., 2023), a Summary Agent , and ZipAct-B , our budget-matched adaptation of ZipAct (Pan et al., 2026). All budgeted methods share the same tokenizer-measured historical-memory capacity, infor-mation contract, task split, evaluator, and failure denominator. 7Preprint Table 2: Results for Setting II in the goal-observable setting at Bmain = 8 K historical-memory tokens. All budget-constrained methods use the same persistent-memory budget, retrieval protocol, and answer model within each backbone block. Reported results are mean ± SD over three inde-pendent seeds.                                                                                                                 
+
+> Model Method AppWorld TGC (%) WebShop SR (%) Normal Challenge GLM-5.3-Flash ReAct / FIFO History 35 .1±1.919 .3±1.743 .6±1.5
+> Summary Agent 33 .8±2.118 .1±1.940 .8±1.7
+> ZipAct 39 .8±1.523 .7±1.449 .6±1.3
+> MemPrice (Ours) 42 .2±1.725 .8±1.553 .1±1.4
+> DeepSeek-V4.1-Flash ReAct / FIFO History 36 .9±1.920 .9±1.745 .8±1.6
+> Summary Agent 35 .3±1.619 .4±2.043 .1±1.8
+> ZipAct 41 .4±1.425 .0±1.552 .0±1.5
+> MemPrice (Ours) 44 .0±1.627 .0±1.855 .8±1.3
+> Qwen3.8-Flash ReAct / FIFO History 36 .0±1.720 .1±1.546 .2±1.5
+> Summary Agent 34 .7±1.918 .7±1.743 .5±1.9
+> ZipAct 40 .4±1.624 .1±1.350 .8±1.4
+> MemPrice (Ours) 42 .7±1.526 .3±1.655 .1±1.6
+
+We repeat the main comparison with GLM-5.3-Flash Zeng et al. (2026), Qwen3.8-Flash Qiu et al. (2026), and DeepSeek-V4.1-Flash Xu et al. (2026). For each model–dataset pair, all methods use the same reader/agent, prompting interface, tokenizer, and decoding configuration. The historical-memory budget B excludes the current query or goal, current observation, system prompt, tool schemas, and output reserve. Our method uses five ordered representations—raw, summary, ab-straction, keywords, and delete—and jointly allocates them with an exact multiple-choice knapsack solver. We set the target occupancy to α = 0 .8, maintain the persistent pressure state λt = cQ t/√t,and trigger maintenance at capacity pressure or after at most L = 10 interactions. The scale 
+
+c is selected on development data using occupancy only. We report the primary comparison at 
+
+B⋆ = Bmax /2 and average all main results over three random seeds. 5.2 MAIN RESULTS 
+
+Setting I: query-blind resource allocation Table 1 shows a consistent advantage of MemPrice under matched memory budgets. †Full Context uses the complete history and is reported only as an unconstrained reference; it is excluded from best/second-best ranking. All reported Overall scores are weighted by the corresponding category sizes. On LongMemEval-S, MemPrice improves the strongest constrained baseline across the three backbones and ranks first in every query category. More importantly, the gain is highly non-uniform across query types: improvements are modest on single-hop questions, but become substantially larger on multi-hop, temporal, and knowledge-update queries. This pattern suggests that MemPrice is most useful when memory items compete for ca-pacity over longer dependencies, where simple recency or salience scores are insufficient to capture their future value. LoCoMo exhibits the same trend in a weaker form: MemPrice remains best over-all across all backbones, while individual single-hop or temporal subsets can still favor LRE-SelfSup or Dense Salience. This indicates that the benefit comes primarily from difficult allocation decisions rather than uniformly improving retrieval. Finally, MemPrice still trails Full Context, showing that better allocation cannot fully recover information removed by a hard budget; instead, it narrows the performance loss by preserving a more useful subset of the history. 
+
+Setting II: goal-observable resource allocation Table 2 shows that MemPrice consistently out-performs all baselines across three backbones and both agent benchmarks, with ZipAct being the strongest competitor in every setting. The improvement is particularly pronounced on WebShop, where MemPrice exceeds ZipAct by 2.7–3.3 points, compared with more moderate gains on Ap-pWorld. This suggests that adaptive memory allocation is especially beneficial for long-horizon interactive tasks, where preserving goal-relevant states and past actions is critical for subsequent decisions. In contrast, the smaller gains on AppWorld Challenge indicate that, as task difficulty increases, failures are increasingly driven by planning and execution rather than memory alone. We also observe that Summary Agent consistently underperforms even FIFO history, suggesting that ag-8Preprint Table 3: Ablation study with GLM-5.3-Flash as the backbone. Each variant removes or replaces a single component of the full method while keeping all other components unchanged. FIFO History is included as a non-ablation reference.                              
+
+> Method LongMemEval-S QA Acc. (%) LoCoMo F1 (%) AppWorld TGC (%) WebShop SR (%)
+> Ours (Full) 76.0 47.8 42.2 53.1
+> Fixed Price 70.9 44.6 41.5 50.9 Raw/Delete 34.7 32.6 36.3 45.1 Greedy Allocation 73.5 45.8 40.8 51.7 Reset Q71.6 45.2 41.7 50.5 No Recovery 74.4 44.1 41.8 50.7 FIFO History 30.4 31.2 35.1 43.6
+
+Table 4: Sensitivity to the target occupancy parameter α at B⋆. Task columns report each bench-mark’s primary quality metric; for AppWorld, we report TGC on Test-Normal. Mean occupancy is the normalized historical-memory load averaged across the four benchmarks. The default is α = 0 .8.                    
+
+> α
+> LongMemEval-S QA Acc. (%) LoCoMo F1 (%) AppWorld TGC (%) WebShop SR (%) Mean Occupancy 0.6 73.2 45.6 40.7 51.4 0.59 0.7 75.1 47.2 41.8 52.7 0.70 0.8 76.0 47.8 42.2 53.1 0.79 0.9 75.8 48.0 42.3 53.0 0.88
+
+gressive summarization can discard fine-grained actionable information that remains important for agent execution. Overall, the consistent gains across backbones indicate that MemPrice improves how a fixed memory budget is allocated rather than relying on a particular underlying model. 5.3 ABLATION STUDY 
+
+Table 3 reveals several complementary roles of our design. The largest degradation comes from 
+
+Raw/Delete , especially on LongMemEval-S and LoCoMo, showing that memory management should not be reduced to deciding what to keep or discard; intermediate-fidelity representations are essential for preserving useful evidence under tight budgets. Fixed Price and Reset Q also hurt more on memory-intensive benchmarks, suggesting that memory pressure is both task-dependent and persistent over time, and therefore benefits from adaptive pricing and a stateful pressure signal. Replacing joint allocation with a greedy rule causes a smaller but consistent loss, indicating that coordination across memory items matters beyond local decisions. Finally, No Recovery remains competitive on AppWorld but degrades more on LoCoMo and WebShop, suggesting that recovery is particularly useful when earlier compression decisions can become important again later in a long interaction. Overall, the ablations support our view that effective memory management requires not only compression, but adaptive and reversible allocation under evolving memory pressure. 5.4 SENSITIVITY ANALYSIS 
+
+Table 4 studies the target occupancy parameter α, which determines how aggressively the mem-ory allocator frees capacity when memory pressure is encountered. Increasing α from 0.6 to 0.8
+
+consistently improves task quality across all four benchmarks. With a small α, the allocator leaves substantial unused headroom after compression, which reduces future memory pressure but also removes or downsamples useful historical information too aggressively. Allowing the memory to operate at a higher occupancy preserves more relevant evidence and therefore improves downstream performance. Importantly, α also controls a systems-level trade-off between memory utilization and inference cost. A larger α allows the model to use a greater fraction of the available context but leaves less free capacity after each compression event. As new observations accumulate, the mem-ory therefore reaches the allocation boundary again sooner or compress tighter, leading to more frequent compression and reallocation operations. These additional memory-management calls in-crease auxiliary token consumption and can also increase end-to-end inference latency. Conversely, 9Preprint a smaller α reduces this overhead by maintaining more headroom but sacrifices task quality through more aggressive compression. 
+
+## 6 CONCLUSIONS 
+
+We study long-term agent memory as a resource-allocation problem under limited memory budgets. Rather than treating memory management as only retention, deletion, or compression, we consider how an agent should allocate limited capacity across historical information with different utility and storage costs. We propose a budget-aware framework that combines adaptive memory pricing, multi-fidelity representations, and joint allocation. Experiments on long-context QA and interactive agent benchmarks show that explicitly managing memory pressure leads to more effective and robust use of limited memory. Our work has several limitations. The current framework relies on estimated utility signals and a predefined set of memory operations, and mainly focuses on memory capacity rather than jointly considering computation, retrieval, and latency. 
+
+## REFERENCES 
+
+Shipra Agrawal, Zizhuo Wang, and Yinyu Ye. A dynamic near-optimal algorithm for online linear programming. Operations Research , 62(4):876–890, 2014. Ruicheng Ao, Jiashuo Jiang, and David Simchi-Levi. Learning to price with resource constraints: From full information to machine-learned prices. Advances in Neural Information Processing Systems , 38:91243–91281, 2026. Prateek Chhikara, Dev Khant, Saket Aryan, Taranjeet Singh, and Deshraj Yadav. Mem0: Building production-ready ai agents with scalable long-term memory. arXiv preprint arXiv:2504.19413 ,2025. Nikhil R Devanur and Kamal Jain. Online matching with concave returns. In Proceedings of the forty-fourth annual ACM symposium on Theory of computing , pp. 137–144, 2012. Rodolphe Jenatton, Jim Huang, and C´ edric Archambeau. Adaptive algorithms for online convex optimization with long-term constraints. In International Conference on Machine Learning , pp. 402–411. PMLR, 2016. Jiashuo Jiang and Jiawei Zhang. Online resource allocation with stochastic resource consumption. 
+
+arXiv preprint arXiv:2012.07933 , 2020. Jiashuo Jiang, Xiaocheng Li, and Jiawei Zhang. Online stochastic optimization with wasserstein-based nonstationarity. Management Science , 71(11):9104–9122, 2025. Xiaocheng Li and Yinyu Ye. Online linear programming: Dual convergence, new algorithms, and regret bounds. Operations Research , 70(5):2948–2966, 2022. Nusrat Jahan Lia and Aritra Mazumder. Learning what not to forget: Long-horizon agent memory from a few kilobytes of learning, 2026. URL https://arxiv.org/abs/2606.20954 .Shang Liu, Jiashuo Jiang, and Xiaocheng Li. Non-stationary bandits with knapsacks. Advances in Neural Information Processing Systems , 35:16522–16532, 2022. Adyasha Maharana, Dong-Ho Lee, Sergey Tulyakov, Mohit Bansal, Francesco Barbieri, and Yuwei Fang. Evaluating very long-term conversational memory of LLM agents. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) ,pp. 13851–13870. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024. acl-long.747. URL https://aclanthology.org/2024.acl-long.747/ .Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G. Patil, Ion Stoica, and Joseph E. Gonzalez. Memgpt: Towards llms as operating systems. arXiv preprint arXiv:2310.08560 , 2023. Zhiming Pan, Junyu Luo, Zhiping Xiao, Kaize Ding, Xiao Luo, and Ming Zhang. Zipact: Zip-ping interaction history into a compact state for efficient LLM agents. Transactions on Machine Learning Research , 2026. ISSN 2835-8856. URL https://openreview.net/forum? id=ZssIalqqrz .10 Preprint Joon Sung Park, Joseph C. O’Brien, Carrie J. Cai, Meredith Ringel Morris, Percy Liang, and Michael S. Bernstein. Generative agents: Interactive simulacra of human behavior. In Proceed-ings of the 36th Annual ACM Symposium on User Interface Software and Technology , 2023. doi: 10.1145/3586183.3606763. Zihan Qiu, Zekun Wang, Xiao Li, Yanpeng Li, Yang Xu, Yixuan Wang, Huaqing Zhang, Rui Men, Bochao Mao, Chengruidong Zhang, et al. On the design of qwen3. 8-next architecture: Evalua-tion, efficiency, and training stability. arXiv preprint arXiv:2608.30320 , 2026. Noah Shinn, Federico Cassano, Ashwin Gopinath, Karthik Narasimhan, and Shunyu Yao. Reflex-ion: Language agents with verbal reinforcement learning. In Advances in Neural Information Processing Systems , volume 36, 2023. Weiwei Sun, Miao Lu, Zhan Ling, Kang Liu, Xuesong Yao, Yiming Yang, and Jiecao Chen. Scaling long-horizon llm agent via context-folding. arXiv preprint arXiv:2510.11967 , 2025. Harsh Trivedi, Tushar Khot, Mareike Hartmann, Ruskin Manku, Vinty Dong, Edward Li, Shashank Gupta, Ashish Sabharwal, and Niranjan Balasubramanian. AppWorld: A controllable world of apps and people for benchmarking interactive coding agents. In Proceedings of the 62nd Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 16022– 16076. Association for Computational Linguistics, 2024. doi: 10.18653/v1/2024.acl-long.850. URL https://aclanthology.org/2024.acl-long.850/ .Lei Wei, Xiao Peng, Tt, Guannan Zhang, Chenhao Jiang, Hongyu Li, Lanbo Lin, Yuanwu Xu, Jiayao Liu, Kesu Wang, and Bin Wang. PACE: Predictive adaptive context extraction for long-horizon LLM agents. In Maria Liakata, Viviane P. Moreira, Jiajun Zhang, and David Jurgens (eds.), 
+
+Proceedings of the 64th Annual Meeting of the Association for Computational Linguistics (Volume 1: Long Papers) , pp. 27184–27199, San Diego, California, United States, July 2026. Association for Computational Linguistics. ISBN 979-8-89176-390-6. doi: 10.18653/v1/2026.acl-long.1252. URL https://aclanthology.org/2026.acl-long.1252/ .Di Wu, Hongwei Wang, Wenhao Yu, Yuwei Zhang, Kai-Wei Chang, and Dong Yu. LongMemEval: Benchmarking chat assistants on long-term interactive mem-ory. In International Conference on Learning Representations , 2025. URL 
+
+https://proceedings.iclr.cc/paper_files/paper/2025/hash/ d813d324dbf0598bbdc9c8e79740ed01-Abstract-Conference.html .Anyi Xu, B Li, Bangcai Lin, Bing Xue, BingCheng Xian, Bingzheng Xu, Bochao Wu, Bowei Zhang, Boyi Deng, CC Yu, et al. Deepseek-v4. 1-flash: Pushing the limits of kv cache compression. arXiv preprint arXiv:2609.19969 , 2026. Wujiang Xu, Zujie Liang, Kai Mei, Hang Gao, Juntao Tan, and Yongfeng Zhang. A-mem: Agentic memory for llm agents. In Advances in Neural Information Processing Systems , volume 38, 2025. doi: 10.52202/085713-0593. Shunyu Yao, Howard Chen, John Yang, and Karthik R Narasimhan. Webshop: Towards scalable real-world web interaction with grounded language agents. In Alice H. Oh, Alekh Agarwal, Danielle Belgrave, and Kyunghyun Cho (eds.), Advances in Neural Information Processing Sys-tems , 2022. URL https://openreview.net/forum?id=R9KnuFlvnU .Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik R. Narasimhan, and Yuan Cao. ReAct: Synergizing reasoning and acting in language models. In The Eleventh International Conference on Learning Representations , 2023. URL https://openreview.net/forum? id=WE_vluYUL-X .Rui Ye, Zhongwang Zhang, Kuan Li, Huifeng Yin, Zhengwei Tao, Yida Zhao, Liangcai Su, Liwen Zhang, Wenbiao Yin, Zile Qiao, Xinyu Wang, Pengjun Xie, Fei Huang, Jingren Zhou, Siheng Chen, and Yong Jiang. Agentfold: Long-horizon web agents with proactive context folding. In 
+
+International Conference on Learning Representations , 2026. Hao Yu, Michael Neely, and Xiaohan Wei. Online convex optimization with stochastic constraints. In Advances in Neural Information Processing Systems , volume 30, 2017. 11 Preprint Aohan Zeng, Xin Lv, Zhenyu Hou, Zhengxiao Du, Qinkai Zheng, Bin Chen, Da Yin, Chendi Ge, Chenghua Huang, Chengxing Xie, et al. Glm-5: from vibe coding to agentic engineering. arXiv preprint arXiv:2602.15763 , 2026. Wanjun Zhong, Lianghong Guo, Qiqi Gao, He Ye, and Yanlin Wang. Memorybank: Enhancing large language models with long-term memory. arXiv preprint arXiv:2305.10250 , 2023. Yiming Zong and Jiashuo Jiang. Online semi-infinite linear programming: Efficient algorithms via function approximation. arXiv preprint arXiv:2603.16200 , 2026. 
+
+## A RELATED WORKS 
+
+Agent memory and long-horizon context management. A growing body of work equips lan-guage agents with persistent memory beyond the model’s immediate context window. Reflexion stores linguistic feedback from previous trials in an episodic memory buffer to improve subsequent decisions (Shinn et al., 2023), while Generative Agents maintain a stream of experiences and re-trieve memories according to factors such as relevance, recency, and importance, together with higher-level reflection (Park et al., 2023). MemoryBank further introduces selective reinforcement and forgetting for long-term conversational memory (Zhong et al., 2023). Other systems emphasize memory architecture and organization. MemGPT manages information across hierarchical memory tiers through an operating-system-inspired virtual context mechanism (Packer et al., 2023); Mem0 dynamically extracts, consolidates, and retrieves salient conversational information (Chhikara et al., 2025); and A-MEM organizes memories into an evolving network whose representations and as-sociations can change as new experiences arrive (Xu et al., 2025). These approaches substantially extend the temporal reach of LLM agents, but primarily focus on how memories are stored, orga-nized, updated, or retrieved. In contrast, our work isolates a complementary question: given the information currently available to an agent, how should scarce active-context capacity be allocated among competing memories and representation levels? 
+
+Adaptive context selection and compression. Recent work has moved beyond static memory retrieval toward actively controlling the contents and granularity of an agent’s working context. Context-Folding allows an agent to branch into temporary sub-trajectories and subsequently fold in-termediate reasoning into compact summaries, thereby preventing context growth on long-horizon tasks (Sun et al., 2025). AgentFold similarly treats the context as a dynamic workspace and learns proactive folding operations at different granularities, explicitly addressing the tension between unbounded raw trajectories and irreversible information loss from fixed summarization (Ye et al., 2026). Most closely related to our setting, PACE formulates context construction as a Next Step Prediction problem and adjusts the representation granularity of historical information according to its predicted relevance for the agent’s upcoming action (Wei et al., 2026). These methods demon-strate the importance of selectively preserving detail rather than applying uniform truncation or summarization. Our perspective is complementary: rather than primarily predicting which history will be useful next or learning when to fold a trajectory, we explicitly model active context as a shared resource. Memory items with heterogeneous retention value and footprint compete for this resource, and allocation jointly determines both which items remain active and the granularity at which they are represented. This makes the opportunity cost of memory occupancy explicit and enables conversation-level resource control rather than treating context pressure only as a local se-lection or compression signal. 
+
+Online Resource Allocation and Long-Term Constraints. Online resource allocation can be viewed as sequential optimization under intertemporal constraints, where current decisions affect both immediate rewards and future resource availability. A classical approach is to associate re-source constraints with dual prices that quantify the marginal value of capacity (Devanur & Jain, 2012). These prices can be updated dynamically as information accumulates (Agrawal et al., 2014; Li & Ye, 2022), and related models have been studied under stochastic resource consumption (Jiang & Zhang, 2020) and non-stationary input distributions (Jiang et al., 2025). Such constrained al-location problems are closely connected to online optimization with long-term constraints, where primal-dual mechanisms balance objective performance and cumulative feasibility. This perspective has been studied in OCO through regret and constraint-violation guarantees (Jenatton et al., 2016; 12 Preprint Yu et al., 2017; Ao et al., 2026; Zong & Jiang, 2026), and also arises in resource-constrained learning problems such as bandits with knapsacks (Liu et al., 2022). 
+
+## B EXPECTATION -FEASIBLE GLOBAL SAME -STATE BENCHMARK 
+
+The main text evaluates MemPrice against a global same-state comparator whose occupancy budget is enforced on each realized evaluation prefix. Here we consider a more permissive expectation-feasible counterpart that matches the average-occupancy constraint in Eq. 1. Let ω denote a realiza-tion of all randomness in the interaction and in MemPrice, including any randomness in the oracle and refresh pipeline. For each round t and realization ω, let 
+
+Aalg  
+
+> t
+
+(B; ω)
+
+denote the feasible allocation set induced by MemPrice’s realized memory state. The memory-state trajectory is fixed to that generated by MemPrice: choices made by the hindsight comparator are evaluated counterfactually and do not alter the feasible sets at later rounds. Let ζ denote an auxiliary random seed independent of the randomness generating MemPrice’s tra-jectory. A randomized same-state hindsight selector π observes the complete realized prefix and selects 
+
+bπt (ω, ζ ) ∈ A alg  
+
+> t
+
+(B; ω).
+
+Expectations below are taken jointly over ω and ζ. Thus, π may use full hindsight when choosing each bπt , but it cannot recover representations that were unavailable on MemPrice’s realized tra-jectory or induce a different future memory state. Let Πss  
+
+> T
+
+denote the set of all such measurable selectors. We call a selector π ∈ Πss  
+
+> T
+
+expectation-feasible if 
+
+Eω,ζ 
+
+" TX
+
+> t=1
+
+gt(bπt )
+
+#
+
+≤ αT. (8) The per-round feasible-set constraint holds pathwise, whereas the cumulative occupancy budget in Eq. equation 8 is imposed only in expectation. Hence, the comparator may use more than αT total normalized occupancy on some realizations and less on others, while remaining within the hard capacity at every round. Define 
+
+Πegss  
+
+> T
+
+:= 
+
+(
+
+π ∈ Πss  
+
+> T
+
+: Eω,ζ 
+
+" TX
+
+> t=1
+
+gt(bπt )
+
+#
+
+≤ αT 
+
+)
+
+.
+
+The expectation-feasible global same-state hindsight value and its associated regret are 
+
+OPT egss  
+
+> T
+
+:= sup 
+
+> π∈Πegss
+> T
+
+Eω,ζ 
+
+" TX
+
+> t=1
+
+Ut(bπt )
+
+#
+
+, (9) and 
+
+Reg egss  
+
+> T
+
+:= OPT egss  
+
+> T
+
+−Eω,ζ 
+
+" TX
+
+> t=1
+
+Ut(at)
+
+#
+
+. (10) We refer to this comparator as EGSS. Every pathwise-feasible same-state selector is expectation-feasible, so this comparator is at least as permissive as the benchmark in the main text. Since the cumulative occupancy constraint is imposed only in expectation, the corresponding dual comparison requires a deterministic shadow price shared across realizations. 
+
+Assumption 3 (Expected priced-frontier regularity) . For every T , there exists a deterministic λ⋆T ≥
+
+0 such that 
+
+E
+
+" TX
+
+> t=1
+
+
+
+Φt(λ⋆T ) − inf  
+
+> λ≥0
+
+Φt(λ)
+
+#
+
+≤ ∆E 
+
+> T
+
+,
+
+where ∆E 
+
+> T
+
+= o(T ) is deterministic. 13 Preprint 
+
+Theorem 2 (Expectation-level global guarantee) . Under Assumptions 1 and 3, for any evaluation prefix T ≥ 1,
+
+Reg egss  
+
+> T
+
+≤ c√T + 2 ET + ∆ E 
+
+> T
+
+. (11) 
+
+Moreover, MemPrice satisfies 
+
+E
+
+"
+
+1
+
+T
+
+> T
+
+X
+
+> t=1
+
+gt(at)
+
+#
+
+≤ α + U + 2 ϵαc √T + 1
+
+T . (12) Theorem 2 shows that the main guarantees extend to the more permissive expectation-feasible com-parator aligned with Eq. equation 1. If ET + ∆ E 
+
+> T
+
+= o(T ), the average EGSS regret vanishes; if both terms are O(√T ), the cumulative regret remains O(√T ). Moreover, the excess expected average occupancy above α vanishes as O(T −1/2).Importantly, this extension relaxes only how the long-run occupancy budget is enforced. The com-parator remains same-state: it may redistribute context usage across time and stochastic realizations, but cannot undo MemPrice’s earlier compression decisions or follow an independent memory tra-jectory. 
+
+## C A S UFFICIENT CONDITION FOR PRICED -F RONTIER REGULARITY 
+
+We give a simple sufficient condition for Assumption 2 in terms of the dispersion of the round-wise optimal shadow prices. For each round t, define 
+
+Λ⋆t := arg min  
+
+> λ≥0
+
+Φt(λ).
+
+The set Λ⋆t is nonempty and contained in [0 , U /α ]. Indeed, the all-delete action gives Φt(λ) ≥ αλ ,while Φt(0) ≤ U . Moreover, since gt(a) ∈ [0 , 1] , the function Φt is 1-Lipschitz in λ. Therefore, for any λ ≥ 0,
+
+Φt(λ) − inf  
+
+> μ≥0
+
+Φt(μ) ≤ dist( λ, Λ⋆t ),
+
+where 
+
+dist( λ, S ) := inf  
+
+> μ∈S
+
+|λ − μ|.
+
+Consequently, Assumption 2 holds whenever there exists a deterministic sequence RT = o(T ) such that, almost surely, 
+
+inf 
+
+> λ∈[0 ,U /α ]
+> T
+
+X
+
+> t=1
+
+dist( λ, Λ⋆t ) ≤ RT .
+
+A more concrete sufficient condition is obtained when, for each prefix T , there exists a common price ¯λT ∈ [0 , U /α ] such that all but mT = o(T ) rounds satisfy 
+
+dist( ¯λT , Λ⋆t ) ≤ ρT , ρT = o(1) .
+
+Then 
+
+inf 
+
+> λ∈[0 ,U /α ]
+> T
+
+X
+
+> t=1
+
+dist( λ, Λ⋆t ) ≤ (T − mT )ρT + mT
+
+Uα = o(T ),
+
+and hence Assumption 2 follows. Thus, priced-frontier regularity permits a sublinear number of atypical rounds while requiring the optimal memory shadow prices on the remaining rounds to concentrate around a common value. 
+
+## D PROOF OF PROPOSITION 1
+
+Fix B > 0 and α ∈ (0 , 1] , and write 
+
+q := 
+
+ 1
+
+α
+
+
+
+, M := q + 1 .
+
+14 Preprint Let L, T > M be integers, and fix any possibly randomized, non-anticipating allocator satisfying 
+
+at ∈ A t(B) at every round. The fixed, non-anticipating refresh pipeline is the same for the on-line allocator and the hindsight comparator. Partition the T -round prefix into windows of lengths 
+
+n1, . . . , n W , with nw = L for w < W , 1 ≤ nW ≤ L, and T = PWw=1 nw. We construct a family of instances {I z : z ∈ { 1, . . . , M }W }, where zw identifies the candidate that becomes relevant in window w. We choose exogenous arrivals, so allocation decisions change memory states but not the subsequent interaction sequence. All raw candidate records and all auxiliary arrivals other than the target-revelation signals are fixed independently of z. A window’s target affects the interaction only through its revelation and the subsequent utility profiles in that window. 
+
+A common prefix in each window. In the first min {M, n w} rounds of window w, one new can-didate arrives per round. Candidates have distinct identities across windows, and their raw contents are absent from earlier transcripts. Throughout its arrival window, each candidate has raw size αB ;all non-raw representations have zero size and utility. This is a special case of the five-level repre-sentation model and satisfies its monotonicity requirements. All candidates have zero utility through local round M . If nw > M , the interaction reveals zw
+
+at round M + 1 without reproducing the candidate’s raw contents. Its raw representation then has utility one until the window ends, while all other representations have utility zero. Carried history and items from earlier windows have zero utility throughout the current window. Other arrivals have zero utility and never reproduce a raw candidate. The oracle is exact, and 0 ≤ Ut(a) ≤ 1 for every feasible allocation on either policy’s memory trajectory. The arrivals and oracle profiles in the first min {M, n w} rounds do not depend on zw. Thus the allocator receives no information about the target before its revelation. Allocation within a window only selects representation levels for existing resident items; it does not introduce new copies of discarded candidates. Together with the irreversible representation constraint and the absence of within-window archive access, this prevents recovery of a lost raw representation before the window ends. The allocator may carry its full internal state across boundaries; no reset is imposed in the construction. 
+
+Feasibility and value of the hindsight benchmark. In each window with nw > M , the hindsight policy deletes all carried and non-target items and retains candidate zw in raw form from its arrival until the window ends. In a window with nw ≤ M , it deletes all items. Its post-allocation occupancy satisfies 
+
+G⋆t ≤ αB ≤ B, t = 1 , . . . , T, 
+
+> T
+
+X
+
+> t=1
+
+g⋆t ≤ αT. 
+
+This policy uses the same fixed refresh pipeline: the returned context is deleted at the next allocation. The policy earns (nw − M )+ in window w. No policy can earn more, since each round after the first M has utility at most one and all earlier rounds have utility zero. Writing OPT ind  
+
+> T
+
+(Iz ) for the independent-state hindsight optimum, we obtain 
+
+OPT ind  
+
+> T
+
+(Iz ) = 
+
+> W
+
+X
+
+> w=1
+
+(nw − M )+. (13) This value holds for every realization of the boundary pipeline. 
+
+Online utility under fresh uncertainty. For the averaging argument, draw Z1, . . . , Z W indepen-dently and uniformly from {1, . . . , M }. Let ξ be an exogenous random tape driving the allocator and the fixed boundary pipeline, sampled independently of Z = ( Z1, . . . , Z W ). Conditional on ξ,their responses are deterministic functions of the information available to them. Consider a window with nw > M . Let Sw be the set of its candidates retained in raw form im-mediately after the local round-M allocation. Since qαB ≤ B < (q + 1) αB , hard feasibility gives |Sw| ≤ q. By non-anticipation and the common observable prefix, Sw is determined by 
+
+(ξ, Z 1, . . . , Z w−1) and does not depend on Zw. Hence 
+
+P(Zw ∈ Sw | ξ, Z 1, . . . , Z w−1) = |Sw|
+
+M ≤ qM .
+
+15 Preprint The allocator earns positive utility after local round M only if Zw ∈ Sw, and even then earns at most nw − M . Therefore, 
+
+EZ,ξ 
+
+" nwX
+
+> k=1
+
+Uw,k (aw,k )
+
+#
+
+≤ qM (nw − M )+.
+
+The same inequality holds trivially when nw ≤ M . Summing over windows yields 
+
+EZ,ξ 
+
+" TX
+
+> t=1
+
+Ut(at)
+
+#
+
+≤ qM
+
+> W
+
+X
+
+> w=1
+
+(nw − M )+.
+
+A fixed hard instance over the full interaction. For a fixed target vector z, define 
+
+ρ(z) := Eξ
+
+"
+
+OPT ind  
+
+> T
+
+(Iz ) −
+
+> T
+
+X
+
+> t=1
+
+Ut(at)
+
+#
+
+.
+
+Combining the preceding inequality with equation 13 gives 
+
+1
+
+M W
+
+X 
+
+> z∈{ 1,...,M }W
+
+ρ(z) ≥
+
+
+
+1 − qM
+
+ WX
+
+> w=1
+
+(nw − M )+ = 1
+
+M
+
+> W
+
+X
+
+> w=1
+
+(nw − M )+.
+
+Consequently, there exists a fixed vector z⋆ such that, on Iz⋆ ,
+
+Reg ind  
+
+> T
+
+= ρ(z⋆) ≥ 1
+
+M
+
+> W
+
+X
+
+> w=1
+
+(nw − M )+. (14) The vector z⋆ may depend on the allocator and T , but not on the realized random seed. 
+
+A linear bound in the interaction length. Write T = KL +r, where K = ⌊T /L ⌋ and 0 ≤ r < L .Then WX
+
+> w=1
+
+(nw − M )+ = K(L − M ) + ( r − M )+.
+
+Since L ≥ M + 1 ,
+
+L − M ≥ LM + 1 , (r − M )+ ≥ r − MM + 1 .
+
+Substituting into equation 14 gives 
+
+Reg ind  
+
+> T
+
+≥ K(L − M ) + ( r − M )+
+
+M ≥ KL + r − MM (M + 1) = T − MM (M + 1) ,
+
+which proves equation 4. For fixed α, M is constant; in particular, for T ≥ 2M ,
+
+Reg ind  
+
+> T
+
+≥ T
+
+2M (M + 1) .
+
+Thus the worst-case expected regret is Ωα(T ).
+
+## E PROOF OF THEOREM 1
+
+Fix an evaluation prefix T and work on the probability-one event on which Assumptions 1 and 2 hold up to T . Set zt := gt(at) − α. Since gt(at) ∈ [0 , 1] and α ∈ (0 , 1] , we have zt ∈ [−α, 1 − α] ⊆
+
+[−1, 1] .
+
+Hard-capacity feasibility. Along MemPrice’s realized trajectory, Aalg  
+
+> t
+
+(B) = At(B), and Algo-rithm 1 selects at ∈ A t(B) at every round. Hence 
+
+Gt(at) ≤ B, t = 1 , . . . , T. 
+
+Thus hard-capacity feasibility holds for every execution. 16 Preprint 
+
+Global same-state comparison. Recall the priced frontier 
+
+Φt(λ) := max  
+
+> a∈A alg
+> t(B)
+
+Ut(a) − λ gt(a) − α .
+
+For any λ ≥ 0 and any feasible sequence (bt)Tt=1 in the global same-state benchmark, 
+
+> T
+
+X
+
+> t=1
+
+Ut(bt) = 
+
+> T
+
+X
+
+> t=1
+
+Ut(bt) − λ gt(bt) − α + λ
+
+> T
+
+X
+
+> t=1
+
+ gt(bt) − α
+
+≤
+
+> T
+
+X
+
+> t=1
+
+Φt(λ),
+
+where the inequality uses PTt=1 gt(bt) ≤ αT . For the fixed prefix T , let λ⋆T be a common price satisfying Assumption 2, and it holds that 
+
+OPT gss  
+
+> T
+
+≤
+
+> T
+
+X
+
+> t=1
+
+Φt(λ⋆). (15) At round t, exact maximization of the estimated priced objective and Assumption 1 imply 
+
+Ut(at) − λt
+
+ gt(at) − α ≥ Φt(λt) − 2et. (16) Indeed, the additive term λtα is independent of the action, and the definition of et implies that replacing estimated utilities by true utilities loses at most 2et.Combining equation 15 and equation 16 gives, pathwise, 
+
+OPT gss  
+
+> T
+
+−
+
+> T
+
+X
+
+> t=1
+
+Ut(at) ≤
+
+> T
+
+X
+
+> t=1
+
+Φt(λ⋆) − Φt(λt) −
+
+> T
+
+X
+
+> t=1
+
+λtzt + 2 
+
+> T
+
+X
+
+> t=1
+
+et
+
+≤ ∆T −
+
+> T
+
+X
+
+> t=1
+
+λtzt + 2 
+
+> T
+
+X
+
+> t=1
+
+et. (17) where the second inequality follows from Φt(λt) ≥ inf  
+
+> λ≥0
+
+Φt(λ) and Assumption 2. 
+
+Global queue drift. The queue recursion gives 
+
+Q2 
+
+> t+1
+
+= [ Qt + zt]2+ ≤ Q2 
+
+> t
+
++ 2 Qtzt + z2 
+
+> t
+
+.
+
+Using λt = ηtQt and z2 
+
+> t
+
+≤ 1,
+
+−λtzt ≤ ηt
+
+2
+
+ Q2 
+
+> t
+
+− Q2
+
+> t+1
+
+ + ηt
+
+2 .
+
+Since ηt = c/ √t is nonincreasing and Q1 = 0 ,
+
+> T
+
+X
+
+> t=1
+
+ηt
+
+ Q2 
+
+> t
+
+− Q2
+
+> t+1
+
+ = η1Q21 +
+
+> T
+
+X
+
+> t=2
+
+(ηt − ηt−1)Q2 
+
+> t
+
+− ηT Q2 
+
+> T+1
+
+≤ 0.
+
+Therefore, 
+
+−
+
+> T
+
+X
+
+> t=1
+
+λtzt ≤ 12
+
+> T
+
+X
+
+> t=1
+
+ηt = c
+
+2
+
+> T
+
+X
+
+> t=1
+
+1
+
+√t ≤ c√T . (18) Combining equation 17 and equation 18 yields 
+
+OPT gss  
+
+> T
+
+−
+
+> T
+
+X
+
+> t=1
+
+Ut(at) ≤ c√T + 2 
+
+> T
+
+X
+
+> t=1
+
+et + ∆ T .
+
+Taking expectations and using ET = PTt=1 E[et] gives 
+
+Reg gss  
+
+> T
+
+≤ c√T + 2 ET + ∆ T . (19) 17 Preprint 
+
+Controlling occupancy through the all-delete action. Let a0 
+
+> t
+
+denote the all-delete allocation. It is feasible and satisfies 
+
+Ut(a0 
+
+> t
+
+) = 0 , gt(a0 
+
+> t
+
+) = 0 .
+
+Exact maximization of the estimated priced objective gives 
+
+bUt(at) − λtgt(at) ≥ bUt(a0 
+
+> t
+
+).
+
+Assumption 1 therefore implies 
+
+λtgt(at) ≤ bUt(at) − bUt(a0 
+
+> t
+
+)
+
+≤ Ut(at) − Ut(a0 
+
+> t
+
+) + 2 et
+
+≤ U + 2 ϵ a.s. Set 
+
+CU := U + 2 ϵ, Θt := CU
+
+αη t
+
+= CU
+
+αc 
+
+√t. 
+
+The sequence Θt is nondecreasing. Whenever Qt > Θt,
+
+λt = ηtQt > CU
+
+α ,
+
+and hence 
+
+gt(at) ≤ CU
+
+λt
+
+< α. 
+
+Thus Qt+1 ≤ Qt whenever Qt > Θt.We claim that 
+
+Qt+1 ≤ Θt + 1 , t ≥ 1. (20) For t = 1 ,
+
+Q2 = [ g1(a1) − α]+ ≤ 1 ≤ Θ1 + 1 .
+
+Suppose t ≥ 2 and Qt ≤ Θt−1 + 1 . If Qt ≤ Θt, then 
+
+Qt+1 ≤ Qt + 1 ≤ Θt + 1 .
+
+If Qt > Θt, then 
+
+Qt+1 ≤ Qt ≤ Θt−1 + 1 ≤ Θt + 1 .
+
+This proves equation 20, and in particular 
+
+QT +1 ≤ U + 2 ϵαc 
+
+√T + 1 . (21) 
+
+Cumulative occupancy violation. Since [x]+ ≥ x,
+
+Qt+1 ≥ Qt + zt.
+
+Summing from t = 1 to T and using Q1 = 0 gives 
+
+QT +1 ≥
+
+> T
+
+X
+
+> t=1
+
+zt.
+
+Since QT +1 ≥ 0, " TX
+
+> t=1
+
+zt
+
+#
+
+> +
+
+≤ QT +1 .
+
+Therefore, by equation 21, 
+
+Viol T = B
+
+" TX
+
+> t=1
+
+zt
+
+#
+
+> +
+
+≤ BQ T +1 
+
+≤ B
+
+ U + 2 ϵαc 
+
+√T + 1 
+
+
+
+almost surely. This proves all claims of Theorem 1. 18 Preprint 
+
+## F PROOF OF THEOREM 2
+
+Fix an evaluation prefix T , and write 
+
+zt := gt(at) − α. 
+
+Expectation-feasible hindsight comparison. Let π ∈ Πegss  
+
+> T
+
+be any expectation-feasible same-state hindsight selector. By definition, 
+
+bπt (ω, ζ ) ∈ A alg  
+
+> t
+
+(B; ω)
+
+for every round t almost surely, and 
+
+E
+
+" TX
+
+> t=1
+
+gt(bπt )
+
+#
+
+≤ αT. 
+
+For the deterministic price λ⋆T in Assumption 3, 
+
+E
+
+" TX
+
+> t=1
+
+Ut(bπt )
+
+#
+
+= E
+
+" TX
+
+> t=1
+
+ Ut(bπt ) − λ⋆T
+
+ gt(bπt ) − α #
+
++ λ⋆T E
+
+" TX
+
+> t=1
+
+ gt(bπt ) − α#
+
+≤ E
+
+" TX
+
+> t=1
+
+Φt(λ⋆T )
+
+#
+
+.
+
+The last inequality uses λ⋆T ≥ 0, expectation feasibility, and bπt ∈ A alg  
+
+> t
+
+(B) almost surely. Taking the supremum over π ∈ Πegss  
+
+> T
+
+therefore gives 
+
+OPT egss  
+
+> T
+
+≤ E
+
+" TX
+
+> t=1
+
+Φt(λ⋆T )
+
+#
+
+. (22) 
+
+Online frontier comparison. At each round, MemPrice exactly maximizes 
+
+bUt(a) − λtgt(a)
+
+over Aalg  
+
+> t
+
+(B). Under Assumption 1, the same argument as in the proof of Theorem 1 gives, almost surely, 
+
+Ut(at) − λt
+
+ gt(at) − α ≥ Φt(λt) − 2et a.s. (23) Equivalently, 
+
+Ut(at) ≥ Φt(λt) + λtzt − 2et.
+
+Summing over t, taking expectations, and using ET = PTt=1 E[et] yields 
+
+E
+
+" TX
+
+> t=1
+
+Ut(at)
+
+#
+
+≥ E
+
+" TX
+
+> t=1
+
+Φt(λt)
+
+#
+
++ E
+
+" TX
+
+> t=1
+
+λtzt
+
+#
+
+− 2ET . (24) Combining Eqs. equation 22 and equation 24, 
+
+Reg egss  
+
+> T
+
+≤ E
+
+" TX
+
+> t=1
+
+ Φt(λ⋆T ) − Φt(λt)#
+
+− E
+
+" TX
+
+> t=1
+
+λtzt
+
+#
+
++ 2 ET . (25) Since 
+
+Φt(λt) ≥ inf  
+
+> λ≥0
+
+Φt(λ),
+
+Assumption 3 implies 
+
+E
+
+" TX
+
+> t=1
+
+ Φt(λ⋆T ) − Φt(λt)#
+
+≤ ∆E 
+
+> T
+
+. (26) 19 Preprint 
+
+Queue drift. The queue recursion 
+
+Qt+1 = [ Qt + zt]+
+
+implies, pathwise, 
+
+Q2 
+
+> t+1
+
+≤ Q2 
+
+> t
+
++ 2 Qtzt + z2 
+
+> t
+
+.
+
+Since z2 
+
+> t
+
+≤ 1, λt = ηtQt, and ηt = c/ √t,
+
+−λtzt ≤ ηt
+
+2
+
+ Q2 
+
+> t
+
+− Q2
+
+> t+1
+
+ + ηt
+
+2 .
+
+Because ηt is nonincreasing and Q1 = 0 ,
+
+> T
+
+X
+
+> t=1
+
+ηt
+
+ Q2 
+
+> t
+
+− Q2
+
+> t+1
+
+ ≤ 0.
+
+Hence, almost surely, 
+
+−
+
+> T
+
+X
+
+> t=1
+
+λtzt ≤ 12
+
+> T
+
+X
+
+> t=1
+
+ηt ≤ c√T . 
+
+Taking expectations preserves the bound: 
+
+−E
+
+" TX
+
+> t=1
+
+λtzt
+
+#
+
+≤ c√T . (27) Combining Eqs. equation 25, equation 26, and equation 27 gives 
+
+Reg egss  
+
+> T
+
+≤ c√T + 2 ET + ∆ E 
+
+> T
+
+,
+
+which proves Eq. equation 11. 
+
+Expected average occupancy. It remains to establish Eq. equation 12. As in the proof of Theo-rem 1, comparison with the all-delete allocation and Assumption 1 give 
+
+λtgt(at) ≤ U + 2 ϵ. 
+
+Let 
+
+CU := U + 2 ϵ, Θt := CU
+
+αη t
+
+= CU
+
+αc 
+
+√t. 
+
+Whenever Qt > Θt,
+
+λt = ηtQt > CU
+
+α ,
+
+and therefore 
+
+gt(at) ≤ CU
+
+λt
+
+< α. 
+
+Thus Qt+1 ≤ Qt whenever Qt > Θt. The same induction as in Theorem 1 gives 
+
+QT +1 ≤ U + 2 ϵαc 
+
+√T + 1 a.s. Moreover, since 
+
+Qt+1 = [ Qt + zt]+ ≥ Qt + zt,
+
+summing over t gives TX
+
+> t=1
+
+ gt(at) − α =
+
+> T
+
+X
+
+> t=1
+
+zt ≤ QT +1 .
+
+Hence, almost surely, 
+
+1
+
+T
+
+> T
+
+X
+
+> t=1
+
+gt(at) ≤ α + U + 2 ϵαc √T + 1
+
+T .
+
+Taking expectations yields 
+
+E
+
+"
+
+1
+
+T
+
+> T
+
+X
+
+> t=1
+
+gt(at)
+
+#
+
+≤ α + U + 2 ϵαc √T + 1
+
+T ,
+
+which proves Eq. equation 12. 20 Preprint 
+
+## G IMPLEMENTATION DETAILS 
+
+G.1 DETAILED EXPERIMENTAL SETTINGS 
+
+Information regimes. Our experiments distinguish two memory-allocation regimes according to when the downstream information need becomes observable. In Setting I , memory is constructed without access to the terminal query. For a chronological history H, the allocator produces a bounded memory state before the target question is released. Target questions, answers, evidence annotations, question types, and evaluation feedback are therefore unavailable to both the allocator and its utility estimator during memory construction. This setting evaluates whether a memory pol-icy can preserve information that is useful for unknown future requests. In Setting II , the task goal is available from reset and may be used to determine which parts of the interaction history should be retained. Future observations, tool outputs, environment states, and evaluator-only information remain unavailable. This setting corresponds to long-horizon agents that know what they are trying to accomplish but must manage an increasing trajectory online. 
+
+LongMemEval-S. LongMemEval (Wu et al., 2025) evaluates long-term interactive memory over histories containing multiple temporally separated sessions. We use the LongMemEval-S vari-ant as a primary query-blind benchmark. For each history, the complete chronological interaction stream is processed before its associated evaluation questions are released. All questions attached to the same history therefore reuse the same frozen terminal memory state rather than reconstruct-ing memory separately for each question. This prevents the allocator from specializing memory to individual queries. We report the benchmark’s official QA accuracy as the primary metric. The larger LongMemEval-M variant is reserved for long-context stress analysis rather than the primary comparison. 
+
+LoCoMo. LoCoMo (Maharana et al., 2024) evaluates very long-term conversational memory across extended multi-session dialogues. Its questions cover several forms of retrieval and rea-soning, including single-hop factual recall, temporal reasoning, multi-hop questions, and cases re-quiring information to be integrated across distant portions of a conversation. We expose only the chronological conversation while memory is constructed; evaluation questions and their annotations are revealed after the memory state has been frozen. The complete conversation is treated as the evaluation unit, and all methods receive identical session segmentation and memory budgets. We use normalized partial-match F1 as the primary evaluation metric. 
+
+AppWorld. AppWorld (Trivedi et al., 2024) is a stateful interactive benchmark in which an agent operates a collection of applications through structured APIs to satisfy a natural-language goal. Unlike Setting-I benchmarks, the goal is visible before the first action, so memory policies may condition retention decisions on task relevance. The agent does not observe future tool results, future application state, or the benchmark evaluator. Each completed action together with its resulting observation forms a historical interaction unit for memory management. We evaluate separately on the official Test-Normal and Test-Challenge splits. The primary metric is Task Goal Completion (TGC) , for which a task is successful only when its benchmark-native state-based tests are satisfied. Scenario Goal Completion and difficulty-based breakdowns are retained as secondary analyses. 
+
+WebShop. WebShop (Yao et al., 2022) provides a reproducible simulated e-commerce environ-ment in which an agent must search, inspect, and select products satisfying a user-specified shopping goal. The complete goal is available from reset, while future search results, product pages, and envi-ronment transitions are revealed only through the agent’s own actions. WebShop therefore provides a second goal-observable setting with a different interaction structure from AppWorld. Histori-cal search and browsing observations are subject to the same bounded memory interface as other Setting-II tasks. We report Success Rate , the fraction of tasks receiving the maximum terminal reward, as the primary metric and average terminal reward as a secondary metric. 
+
+Setting-I baselines. All Setting-I competitors obey the same query-blind information contract and hard historical-memory budget. Recent/FIFO retains history in reverse chronological order until the budget is exhausted and provides a pure recency control (cf. Park et al., 2023). Uniform Alloca-tion uses the same candidate representation levels as our method but distributes resources uniformly 21 Preprint across memory items, isolating the effect of adaptive allocation. Content Salience ranks memory using query-independent lexical salience, while Dense Salience uses a dense semantic represen-tation; both retain the highest-valued content under the common capacity. LRE-SelfSup (Lia & Mazumder, 2026) learns to predict the future usefulness of history units without observing the fu-ture query. Full Context is reported separately as an unbudgeted upper-reference condition and is not included in matched-resource comparisons. 
+
+Setting-II baselines. ReAct/FIFO History (Yao et al., 2023) uses the standard iterative reasoning-and-action interface while retaining the most recent complete trajectory items under budget. Summary Agent periodically compresses accumulated trajectory history into a global summary, providing a conventional long-horizon context compression control. ZipAct-B is our resource-matched adaptation of ZipAct (Pan et al., 2026). It preserves ZipAct’s recurrent Goal– World–Constraint state update but requires the state visible to the actor to satisfy the same tokenizer-measured hard historical-memory budget B before every action. Thus, differences in task perfor-mance cannot be attributed simply to one method receiving a larger actor-visible context. 
+
+Historical-memory budget. The resource budget B applies only to historical information made visible to the reader or agent at a decision point. The current query or task goal, current observation, system instructions, tool schemas, and reserved output tokens are handled separately when enforcing the physical context-window constraint. Dataset-specific budget grids are determined without using test outcomes from development-history length statistics and available physical-context headroom. We use four budget levels derived from the corresponding maximum feasible budget Bmax , and report the primary single-budget comparison at B⋆ = Bmax /2. All methods within a dataset use exactly the same budget values. 
+
+Multi-fidelity allocation. Each memory item is represented by five ordered fidelity levels: raw ,
+
+summary , abstraction , keywords , and delete . Candidate representations are generated only from the currently available text and cannot restore information already removed from an active repre-sentation. Successive compressed representations target 0.6 of their parent length. Given candidate utilities and tokenizer-measured sizes, our method jointly selects one representation per item through an exact multiple-choice knapsack problem subject to the hard capacity B.The utility estimator obeys the information contract of its setting. For Setting I it evaluates general-purpose future retention utility without access to the terminal query, whereas in Setting II it may condition utility on the task goal already visible to the agent. Utility scores are constrained to [0 , 1] ,delete has zero utility, and candidate utilities are monotonically repaired across decreasing fidelity levels when necessary. 
+
+Adaptive pricing and memory maintenance. We target average normalized occupancy α = 0 .8
+
+and maintain a persistent pressure state 
+
+Qt+1 =
+
+
+
+Qt + Gt
+
+B − α
+
+
+
+> +
+
+,
+
+where Gt denotes the selected historical-memory size. The corresponding adaptive price is 
+
+λt = cQ t
+
+√t .
+
+Both Qt and the global time index persist across memory-maintenance boundaries. The scale c is chosen separately for the two information regimes using development data only, minimizing the deviation between mean occupancy and the target α; downstream task accuracy is never used for this calibration. Allocation is updated as new memory items are admitted. A maintenance boundary occurs when either active memory reaches capacity or the number of interactions since the previous boundary reaches L = 10 . At a boundary, complete raw history is first copied to an append-only external archive, the active memory is compressed, and relevant archived chunks may then be recovered into the next active context. The archive is persistent storage and does not itself count toward the reader-visible budget B; any retrieved text does. Recovery uses BM25 with k1 = 1 .5, b = 0 .75 , and top-8
+
+retrieval, subject again to the hard active-memory capacity. 22 Preprint 
+
+Replication. Every main configuration is evaluated with three shared random seeds, namely 2026, 2027, and 2028. The same seed set is used for all competing policies on a given benchmark so that stochastic variation is paired across methods. Language-model decoding itself remains determin-istic where supported. We report the mean across the three runs together with dispersion in the corresponding result tables. 23

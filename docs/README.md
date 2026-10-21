@@ -4,17 +4,24 @@
     <a class="dpr-home-notice-tutorial" href="#/tutorial/README">使用教程 <span aria-hidden="true">›</span></a>
   </div>
   <div class="dpr-home-notice-entry">
-    <time class="dpr-home-notice-date" datetime="2026-07-20">07.20</time>
+    <time class="dpr-home-notice-date" datetime="2026-10-05">10.05</time>
     <div>
-      <strong class="dpr-home-notice-entry-title">反馈功能上线</strong>
-      <span class="dpr-home-notice-entry-summary">新增反馈功能，欢迎大家踊跃反馈各种建议，我们会第一时间查看并协调处理。</span>
+      <strong class="dpr-home-notice-entry-title">medRxiv 自动更新已恢复</strong>
+      <span class="dpr-home-notice-entry-summary">修复超长摘要导致的向量生成失败，维护任务现会限制单条 embedding 文本长度并分片写入。受影响范围已重新同步，公开读取、关键词检索与语义检索均已验证。</span>
     </div>
   </div>
   <div class="dpr-home-notice-entry">
-    <time class="dpr-home-notice-date" datetime="2026-07-19">07.19</time>
+    <time class="dpr-home-notice-date" datetime="2026-09-16">09.16</time>
     <div>
-      <strong class="dpr-home-notice-entry-title">首页新增社区统计</strong>
-      <span class="dpr-home-notice-entry-summary">现在可以看到今天看论文的人数和项目加入人数。</span>
+      <strong class="dpr-home-notice-entry-title">日报跨日重复推荐已修复</strong>
+      <span class="dpr-home-notice-entry-summary">历史推荐现按原始召回标签与 arXiv 论文标识去重，暂停词条不再参与评分；同一专题次日不会重复推荐相同论文。已有历史页面保留，不自动删除。</span>
+    </div>
+  </div>
+  <div class="dpr-home-notice-entry">
+    <time class="dpr-home-notice-date" datetime="2026-09-09">09.09</time>
+    <div>
+      <strong class="dpr-home-notice-entry-title">90天/365天 arXiv 专题回溯</strong>
+      <span class="dpr-home-notice-entry-summary">支持分片召回、断点评审与分页查看，核心论文与待复核结果分开展示。DeepSeek 费用按实际用量计算，不下载全量 PDF。</span>
     </div>
   </div>
   <div class="dpr-home-site-stats" data-dpr-site-stats hidden aria-live="polite">
@@ -41,17 +48,17 @@
 <section class="dpr-home-dashboard-card dpr-home-report-card">
   <div class="dpr-home-dashboard-header">
     <div>
-      <span class="dpr-home-dashboard-kicker">2026-10-13</span>
+      <span class="dpr-home-dashboard-kicker">2026-10-12 ~ 2026-10-21</span>
       <h3 class="dpr-home-dashboard-title">今日汇总</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">共 10 篇</strong>
+    <strong class="dpr-home-dashboard-count">共 13 篇</strong>
   </div>
   <dl class="dpr-home-dashboard-stats">
-    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>2 次</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>5</dd></div>
-    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>5</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>累计更新</dt><dd>1 次</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>精读</dt><dd>3</dd></div>
+    <div class="dpr-home-dashboard-stat"><dt>速读</dt><dd>10</dd></div>
   </dl>
-  <p class="dpr-home-dashboard-body">最近更新：2026-10-13 23:51:18 UTC<br>状态：成功</p>
+  <p class="dpr-home-dashboard-body">最近更新：2026-10-21 13:18:02 UTC<br>状态：成功</p>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-brief-card">
   <div class="dpr-home-dashboard-header">
@@ -62,9 +69,7 @@
     <strong class="dpr-home-dashboard-count">AI</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<p>今天从10篇推荐中精读5篇、速读5篇，重点锁定Agent服务里的KV Cache优化与跨模型复用。</p>
-<p>最值得看的是两篇9.0分工作：Lachesis做生命周期感知的KV Cache跨HBM与高带宽闪存放置，RaReCache用排名分歧选择性重算打通跨模型KV Cache复用。</p>
-<p>普通读者可先读这两篇的摘要与方法图，关注缓存分层、复用与重算策略，再按需扫速读里的快照去重、多模态记忆和自进化调度。</p>
+<p>2026-10-12至10-21共筛读13篇AI智能体论文，精读3篇、速读10篇，重点关注KV缓存优化方向。最值得看的是《Cache Engineering for Agents》（9.0/10）和《Budgeted KV-Cache Repair for Evolving Contexts》（8.0/10），两者都讨论如何让智能体在长上下文中高效复用缓存。普通读者可先读这两篇精读文章，再按需浏览速读列表中关于多智能体缓存复用的《LatentRemedy》。</p>
   </div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-deep-card">
@@ -73,12 +78,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">精读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">3 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash">Lachesis: Lifetime-Aware KV Cache Placement for Agent Serving across HBM and High-Bandwidth Flash</span></li><li><span class="dpr-home-dashboard-paper-title" title="RaReCache: Bridging the Gap in Cross-Model KV Cache Reuse via Rank disagreement-based Selective Recomputation">RaReCache: Bridging the Gap in Cross-Model KV Cache Reuse via Rank disagreement-based Selective Recomputation</span></li><li><span class="dpr-home-dashboard-paper-title" title="Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents">Request Order Matters: Cache-History Sensitivity in Selective KV-Cache Reuse for Rolling Agents</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="Cache Engineering for Agents">Cache Engineering for Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Budgeted KV-Cache Repair for Evolving Contexts">Budgeted KV-Cache Repair for Evolving Contexts</span></li><li><span class="dpr-home-dashboard-paper-title" title="JointServe: Serving Multi-Model Agents on Memory-Constrained GPUs">JointServe: Serving Multi-Model Agents on Memory-Constrained GPUs</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">cache-reuse <strong>3</strong></span><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>3</strong></span></div>
 </section>
 <section class="dpr-home-dashboard-card dpr-home-skim-card">
   <div class="dpr-home-dashboard-header">
@@ -86,12 +91,12 @@
       <span class="dpr-home-dashboard-kicker">今日累计</span>
       <h3 class="dpr-home-dashboard-title">速读推荐</h3>
     </div>
-    <strong class="dpr-home-dashboard-count">5 篇</strong>
+    <strong class="dpr-home-dashboard-count">10 篇</strong>
   </div>
   <div class="dpr-home-dashboard-body">
-<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots">SnapShare: Isolation-Preserving Deduplication for Serverless Snapshots</span></li><li><span class="dpr-home-dashboard-paper-title" title="MemPilot: Orchestrating On-Demand Multimodal Memory Curation for LLM Agents">MemPilot: Orchestrating On-Demand Multimodal Memory Curation for LLM Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems">Serve Now or Improve Later? Scheduling Self-Evolution in Online Agent Systems</span></li></ul>
+<ul class="dpr-home-dashboard-paper-list"><li><span class="dpr-home-dashboard-paper-title" title="LatentRemedy: Efficient Remedy For Non-Prefix KV Cache Reuse in Multi-Agent Systems">LatentRemedy: Efficient Remedy For Non-Prefix KV Cache Reuse in Multi-Agent Systems</span></li><li><span class="dpr-home-dashboard-paper-title" title="MemPrice: Online Memory Allocation via Adaptive Pricing for Long-Horizon Agents">MemPrice: Online Memory Allocation via Adaptive Pricing for Long-Horizon Agents</span></li><li><span class="dpr-home-dashboard-paper-title" title="Think Before You Speak: Enabling Training-Free Latent Communication Between Language Models">Think Before You Speak: Enabling Training-Free Latent Communication Between Language Models</span></li></ul>
   </div>
-  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>2</strong></span><span class="dpr-home-dashboard-tag">cache-reuse <strong>1</strong></span><span class="dpr-home-dashboard-tag">cold-start <strong>1</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>1</strong></span></div>
+  <div class="dpr-home-dashboard-tags"><span class="dpr-home-dashboard-tag">awc <strong>6</strong></span><span class="dpr-home-dashboard-tag">mas-cache <strong>4</strong></span></div>
 </section>
 </div>
 

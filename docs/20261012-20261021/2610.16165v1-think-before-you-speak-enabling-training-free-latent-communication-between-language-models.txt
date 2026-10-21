@@ -1,0 +1,237 @@
+Title: Think Before You Speak: Enabling Training-Free Latent Communication Between Language Models
+
+URL Source: https://arxiv.org/pdf/2610.16165v1
+
+Published Time: Wed, 14 Oct 2026 02:25:56 GMT
+
+Number of Pages: 11
+
+Markdown Content:
+Published at the COLM 2026 Workshop on Efficient Reasoning 
+
+# Think Before You Speak: Enabling Training-Free Latent Communication Between Language Models 
+
+Rishi Khare 
+
+Georgia Institute of Technology 
+
+## Abstract 
+
+Large language models (LLMs) have demonstrated remarkable capabili-ties in solving complex tasks in coding, mathematical logic, and iterative reasoning, especially by coordinating effectively within multi-agent sys-tems (MAS). However, language agents traditionally communicate via text exchange, which introduces a bottleneck in information transfer and adds prefill latency for downstream agents. Recent work proposes that directly sharing the key-value (KV) cache between language models can enable efficient latent collaboration, entirely bypassing standard text-based communication. To enable latent communication between heterogeneous models of different sizes, prior work introduces trained fusion adapters for each model pair, which limits practical deployment. We introduce CacheFuse, a training-free method which demonstrates that augmenting a downstream model with an upstream model’s KV cache using linear in-terpolation consistently enables superior performance than the standalone downstream model can achieve. We systematically analyze CacheFuse across four reasoning and knowledge benchmarks and demonstrate up to 8.6 percentage points higher accuracy compared to single-model baselines and up to 12.2 × TTFT speedup compared to text-based communication in multi-model inference. 
+
+## § https://github.com/rishiskhare/CacheFuse 
+
+## 1 Introduction 
+
+Multi-agent LLM systems have become a dominant paradigm for coordinating multiple spe-cialized models to perform complex tasks, including mathematical reasoning and software development. However, agents conventionally exchange information as natural-language text, so every inter-model exchange requires the sharer model to autoregressively decode a message and the receiver model to prefill the message. This text exchange dominates the time-to-first-token (TTFT) latency of downstream agents, so memory and KV cache man-agement continue to be pervasive challenges in managing the deployment of multi-agent systems (Yu et al., 2026). A promising and practical alternative is latent communication, in which one model transfers its internal KV cache directly to another model rather than communicating through text, allowing the receiver to attend to the sharer’s cached keys and values without recomputation. Recent work demonstrates that this direct transfer can enhance task quality and speed while reducing memory consumption (Zou et al., 2026). However, existing methods for transfer across heterogeneous models, Cache-to-Cache (C2C) and Latent Cache Flow (LCF), train neural adapters that learn to project and fuse one model’s cache into another model’s representation space (Fu et al., 2026; Rossi et al., 2026). Because the fuser is learned uniquely per model pair, deploying the prior methods across a multi-agent communication network of n models requires training up to O(n2) pair-wise adapters, which limits production serving practicality. Motivated by this challenge, we seek to explore practical alternatives to fuse the intelligence of larger upstream models with downstream cheaper-to-serve models in multi-model 1arXiv:2610.16165v1 [cs.CL] 12 Oct 2026 Published at the COLM 2026 Workshop on Efficient Reasoning inference workloads without training learned adapters. We observe that some model families are released across various sizes, and the models’ capability generally scales with increasing model sizes (Kaplan et al., 2020; Yang et al., 2025). Particular pairs of these cross-size models share identical attention geometry, with scaling in the hidden width and number of query heads. Within such an inter-model congruence, two different-sized models share an identical KV-cache shape (the same number of key/value heads, head dimension, and depth), so the sharer’s per-layer cache tensors are dimensionally compatible and can be directly inserted into the receiver model. Based on this observation, we introduce CacheFuse, a training-free method to perform KV cache transfer and fusion to enable cross-model KV cache transfer between models of different size and capability. Our core finding is that linearly interpolating the per-layer KV caches of the sharer and receiver models improves the task performance of the downstream answering model. A linear interpolation of the receiver’s own cache with a transferred upstream cache raises accuracy by up to 8.6 pp with no training. Further, fusion can exceed both the receiver and sharer models individually. Remarkably, we find that a Qwen3-4B downstream model fused with a Qwen3-8B cache even exceeds the standalone 8B model across all of our four benchmarks. We find that downstream models in large-to-small model setups experience a higher lift in accuracy from cache fusion compared to small-to-large setups. Lastly, we demonstrate that direct cache transfer and augmentation is far more efficient than text-based message sharing between models, leading to up to a 12.2 × TTFT reduction over text-to-text communication. 
+
+## 2 Related Work 
+
+2.1 Cross-Model KV Cache Sharing 
+
+The development of KV cache compression and reuse frameworks is an active research area in the pursuit of memory-efficient LLM inference methods. Cache-to-Cache (Fu et al., 2026) introduces a pair-wise trained fuser to enable KV cache augmentation across model architectures bypassing text generation after prefilling both the sharer and receiver mod-els. Latent Cache Flow (Rossi et al., 2026) augments learned cache-level communication by demonstrating that learned cross-model cache sharing adapters can be compressed to consume less system memory. However, these methods involve training pair-wise adapters to enable coherent KV cache fusion between agents, which limits practical deployment in serving systems. DroidSpeak (Liu et al., 2025) enables KV cache sharing by demonstrating that selectively profiling and recomputing critical layers recovers quality. However, their setting focuses on sharing KV caches between downstream finetuned variants of a single base model, rather than heterogeneous transfer across models of different sizes and capa-bility. Unlike prior methods, which involve learned pair-specific adapters for cross-model transfer, CacheFuse only requires that the two models produce KV caches that share the same geometry and combines them with a closed-form linear interpolation. 
+
+2.2 Multi-Agent KV Cache Transfer 
+
+Multi-agent architectures for LLM inference have become a mainstream strategy to pool the intelligence of specialized models through debate and coordination before producing a final answer. Recent work has shown that the time-to-first-token (TTFT) can be significantly reduced by sharing the raw KV cache to future agents, rather than recomputing it from scratch. KVCOMM (Ye et al., 2025) proposes KV cache reuse of previous agent outputs by aligning cache offsets for overlapping content under different prompt prefixes. CacheBlend (Yao et al., 2025) and RelayCaching (Geng et al., 2026) demonstrate that token profiling and selective recomputation can boost the performance of raw KV cache reuse. However, these methods have limited KV cache sharing across homogeneous models (reusing a previously computed KV cache within identical copies of the same model), whereas CacheFuse transfers caches across models of different sizes and capabilities. 2Published at the COLM 2026 Workshop on Efficient Reasoning Prompt x     
+
+> Sharer prefill Receiver prefill KV Cache (sharer) KV Cache (receiver) Fuse (linear interpolation)
+> θ(K, V )sharer + (1 −θ) ( K, V )receiver
+> θ
+> 1−θ
+> KV Cache (fused) Receiver decode Response
+
+Figure 1: CacheFuse pipeline. The sharer and receiver each prefill the same prompt indepen-dently, producing per-layer KV caches of identical geometry (nkv , dhead , L). Every layer’s key and value tensors are linearly interpolated with a single scalar θ to form a fused cache, which the downstream receiver model then decodes from directly to produce the response. 
+
+## 3 Method 
+
+3.1 Direct KV Cache Transfer 
+
+During autoregressive generation, each decoder layer caches a key and value vector for each processed token for each KV head. For a prompt of length S tokens, the generated KV cache has the shape [nkv , S, dhead ], where nkv is the number of key-value heads and dhead is the per-head dimension. A model with L layers maintains L such key and value tensors, so its KV cache shape can be defined by the dimensions (nkv , dhead , L). In our framing, two models enable a well-defined direct cache transfer when their KV geometries match: identical nkv , dhead , and L ensure that the sharer’s per-layer cache has exactly the shape the receiver expects at each layer, so they can be directly inserted at the same layer position. Our method works by sharing the KV cache of a sharer model to be used directly by a downstream receiver model, with the assumption that the sharer and receiver model share the same KV cache dimensions. The Qwen3 (Yang et al., 2025) family encompasses model pairs with this key property of sharing the same KV cache geometry. Qwen3-8B and Qwen3-4B both have 36 decoder layers and share the KV cache dimensions of (8, 128, 36). Similarly, Qwen3-1.7B and Qwen3-0.6B have 28 decoder layers and share (8, 128, 28) as their KV cache dimensions. For this reason, we investigate the reuse of KV cache between these pairs, in which the number of decoder layers and KV cache geometry are identical for well-defined transfer, in both directions. 
+
+3.2 Fusion 
+
+Unlike the learned fusion gates of C2C, we investigated the blending of the caches between the sharer and receiver models through a per-layer linear interpolation between KV caches as follows (shown in Equation (1) and Figure 1): 
+
+(K, V)fused = θ (K, V)sharer + ( 1 − θ) ( K, V)receiver (1) In this setting, the single scalar θ ∈ [0, 1 ] controls the proportion of the key and value tensors uniformly across layers from the sharer model that will be interpolated into the cache of the receiver model. At the two endpoints: • θ = 0: use the receiver’s own cache without any transfer • θ = 1: entire replacement with the sharer’s cache 
+
+## 4 Experimental Setup 
+
+We set up multi-model benchmarks analogous to the evaluation of Cache-to-Cache and Latent Cache Flow, in which a sharer model’s KV cache is directly transferred to a receiver model to decode, without any text exchange. We analyze latent cache sharing across pairs of varying sizes (0.6B, 1.7B, 4B, 8B) of the Qwen3 (Yang et al., 2025) model architecture. 
+
+4.1 Approaches 
+
+For each benchmark, we evaluate five approaches. 3Published at the COLM 2026 Workshop on Efficient Reasoning • Receiver : the receiver model decodes normally from its own prefill ( θ = 0, single-model baseline, no inter-model communication) • Sharer : the sharer model decodes its own prefill (single-model baseline, no inter-model communication) • Replace : the receiver model decodes from the transferred upstream cache entirely (θ = 1) • CacheFuse : the receiver model decodes using an interpolated cache across θ ∈ (0, 1 )
+
+• Text-to-Text (T2T) : text communication baseline in which the sharer model gen-erates a one-sentence hint that is prepended to the receiver’s prompt Crucially, the evaluation results we report are conducted so that for each question, the receiver’s cache and the sharer’s (transferred) cache are each prefilled exactly once. In order to maintain fair and consistent evaluation, each sweep on the sharer model is executed by performing linear interpolation on the same prefill caches for the sharer and receiver models and only varying the single θ parameter across the [0, 1 ] range. This makes the evaluation setups controlled, as all approaches per model pair (Receiver, Sharer, Replace, CacheFuse) are scored using the exact same prefill caches to mitigate prefill variation. However, T2T is an exception to this property as it must run decode on its hint before the receiver can prefill its prompt. See Appendix A for more description of the exact prompt templates we use. 
+
+4.2 Benchmarks 
+
+Mirroring the Latent Cache Flow evaluation suite, we analyze the accuracy of CacheFuse on four multiple-choice benchmarks: MMLU-Redux (Gema et al., 2025), MMLU-Pro (Wang et al., 2024), ARC-Challenge (Clark et al., 2018), and OpenBookQA (Mihaylov et al., 2018). All setups use the same generation budgets as C2C, so the text baseline is measured under the same budget the learned gating method reports. In the T2T setting, the sharer model is prompted to provide a hint which is decoded up to 256 tokens (same as C2C’s T2T maximum generation limit). For the latency measurement, the answer is decoded up to 64 tokens (same as C2C’s maximum response length for multiple choice). Similarly to LCF, each response is scored as an argmax of the next-token logits restricted to the option-letter tokens, so the accuracy is independent of generation limits and decode settings. 
+
+4.3 Latency 
+
+We adopt the same latency measurements as Latent Cache Flow: mean per-query time-to-first-token (TTFT) and time-to-end-of-answer (TTEoA). TTFT is computed after the first decoded token, so it includes all prefill, transfer, and fusion steps. All of our latency measurements are reported on a single NVIDIA A5000 GPU (24GB VRAM). 
+
+## 5 Results 
+
+We report our results as the average of two reproducible seeded runs for both accuracy and latency. Table 1 shows the complete θ sweep for all benchmarks. Table 2 summarizes accuracy for the best θ per pair alongside baselines. Table 3 reports latency (TTFT and TTEoA). 
+
+5.1 Fusion Can Exceed Both Models 
+
+Our primary result is that a linear combination of both KV caches can beat both models individually and consistently outperforms the receiver model alone. Table 1 gives the full θ sweep results across all benchmarks and pairs, compared against T2T, Sharer, and Receiver. Table 2 summarizes best-θ CacheFuse accuracy against Sharer, Receiver, and T2T. For Qwen3-8B → Qwen3-4B, the fused model ( θ = 0.5 to 0.6) consistently exceeds the receiver model alone on all benchmarks by up to 8.6 pp on OBQA. Although in this specific setting, the fused variant is run on Qwen3-4B, we find that this even exceeds the larger 8B 4Published at the COLM 2026 Workshop on Efficient Reasoning 
+
+Pair Benchmark Receiver 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 Replace Sharer T2T 
+
+8B → 4B ARC-C 87.03 87.97 88.82 89.33 90.70 91.47 91.72 91.21 90.96 90.02 83.45 91.21 90.19 OBQA 78.00 79.00 80.80 83.40 84.40 86.60 85.20 84.00 83.00 82.60 71.40 85.00 83.80 MMLU-R 69.95 71.18 72.40 73.28 74.09 74.70 74.68 73.98 73.42 72.18 63.11 73.88 72.26 MMLU-P 41.08 42.20 43.46 44.33 45.07 45.33 44.93 44.22 42.80 37.43 27.81 44.41 43.87 4B → 8B ARC-C 91.21 91.30 91.30 91.64 91.55 91.72 90.61 89.76 89.51 77.30 39.16 87.03 91.98 OBQA 85.00 85.60 85.00 86.00 85.80 85.80 84.80 82.60 84.00 78.40 54.60 78.00 87.80 MMLU-R 73.88 74.32 74.40 74.53 74.49 74.77 73.81 72.60 71.88 59.26 35.60 69.95 75.60 MMLU-P 44.41 44.79 44.76 44.27 43.24 41.41 41.43 38.65 36.85 20.16 12.81 41.08 46.85 1.7B → 0.6B ARC-C 52.65 56.23 61.09 60.67 52.47 38.99 29.95 26.54 25.60 26.45 24.40 73.89 59.39 OBQA 53.60 54.20 54.60 53.40 47.60 36.80 32.20 26.80 25.00 23.60 24.60 65.40 52.40 MMLU-R 43.26 44.98 47.93 46.77 40.00 33.28 29.37 26.88 25.16 24.86 24.60 57.42 46.54 MMLU-P 18.81 20.10 20.96 20.30 15.77 13.79 12.68 12.23 11.54 11.74 11.22 29.13 19.73 0.6B → 1.7B ARC-C 73.89 74.74 73.63 72.01 69.80 33.79 23.38 22.70 23.89 23.63 23.72 52.65 70.31 OBQA 65.40 66.20 65.20 59.60 62.20 35.00 27.80 29.00 26.60 25.00 25.00 53.60 61.60 MMLU-R 57.42 57.05 56.12 55.32 52.95 28.98 24.00 23.74 22.95 23.91 25.02 43.26 52.11 MMLU-P 29.13 29.56 29.34 25.58 20.98 12.28 11.54 11.87 11.20 11.20 11.38 18.81 26.25 
+
+Table 1: Full θ sweep across benchmarks on Qwen3 model pairs. Receiver corresponds to 
+
+θ = 0 (pure receiver cache). Columns 0.1–0.9 are θ values for the CacheFuse linear interpo-lation. Replace corresponds to θ = 1 (pure sharer cache). Sharer denotes the standalone sharer model (reference). T2T denotes the text-to-text transfer baseline (reference). Bold underlined marks the best score in the θ sweep (across the Receiver to Replace endpoints). 
+
+Pair Method ARC-C OBQA MMLU-R MMLU-P 
+
+Qwen3-8B → Qwen3-4B Sharer 91.21 85.00 73.88 44.41 Receiver 87.03 78.00 69.95 41.08 CacheFuse 91.72 86.60 74.70 45.33 
+
+T2T 90.19 83.80 72.26 43.87 Qwen3-4B → Qwen3-8B Sharer 87.03 78.00 69.95 41.08 Receiver 91.21 85.00 73.88 44.41 CacheFuse 91.72 86.00 74.77 44.79 
+
+T2T 91.98 87.80 75.60 46.85 Qwen3-1.7B → Qwen3-0.6B Sharer 73.89 65.40 57.42 29.13 Receiver 52.65 53.60 43.26 18.81 CacheFuse 61.09 54.60 47.93 20.96 
+
+T2T 59.39 52.40 46.54 19.73 Qwen3-0.6B → Qwen3-1.7B Sharer 52.65 53.60 43.26 18.81 Receiver 73.89 65.40 57.42 29.13 CacheFuse 74.74 66.20 57.42 29.56 
+
+T2T 70.31 61.60 52.11 26.25 
+
+Table 2: Accuracy across all four benchmarks for the best-performing θ per pair (exact θ per benchmark given in Table 1). Bold underlined marks where CacheFuse exceeds Receiver (otherwise Receiver is marked). sharer model by up to 1.6 pp on OBQA. Figure 2 illustrates this for Qwen3-8B → Qwen3-4B on MMLU-Redux, where fusion peaks above both the receiver and sharer baselines. We further provide results from experiments with selecting θ via an offline calibration sweep on held-out examples in Appendix A. 
+
+5.2 Large-to-Small vs. Small-to-Large Cache Transfer 
+
+We also find that the utility of cache transfer strongly depends on which model shares its cache and which model receives it to produce an answer. When a stronger model shares its cache with a downstream weaker model (i.e. 1.7B → 0.6B and 8B → 4B scenarios), fusion 5Published at the COLM 2026 Workshop on Efficient Reasoning                                                                                               
+
+> Pair Method ARC-C OBQA TTFT TTEoA TTFT TTEoA
+> Qwen3-8B →Qwen3-4B Receiver 78.8 2518.8 78.0 2497.2 Replace 79.5 2518.3 78.6 2477.1 Sharer 80.2 2569.0 79.3 2545.7 CacheFuse 120.5 2560.3 119.0 2536.8 T2T 1468.5 3915.6 1259.1 3680.0 Qwen3-4B →Qwen3-8B Receiver 79.7 2563.1 80.2 2587.6 Replace 79.9 2563.8 80.4 2588.0 Sharer 79.0 2512.6 79.5 2534.9 CacheFuse 121.0 2605.7 121.7 2629.2 T2T 952.0 3439.2 813.4 3318.5 Qwen3-1.7B →Qwen3-0.6B Receiver 60.5 1899.9 60.1 1884.8 Replace 60.6 1885.1 60.0 1881.7 Sharer 61.6 1968.5 61.0 1954.5 CacheFuse 92.5 1932.7 91.7 1916.5 T2T 794.9 2637.9 710.4 2535.7 Qwen3-0.6B →Qwen3-1.7B Receiver 61.0 1951.6 61.1 1957.2 Replace 61.1 1951.7 61.5 1957.8 Sharer 60.0 1884.1 60.4 1890.2 CacheFuse 92.7 1984.0 93.0 1989.5 T2T 384.2 2276.2 341.6 2237.5
+
+Table 3: Latency in milliseconds (ms) across model pairs and transfer methods. TTFT denotes time-to-first-token. TTEoA denotes time-to-end-of-answer. yields larger gains over the receiver alone than weak-to-strong model transfers. When a 
+
+stronger model consumes a weaker model’s cache (0.6B → 1.7B and 4B → 8B scenarios), we observe a comparatively incremental benefit against the receiver alone (at most 1 pp accuracy improvement). This aligns with the expectation that in a small-to-large transfer, the stronger downstream receiver model has minimal upside from a weak sharer model. 
+
+5.3 Replacement Compatibility 
+
+Direct cache replacement ( θ = 1) serves as an informative signal on raw cache compatibility. In every pair apart from 8B → 4B, direct cache replacement approximately collapses to the regime of random chance correctness in multiple-choice question-answering, which indicates that a raw cross-model cache is generally not directly usable. However, for the 8B 
+
+→ 4B pair, the raw 8B cache is highly usable on its own (the replacement strategy achieves about 83.5% on ARC-C), though the reverse direction (4B → 8B) experiences much lower coherence (39.2% on ARC-C). 
+
+5.4 Latency 
+
+Table 3 shows that the latent methods are substantially more computationally efficient than text communication. The text-to-text (T2T) baseline is far slower because the sharer must autoregressively generate its hint message to share to the receiver (up to 256-token maximum communication tokens). We observe that TTFT, especially for T2T, scales with the sharer model’s size from 384 ms (0.6B as the sharer model) to 1469 ms (8B as the sharer model) on the text-to-text baselines. TTEoA is dominated by the answer decode generation (up to 64-token maximum limit) and experiences a smaller factor of speedup between the approaches compared to TTFT. Figure 3 shows the TTFT breakdown for the Qwen3-8B 
+
+→ Qwen3-4B pair on ARC-C. Figure 4 displays a TTFT–accuracy Pareto plot for the same setting. 6Published at the COLM 2026 Workshop on Efficient Reasoning 
+
+Figure 2: MMLU-R accuracy sweep for Qwen3-8B → Qwen3-4B. Receiver ( θ = 0) and Replace ( θ = 1) are included as endpoints. Fusion peaks at θ = 0.5, exceeding the receiver model individually (Qwen3-4B), direct KV cache replacement, and even the larger sharer model individually (Qwen3-8B). T2T CacheFuse Sharer Replace Receiver   
+
+> 0510 15 20 112.2 18.3 18.5 18.6 TTFT speedup over T2T ( ×)
+
+Figure 3: TTFT speedup over T2T for Qwen3-8B → Qwen3-4B on ARC-C. Lin-early interpolating the sharer and reciever caches (CacheFuse) achieves 12.2 × faster TTFT than dense prefill of text-to-text com-munication (T2T). Single-model baselines are ∼18 × faster. 10 2 10 3 
+
+> 81 83 85 87 89 91 93 Replace Receiver Sharer CacheFuse T2T TTFT (ms, log scale) ARC-C Accuracy (%)
+
+Figure 4: TTFT–accuracy Pareto plot for Qwen3-8B → Qwen3-4B on ARC-C. Lower TTFT and higher accuracy (top left) is bet-ter. The gray line traces the Pareto frontier. CacheFuse achieves the highest accuracy at significantly lower TTFT than T2T. 
+
+## 6 Conclusion 
+
+CacheFuse demonstrates that answering from another model’s latent representation instead of text can be accomplished across models of different sizes without a trained adapter, given the setting involves sharing the cache between models with congruent KV cache geometries. Our findings demonstrate that across both large-to-small model and small-to-large model KV cache transfers, linear interpolation between the models’ KV caches (i) improves the performance of the downstream model, (ii) can exceed both models in the pair, and (iii) substantially reduces TTFT over text-based communication. 
+
+## Limitations 
+
+In order to perform direct KV cache transfer, CacheFuse requires the sharer and receiver caches to share the same KV cache dimensions for well-defined reuse. In addition, our experimental setup analyzes model pairs that share the same tokenizer (Qwen3 in this 7Published at the COLM 2026 Workshop on Efficient Reasoning work). An exciting direction for future work is the development of methods for cross-model KV cache transfer across entirely heterogeneous tokenizer and model architecture families (i.e. Qwen to Llama). 
+
+## Acknowledgements 
+
+I thank Zishen Wan for his guidance and helpful discussions during the development of this work. 
+
+## References 
+
+Peter Clark, Isaac Cowhey, Oren Etzioni, Tushar Khot, Ashish Sabharwal, Carissa Schoenick, and Oyvind Tafjord. Think you have solved question answering? try arc, the ai2 reasoning challenge, 2018. URL https://arxiv.org/abs/1803.05457 .Tianyu Fu, Zihan Min, Hanling Zhang, Jichao Yan, Guohao Dai, Wanli Ouyang, and Yu Wang. Cache-to-cache: Direct semantic communication between large language models, 2026. URL https://arxiv.org/abs/2510.03215 .Aryo Pradipta Gema, Joshua Ong Jun Leang, Giwon Hong, Alessio Devoto, Alberto Carlo Maria Mancino, Rohit Saxena, Xuanli He, Yu Zhao, Xiaotang Du, Mohammad Reza Ghasemi Madani, Claire Barale, Robert McHardy, Joshua Harris, Jean Kaddour, Emile van Krieken, and Pasquale Minervini. Are we done with mmlu?, 2025. URL 
+
+https://arxiv.org/abs/2406.04127 .Yingsheng Geng, Yuchong Gao, Weihong Wu, Guyue Liu, and Jiang Liu. Relaycaching: Accelerating llm collaboration via decoding kv cache reuse, 2026. URL https://arxiv. org/abs/2603.13289 .Jared Kaplan, Sam McCandlish, Tom Henighan, Tom B. Brown, Benjamin Chess, Rewon Child, Scott Gray, Alec Radford, Jeffrey Wu, and Dario Amodei. Scaling laws for neural language models, 2020. URL https://arxiv.org/abs/2001.08361 .Yuhan Liu, Yuyang Huang, Jiayi Yao, Shaoting Feng, Zhuohan Gu, Kuntai Du, Hanchen Li, Yihua Cheng, Junchen Jiang, Shan Lu, Madan Musuvathi, and Esha Choukse. Droidspeak: Kv cache sharing for cross-llm communication and multi-llm serving, 2025. URL https: //arxiv.org/abs/2411.02820 .Todor Mihaylov, Peter Clark, Tushar Khot, and Ashish Sabharwal. Can a suit of ar-mor conduct electricity? a new dataset for open book question answering. In Ellen Riloff, David Chiang, Julia Hockenmaier, and Jun’ichi Tsujii (eds.), Proceedings of the 2018 Conference on Empirical Methods in Natural Language Processing , pp. 2381–2391, Brus-sels, Belgium, October-November 2018. Association for Computational Linguistics. doi: 10.18653/v1/D18-1260. URL https://aclanthology.org/D18-1260/ .Maximillian Rossi, Prajwal Raghunath, and Eugene Wu. Latent cache flow: Model-to-model communication without text, 2026. URL https://arxiv.org/abs/2605.22863 .Yubo Wang, Xueguang Ma, Ge Zhang, Yuansheng Ni, Abhranil Chandra, Shiguang Guo, Weiming Ren, Aaran Arulraj, Xuan He, Ziyan Jiang, Tianle Li, Max Ku, Kai Wang, Alex Zhuang, Rongqi Fan, Xiang Yue, and Wenhu Chen. Mmlu-pro: A more robust and challenging multi-task language understanding benchmark, 2024. URL https://arxiv. org/abs/2406.01574 .An Yang, Anfeng Li, Baosong Yang, Beichen Zhang, Binyuan Hui, Bo Zheng, Bowen Yu, Chang Gao, Chengen Huang, Chenxu Lv, Chujie Zheng, Dayiheng Liu, Fan Zhou, Fei Huang, Feng Hu, Hao Ge, Haoran Wei, Huan Lin, Jialong Tang, Jian Yang, Jianhong Tu, Jianwei Zhang, Jianxin Yang, Jiaxi Yang, Jing Zhou, Jingren Zhou, Junyang Lin, Kai Dang, Keqin Bao, Kexin Yang, Le Yu, Lianghao Deng, Mei Li, Mingfeng Xue, Mingze Li, Pei Zhang, Peng Wang, Qin Zhu, Rui Men, Ruize Gao, Shixuan Liu, Shuang Luo, Tianhao Li, 8Published at the COLM 2026 Workshop on Efficient Reasoning Tianyi Tang, Wenbiao Yin, Xingzhang Ren, Xinyu Wang, Xinyu Zhang, Xuancheng Ren, Yang Fan, Yang Su, Yichang Zhang, Yinger Zhang, Yu Wan, Yuqiong Liu, Zekun Wang, Zeyu Cui, Zhenru Zhang, Zhipeng Zhou, and Zihan Qiu. Qwen3 technical report, 2025. URL https://arxiv.org/abs/2505.09388 .Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. Cacheblend: Fast large language model serving for rag with cached knowledge fusion, 2025. URL https://arxiv.org/abs/2405.16444 .Hancheng Ye, Zhengqi Gao, Mingyuan Ma, Qinsi Wang, Yuzhe Fu, Ming-Yu Chung, Yueqian Lin, Zhijian Liu, Jianyi Zhang, Danyang Zhuo, and Yiran Chen. Kvcomm: Online cross-context kv-cache communication for efficient llm-based multi-agent systems, 2025. URL 
+
+https://arxiv.org/abs/2510.12872 .Zhongming Yu, Naicheng Yu, Hejia Zhang, Wentao Ni, Mingrui Yin, Jiaying Yang, Yujie Zhao, and Jishen Zhao. Multi-agent memory from a computer architecture perspective: Visions and challenges ahead, 2026. URL https://arxiv.org/abs/2603.10062 .Jiaru Zou, Ruizhong Qiu, Gaotang Li, Xiyuan Yang, Katherine Tieu, Pan Lu, Ke Shen, Hanghang Tong, Yejin Choi, Jingrui He, James Zou, Mengdi Wang, and Ling Yang. Latent collaboration in multi-agent systems. In Forty-third International Conference on Machine Learning , 2026. 
+
+## A Appendix 
+
+Prompts 
+
+Every evaluated approach scores responses using the following zero-shot prompt, where next-token logits on A/B/C/D (up to 10 choices for MMLU-Pro) determine accuracy: Evaluation Prompt      
+
+> Question: {QUESTION }
+> A. {OPTION A }
+> B. {OPTION B }
+> C. {OPTION C }
+> D. {OPTION D }
+> Answer:
+
+For the text-to-text (T2T) baseline, we follow the same sharer instruction from Cache-to-Cache (Fu et al., 2026). The sharer model is prompted: Sharer Hint Prompt (T2T)      
+
+> In one clear sentence, describe the most essential background knowledge needed to answer the question. Do NOT directly solve or give the answer. Question: {QUESTION }
+> A. {OPTION A }
+> B. {OPTION B }
+> C. {OPTION C }
+> D. {OPTION D }
+
+9Published at the COLM 2026 Workshop on Efficient Reasoning                                                                                                                          
+
+> Pair Benchmark Receiver 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 Replace Sharer
+> Qwen3-8B →Qwen3-4B ARC-C 87.8 88.8 89.7 90.0 91.2 91.6 91.5 92.0 91.9 90.9 83.6 92.0 OBQA 74.5 75.9 77.3 78.5 79.8 79.4 79.3 79.6 78.8 77.6 70.1 79.5 Qwen3-4B →Qwen3-8B ARC-C 92.0 92.1 92.3 92.4 92.1 91.7 91.8 90.5 89.4 77.6 41.4 87.8 OBQA 79.5 80.1 80.0 80.3 79.9 80.3 79.6 78.5 77.3 71.6 57.4 74.5 Qwen3-1.7B →Qwen3-0.6B ARC-C 57.5 61.6 65.7 64.9 51.4 38.4 30.3 26.0 23.5 21.8 23.2 75.2 OBQA 46.7 49.0 50.8 53.7 50.9 43.1 34.7 31.5 28.3 25.5 26.6 60.8 Qwen3-0.6B →Qwen3-1.7B ARC-C 75.2 75.1 76.8 74.4 71.4 34.0 22.3 22.9 22.6 24.0 21.5 57.5 OBQA 60.8 62.1 62.4 60.4 58.6 42.6 36.1 35.4 36.5 33.8 28.1 46.7
+
+Table 4: Accuracy of offline θ calibration sweep on the first 1000 examples of each train split (ARC-C and OBQA), averaged over seeds. Column conventions match Table 1: Receiver 
+
+corresponds to θ = 0. Columns 0.1–0.9 are linear interpolation between the sharer and receiver. Replace corresponds to θ = 1. Sharer denotes the standalone sharer. Bold underlined marks the best score in the θ sweep (across Receiver to Replace endpoints). Receiver 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 Replace 
+
+85.0 90.0 
+
+θ
+
+> ARC-C Accuracy (%)
+
+Qwen3-8B → Qwen3-4B     
+
+> Calibration θsweep Test θsweep
+> Receiver 0.1 0.2 0.3 0.4 0.5 0.6 0.7 0.8 0.9 Replace
+
+20 30 40 50 60 70 
+
+θ
+
+Qwen3-1.7B → Qwen3-0.6B     
+
+> Calibration θsweep Test θsweep
+
+Figure 5: Calibration vs. test θ sweeps on ARC-C. Left: Qwen3-8B → Qwen3-4B (calibration peaks at θ = 0.7 while test peaks at θ = 0.6). Right: Qwen3-1.7B → Qwen3-0.6B (both peak at θ = 0.2). The receiver model then receives the sharer’s output as a hint: Receiver Prompt with Hint (T2T) 
+
+Background: {HINT }
+
+Question: {QUESTION }
+
+A. {OPTION A }
+
+B. {OPTION B }
+
+C. {OPTION C }
+
+D. {OPTION D }
+
+Answer: 
+
+We design our prompt templates to be minimal and lean compared to the additional instructions provided within C2C’s prompt templates to faithfully reflect the task quality of the language models without the influence of prompt engineering. 
+
+Offline Theta Calibration 
+
+We demonstrate that an effective θ parameter can be approximated via an offline calibration sweep, rather than a full θ sweep at test time. On two of the benchmarks that we evaluate on (ARC-Challenge and OpenBookQA), the authors provide a train split. In Table 4, we report the full θ sweep averaged over the first 1000 examples of each train split across both seeds, 10 Published at the COLM 2026 Workshop on Efficient Reasoning                                                              
+
+> Pair Benchmark Receiver Test peak Top-1 Top-2 Top-3
+> Qwen3-8B →Qwen3-4B ARC-C 87.03 91.72 ( θ=0.6) 91.21 ( θ=0.7) 91.21 ( θ=0.7) 91.47 ( θ=0.5) OBQA 78.00 86.60 ( θ=0.5) 84.40 ( θ=0.4) 84.40 ( θ=0.4) 86.60 (θ=0.5) Qwen3-4B →Qwen3-8B ARC-C 91.21 91.72 ( θ=0.5) 91.64 ( θ=0.3) 91.64 ( θ=0.3) 91.64 ( θ=0.3) OBQA 85.00 86.00 ( θ=0.3) 86.00 (θ=0.3) 86.00 (θ=0.3) 86.00 (θ=0.3) Qwen3-1.7B →Qwen3-0.6B ARC-C 52.65 61.09 ( θ=0.2) 61.09 (θ=0.2) 61.09 (θ=0.2) 61.09 (θ=0.2) OBQA 53.60 54.60 ( θ=0.2) 53.40 ( θ=0.3) 53.40 ( θ=0.3) 54.60 (θ=0.2) Qwen3-0.6B →Qwen3-1.7B ARC-C 73.89 74.74 ( θ=0.1) 73.63 ( θ=0.2) 73.89 ( θ=0.0) 74.74 (θ=0.1) OBQA 65.40 66.20 ( θ=0.1) 65.20 ( θ=0.2) 66.20 (θ=0.1) 66.20 (θ=0.1)
+
+Table 5: Top-k offline calibration for reducing the test-time θ search. Test peak is the best accuracy (%) over the full test θ sweep (Table 1). Top-k selects the k highest-accuracy θ values from the averaged 1000-example train calibration sweep (Table 4), then reports the best test accuracy among only those k candidates (selected θ in parentheses). Bold underlined denotes where the top-k sweep exactly recovers the oracle score found on the test time search. which can be compared against the corresponding test split results in Table 1. Figure 5 overlays the calibration and test θ sweeps on ARC-C for the 8B → 4B and 1.7B → 0.6B pairs. We suggest that the search space for θ at test time can be greatly reduced by selecting the top-k best-performing θ values during an initial calibration pass of representative held out examples. By limiting our calibration to an equal-sized limited subset of 1000 held out examples per benchmark, we demonstrate in Table 5 that selecting between the top 3 best θ values found to give the highest accuracies in the 1000-example train subset consistently outperforms the receiver alone and achieves near-optimal performance to test-time calibration when applied to the test set. 
+
+Runtime Settings 
+
+For reproducibility, we perform all reported experiments with seed values of 40 and 42 on CUDA 13.0 and transformers 5.12.1 and report the average of the two runs for both latency and accuracy measurements. 11
