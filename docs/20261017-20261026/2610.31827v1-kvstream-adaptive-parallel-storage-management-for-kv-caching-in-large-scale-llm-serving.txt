@@ -1,0 +1,939 @@
+Title: KVStream: Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving
+
+URL Source: https://arxiv.org/pdf/2610.31827v1
+
+Published Time: Mon, 26 Oct 2026 00:08:50 GMT
+
+Number of Pages: 17
+
+Markdown Content:
+# KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving 
+
+# Avinash Maurya 
+
+Argonne National Laboratory Lemont, IL, USA amaurya@anl.gov 
+
+# Jaiaid Mobin 
+
+Rochester Institute of Technology Rochester, NY, USA jm5071@rit.edu 
+
+# Jie Ye 
+
+Illinois Institute of Technology Chicago, IL, USA jye20@hawk.illinoistech.edu 
+
+# M. Mustafa Rafique 
+
+Rochester Institute of Technology Rochester, NY, USA mrafique@cs.rit.edu 
+
+# Franck Cappello 
+
+Argonne National Laboratory Lemont, IL, USA cappello@mcs.anl.gov 
+
+# Bogdan Nicolae 
+
+Argonne National Laboratory Lemont, IL, USA bogdan.nicolae@acm.org 
+
+## Abstract 
+
+Long-context LLM serving for agentic, coding, and document work-loads reuses prefixes whose key-value (KV) cache outgrows GPU and host memory, putting storage I/O on the critical path of the inference step for retrieving prefixes. A single node-local NVMe absorbs all retrievals, while the parallel file system or cloud file store that nodes already mount carries almost no inference traffic. We cast prefix retrieval as aggregate-bandwidth scheduling across these tiers and present KVStream , a KV cache engine that batches a step’s reads, defers writes behind the forward pass, replicates each chunk on every tier, and lets each tier adaptively claim the next unread chunks once it is free. Our performance model shows this routing attains the aggregate-bandwidth bound without prediction or tuning, whereas any static split misses it by a margin that grows as per-tier bandwidths drift or fluctuate. It also predicts that the time-to-first-token (TTFT) gain grows with load, as faster retrieval drains the queue, and disappears when host memory or arrival order keeps reuse in cache. Plugged into LMCache and evaluated on four models, six datasets, and up to 128 GPUs, KVStream re-trieves within 5% of the bound, delivers up to 1.49 × higher offline throughput than LMCache, and lowers mean TTFT by up to 6.1 ×
+
+under bursty arrivals. 
+
+## Keywords 
+
+Large Intermediate States of Transformer Models, Multi-path I/O Concurrency, Hierarchical Memory Management, I/O and Inference Performance Modelling. 
+
+## 1 Introduction 
+
+Large language models (LLMs) now serve long-running agentic, coding, and document-analysis workloads that process tens to hun-dreds of thousands of tokens per request [18, 23, 35, 65]. The at-tention keys and values of every token, the KV cache, must be retained for all later tokens, so the KV cache grows with context length and dominates GPU memory. Requests frequently share long prefixes, such as system prompts, documents, code repositories, and the growing history of multi-turn and agentic sessions. The KV of prefixes are cached for later reuses, avoiding recomputations whose cost grows with model depth and quadratically with prefix length [10, 29, 38, 46, 55]. The set of unique prefixes that will be reused, the working set ,rarely fits on the GPU due to limited capacity. As new prefill and decode tokens need memory for their KV states, the inference engine evicts cached prefixes under policies such as LRU, LFU, or workflow-aware schemes [31, 43, 44, 70]. KV cache connectors such as LMCache and Mooncake [10, 46] extend GPU capacity to slower but large memory and storage tiers, from which the prefix KVs are retrieved when later requests reuse them. Therefore, storage-backed prefix caching trades expensive GPU recomputation for I/O, and in this paper we characaterize, model, and accelerate the I/O bounds for faster inferencing. 
+
+Motivation for Storage-Tier Offloading of KV Cache . Realis-tic long-context workloads have working sets (unique KV prefixes) far larger than GPU and host memory. On our testbeds (§ 6.1), four GPUs leave about 140 GB for KV after the model weights. Each node has 512 GB of host DRAM, 1.6–3.2 × its GPU memory, similar to cloud GPU instances such as AWS p4 , p5 , and the new Nvidia-B300-based p6 [2–4]. Figure 1 shows the working sets of three document datasets and two online production traces (detailed in § 6.1). Even though grouped-query attention (GQA) [1] already compacts the KV of every model, the working set of a 14B model (0.5–1 TB) is 3.3–7.2 × the GPU KV budget, and at 110B it reaches ∼2 TB, up to 6.3 × the host-memory KV cache of a node. We observe that the memory footprint of unique KV prefixes grows with model size due to more layers and attention heads. As a consequence, for the same dataset, the 14B model can hold the KV cache of larger number of prefix chunks than the 110B model. We next see in Figure 2, for the LooGLE dataset, that despite disk reads being slow (6.2–13GB/s, Table 2), utilizing LMCache [10] to store and fetch the offloaded prefixes is up to 2.2 × faster then recom-puting on H100 GPUs. This is because recomputation scales with model depth while retrieval scales only with the bytes moved. Fur-thermore, although each dataset’s unique KV amounts to at most a few TBs (Figure 1), serving the entire dataset reads 5–32 TB for 32B and 70B models, as shown in Figure 3. This read amplification is be-cause eviction from the faster tiers (due to staleness) forces prefixes to be read again and again for reuse as the requests arrive in arbi-trary order (from multiple users and concurrent sessions [38]). Mul-tiple efforts study and outline the benefit and operating envelope of storage offloading outperforming recomputations [24, 27, 28], and in this work, we focus on accelerating the storage regime to speedup arXiv:2610.31827v1 [cs.DC] 22 Oct 2026 Review version, , Avinash Maurya et al. 14B 32B 70B 110B 
+
+> Model Size (in B of parameters)
+> 01000 2000 3000
+> Total KV Footprint (GB)
+> 499 798 1035 999 594 951 1188 1188 472 755 944 944 1010 1615 2019 2019 467 746 933 933
+> GPU KV capacity (140 GB) Host KV cache (320 GB) LooGLE NarrativeQA CUAD Qwen-Coder (online) Chutes (online)
+
+Figure 1: Working set (unique KV) vs. GPU and host KV budgets. 14B 32B 70B 110B  
+
+> Model Size (in B of parameters)
+> 025 50 75 100
+> Total Serving Time (min.)
+> 7.9 26.9 64.5 85.7 8.1 22.6 37.3 39.5
+> Recomputation (CPU-only cache) Disk Offloading
+
+Figure 2: Serving time of LooGLE on Testbed-1: recompute vs. offload. LooGLE Narr.QA CUAD Qwen Chutes  
+
+> Dataset
+> 010 20 30 40
+> Total KV Retrieved (TB)
+> 13 24 21 512 19 32 28 716 32B 70B CPU Storage
+
+Figure 3: KV read per dataset from host memory and storage. 
+
+prefix-reuse heavy workloads such as multi-turn sessions [30], doc-ument analysis [21], coding agents [26]. 
+
+Limitations of the State of the Art . Existing systems take three directions to acclerate such prefix-reuse heavy workloads, and none systematically charaterizes and remove storage reads from the critical path once the working set (unique KV footprint) spills beyond the GPU and host memory (§ 2). KV cache connectors such as LMCache, Mooncake, and NVIDIA Dynamo’s KV block manager [10, 41, 46] extend the engine’s cache with host memory and storage, but they read each matched chunk of each request in the batch in serial, non-overlapped fashion (detailed in § 3). Compression, token eviction, and selective restoration [32, 36, 69] shrink each prefix by a constant factor, typically at the cost of accu-racy. Modern GQA and MLA-based architecture already perform in-model KV compression, shrinking the KV sizes by 5–8 × compared to standard multi-head attention for our evaluated models outlined in Table 3. Despite this with, as observed in Figure 1, the working set size (Unique KV prefix footprint) still spills beyond the GPU and CPU memory. Therefore, despite newer architectures, supporting large 1M+ context lengths (common for agentic workflows) for mul-tiple concurrent users still requires memory capacity beyond what the GPU and CPU offer. Efforts such as Nvidia GDS [40], Deepseek 3FS [8], IBM storage scale [25], and Mooncake [46], provide GPU-and/or filesystem-vendor specific optimizations, or proposing mem-ory pooling capabilities for distributed KV caching, but do not design or model the I/O bounds of KV retrieval from multiple stor-age tiers on HPC systems. Lastly, KV reuse-aware schedulers such as HotPrefix [34], PEEK [63], Preble [52], and Bidaw [24] hide the storage retrieval overheads by shuffle the order of the requests to hide the storage retrieval overheads, which dishonors the arrival and/or priority order, and fails to accelerate if the prefix reuse order is not known apriori, which is typically the case for online serving. 
+
+Key Insight and Contributions . In this work, we leverage the insight the HPC and cloud datacenters are typically connected to fast remote storage such as a parallel file system (PFS) [42] or AWS FSX [5], which can supplement additional storage bandwidth but remains idle during inferencing. To this end, we design KVStream ,which utilizes the I/O bandwidth of multiple storage tiers in par-allel to accelerate prefix KV retrievals during inferences. We take a model-backed approach and cast prefix retrieval over heteroge-neous storage tiers as an aggregate-bandwidth scheduling problem: within an iteration, the fastest that any engine can retrieve the prefixes it needs is set by the combined read bandwidth of the tiers it can read in parallel, the classic bound for dividing work among parallel servers [56]. KVStream approaches this bound with adap-tive multi-path completion-driven routing and lands within 5% of it. Our contributions are: (1) Characterization and gap analysis. On two HPC testbeds, we show that storage-backed prefix retrieval is serialized, dominates step time, leaves the PFS bandwidth idle, and suffers read/write interference and heavy-tailed latency on the local and remote storage devices; and that host memory capacity, arrival order, and arrival rate decide whether it matters and how much (§ 3). (2) Design and implementation of KVStream . We propose four mechanisms: step-level batched retrieval, deferred writes, multi-path replication, and completion-driven meet-in-the-middle routing, in a standalone C++ io_uring engine that plugs into LMCache and transparently serves inference engines such as vLLM and SGLang (§ 4). (3) Performance model of iteration breakdown and I/O bounds. 
+
+We decompose an iteration into retrieval, compute, and write; ap-ply the classic aggregate-bandwidth bound of parallel servers to multi-tier retrieval; derive the penalty that a static split NVMe:PFS pays when the per-tier bandwidths deviate from it. We also ex-plain the queueing delay and TTFT as functions of arrival order, arrival rate, host memory, and input and output lengths. We validate it with kvsim , a trace-driven simulator that we release (§ 5). (4) Evaluation in offline and online serving. With four models (14B–110B), six datasets, and two testbeds at up to 128 GPUs, 
+
+KVStream delivers up to 1.49 × higher offline throughput than LMCache (3.22 × over recomputation); for online real-world traces KVStream lowers mean TTFT by up to 6.1 × under bursty arrivals. We also characterize where KVStream gains little or loses: its speedup over LMCache is 0.98–1.05 × when host mem-ory or the arrival order keeps reuse in cache, and 0.81 × when reuse is sparse (§ 6,§ 7). 
+
+Scope and Limitations of Our Approach . KVStream targets long-context workloads, such as agentic, coding, and document-analysis serving, whose unique prefix KVs spill beyond GPU and host memory and are reused heavily (81–96% of prompt tokens hit a cached prefix in our datasets and traces). For workloads with small working sets, such as short conversations [60], or with sparse reuse, storage leaves the critical path and the benefit of any storage-tier optimization [24, 27, 28, 34, 40, 43, 46, 49], including ours, erodes (§ 5.3 states the conditions). Multi-path replication doubles the KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , Inference       
+
+> Engine
+> D2H
+> Flushes
+> Flush to
+> Storage prefixes from iter i
+> Read from
+> Storage prefix k prefix k+1 prefix k+2
+> iteration iiteration i
+> scheduling i+1 and
+> prefix matching start
+> iteration i+1
+> waiting for prefix retrieval for iter i+1
+> Compute
+> node-1
+> Compute
+> node-n
+> Compute
+> node-2
+> Compute
+> node-m
+
+(a) Multiple nodes share 
+
+the network and PFS    
+
+> G0 G1
+> G2 G3
+> Persistent
+> storage
+> Zoom on
+> node
+> architecture
+> PCIe Gen 4
+> DDR4-3200
+> NVLink
+> Memory
+> Processor
+> G# GPU
+> NIC
+
+(b) Node Architecture (NVMe 
+
+and PFS on different channels) 
+
+... 
+
+... 
+
+(c) Interleaving of prefix writes and 
+
+reads in a single forward pass/iteration 
+
+> GPU-0
+> GPU-3
+
+.
+
+.
+
+. All node-local ranks competing for 
+
+> I/O on NVMEs and PFS
+
+Figure 4: (a) Compute nodes share the bandwidth of a parallel file system (PFS). (b) A Testbed-2 node: 4 ×GPUs reach the NVMe and the PFS over independent paths. (c) Within one forward pass, each GPU’s prefix writes for step 𝑖 interleave with its prefix reads for step 𝑖 +1, and all ranks of a node compete for both tiers. 
+
+bytes written. Capacity is rarely the issue on multi-terabyte storage tiers: each tier independently evicts its chunks based on LRU when it nears its configured limit, and an evicted prefix is recomputed or fetched from alternate tier if it is requested again. The extra writes nevertheless cost coordination and bandwidth even when they are deferred off the read path, and when they cannot drain behind the forward pass they slow the iteration. If parallel reads do not recover more than replication costs, KVStream is slower than single-tier offloading: 0.98 × when host memory holds the working set (§ 6.5), and 0.81 × at 4% reuse (§ 6.2). KVStream needs at least two storage tiers to realize its benefit; with one, it reduces to batched retrieval with deferred writes. KVStream coordinates nothing across nodes: each node routes its own reads, so nodes that share the PFS adapt independently (§ 6.6). Cross-node coordination, cross-node KV sharing, and prefill-decode disaggregation are orthogonal, and § 7 discusses how they compose with KVStream .
+
+## 2 Background and Problem Formulation 
+
+KV caching across the memory hierarchy . Inference engines manage the KV cache in fixed-size blocks: vLLM’s PagedAttention allocates it in pages to avoid fragmentation, and SGLang’s RadixAt-tention and vLLM’s automatic prefix caching index cached blocks by their token prefix, so that a new request reuses the longest cached prefix [31, 57, 70]; CacheBlend extends reuse to cached chunks that are not prefixes [66]. FlexGen offloaded KV beyond the GPU for throughput-oriented inference [51]. Today, connectors such as LM-Cache [10] extend the engine’s prefix cache with host memory and storage, as CachedAttention does for multi-turn conversations [15], Mooncake and NVIDIA Dynamo’s KV block manager pool DRAM and SSDs across nodes for disaggregated prefill and decode [41, 46], and characterization studies of production traces and offloading stacks document both the reuse that makes it worthwhile to utilize storage tiers and the I/O that it generates [38, 49, 59]. On a prefix hit, these connectors read each matched chunk from the fastest tier that holds it and serve the requests of a step one after another. 
+
+Reducing and accelerating storage reads . Compression and quantization [36, 53], token eviction [62, 69], and selective or partial restoration [16, 32] shrink a prefix by a constant factor (3.5–4.3 × for CacheGen), sometimes at a cost in accuracy. Architectures already build in much of this saving: GQA leaves 5–8 × fewer KV heads in the models we evaluate, and multi-head latent attention cuts the KV cache of DeepSeek-V2 by 93.3% [1, 11]. Compression shrinks the spill but does not remove it, and it composes with our approach (§ 7). Storage backends make one tier faster: 3FS serves KV from RDMA-attached SSDs [8], GPUDirect Storage and NIXL move KV without host copies [39, 40], py-kvcache and BiDAW drives NVMe with io_uring and preloads the blocks of waiting requests [24, 28], and IBM Storage Scale and Dynamo add shared storage as a further tier [25, 41]. None reads a step’s prefixes from several tiers at once. Reuse-aware schedulers, such as SGLang’s longest-prefix-match (LPM) policy, Preble, BiDAW, and PEEK, run requests that share a prefix while its KV is hot [24, 52, 63, 70], and smarter eviction and promotion keep hot prefixes in the faster tiers [34, 43, 44]. Reordering may work for offline batches running without arrival or scheduling priorities, but online serving must respect arrival order, and better eviction helps only while the working set between reuses is not much larger than memory (detailed in § 5.1). 
+
+The store and retrieve path . A connector such as LMCache splits each request’s KV into chunks of 256 tokens by default and keeps one file per chunk and tensor-parallel rank on storage (Fig-ure 4(c)). Its store path copies newly computed chunks from the GPU to a host buffer and flushes them to storage asynchronously, so that later requests sharing the prefix can reuse them. Its retrieve path runs when the engine schedules the next step. The engine matches each request’s prompt against the cached prefixes; matched chunks resident on the GPU need no transfer, chunks in host memory are copied to the GPU, and chunks only on storage are read into host memory and then copied. The forward pass cannot start on any tensor-parallel rank until all matched chunks of the batch are on its GPU, and the flushes of step 𝑖 overlap the reads of step 𝑖 +1 on the same devices. 
+
+Node storage architecture . Figure 4(a,b) shows the storage paths of a node of Testbed-2 (Table 2). Four GPUs, joined by NVLink, sit in two NUMA domains, each with its own PCIe links to host mem-ory. From each domain, independent paths lead to the node-local Review version, , Avinash Maurya et al. 0 1 2 3 4  
+
+> KV Retrieval Timeline of One Step (s)
+> R0 R1 R2 R3 R4 R5 R6
+> Request ID
+> host cache hit (no disk I/O)
+> Disk Read Host →Device
+
+Figure 5: LMCache retrieval timeline of one step (70B): the transfers of each request run serially. 14B 32B 70B 110B 
+
+> Model Size (in B of parameters)
+> 025 50 75 100 125
+> Total Time (minutes)
+> CPU-only (8) CPU-only (27) CPU-only (64) CPU-only (85) LMCache (8) LMCache (22) LMCache (37) LMCache (39)
+> Retrieve Compute Store
+
+Figure 6: Processing-time breakdown of CPU-only and LMCache across model sizes (LooGLE, Testbed-1). NVMe PFS 0100 200 300 400  
+
+> Total Time (in sec.) for 1 TB (4 parallel ranks, 256 GB each)
+> 75 165 224 145 158 143
+> Testbed-1
+> NVMe PFS 88 285 203 371 185 328
+> Testbed-2
+> Read 1TB Write 1TB Conc. R+W(0.5TB each)
+
+Figure 7: Mean per-rank time to read (R) or write (W) 1 TB alone, or 0.5 TB of each concurrently. 
+
+NVMe drives (RAID-0) over PCIe and to the shared PFS through two NICs, so the two storage paths share no link before host memory. The layout also creates two kinds of contention: the tensor-parallel ranks of a job share the node-local NVMe, and the PFS is shared by all nodes and jobs of the cluster, so its bandwidth varies with unrelated load [17, 68]. Cloud GPU instances have the same shape, with instance-local NVMe next to network-attached file and object stores [3, 5]. 
+
+Problem Formulation . Inference proceeds in iterations (steps) indexed by 𝑖 . Step 𝑖 runs the forward pass of a batch of requests 𝐵 ,chosen by the engine’s scheduler. Under tensor (or expert) paral-lelism, every participating GPU needs all matched prefix chunks of the batch before it can start, so the step is synchronous across ranks. We decompose its wall-clock time 𝑇 𝑖 into three phases, 
+
+𝑇 𝑖 = 𝑇 ret  
+
+> 𝑖
+
++ 𝑇 fwd  
+
+> 𝑖
+
++ 𝑇 wr  
+
+> 𝑖
+
+, (1) where 𝑇 ret  
+
+> 𝑖
+
+retrieves the matched prefix chunks that are not al-ready on the GPU, from host memory or storage; 𝑇 fwd  
+
+> 𝑖
+
+executes the forward pass and depends only on the model and the batch; and 𝑇 wr  
+
+> 𝑖
+
+is the part of persisting newly generated KV that the step waits for, normally only the device-to-device copy, since flushes to host and storage run asynchronously. However, retrieval sits in the path of critical performance, causing slower 𝑇 ret  
+
+> 𝑖
+
+to directly transfer overheads on the iteration time 𝑇 𝑖 .The two serving modes use this decomposition differently. Of-fline (batch) serving submits a whole dataset at once, and its through-put and end-to-end time are set by Í𝑖 𝑇 𝑖 . Online serving admits requests as they arrive, and a request’s time-to-first-token (TTFT) is the time it waits in the queue for previous batches/requests plus the amount of time taken by the step/batch to complete it’s own prefill. A long step thus delays its own requests and every request queued behind it. The problem is to minimize 𝑇 ret  
+
+> 𝑖
+
+at every step without exposing the overheads of asynchronous writes ( 𝑇 wr  
+
+> 𝑖
+
+≈ 0), under three con-straints. First, the chunks that a step needs are known only when the scheduler forms the batch: they depend on which requests have arrived, in what order, and what the faster tiers still hold. Second, the read bandwidth of each storage device varies from step to step with concurrent writes, competing tensor-parallel ranks, and other jobs. Third, the engine’s scheduling order is respected: a storage engine must accelerate the batches it is given rather than reorder requests to suit its cache (unlike BiDAW [24], PyKVCache [28]). § 3 measures how existing systems fare on this problem, and § 5 returns to Equation 1 to bound 𝑇 ret  
+
+> 𝑖
+
+based on our design. 
+
+## 3 Gap Analysis and Observations 
+
+We characterize storage-backed prefix retrieval in LMCache [10], the state-of-the-art KV connector, on the testbeds and workloads of § 6.1, offline (closed loop, throughput) and online (open-loop arrivals, TTFT). Observations O1–O4 concern how fast retrieval moves bytes; O5 and O6 concern whether storage retrieval matters for a given workload and deployment, and how much. 
+
+O1: Prefix retrieval is serialized request by request . LM-Cache retrieves a step’s prefixes in a strictly sequential, per-request pipeline: for each request, all matched chunks are read from storage into host memory and copied to the GPU before the retrieval of the next request begins. Figure 5 shows an Nsight Systems trace of one step that batches seven requests on a 70B model. The storage reads of each request take 600–1300 ms, the next request waits for them, and the step spends 4.7 s retrieving. NVMe controllers reach peak throughput only at high queue depths, when many I/O operations are in flight simultaneously [20, 64]. Issuing chunks one request at a time and alternating control between disk-to-host and host-to-device transfers, results in two limitations (a) the pipeline keeps the queue shallow and prevents the controller from exploiting its internal parallelism across channels and dies; and (b) it keeps hier-archical interconnects idle, i.e., when host-to-device link is used, the disk-to-host channel remains idle. Because the forward pass waits for the KV of every request, finishing one request early gains nothing; only the arrival of the step’s last chunk matters. 
+
+O2: Prefix retrieval dominates step time . Figure 6 decomposes the processing time of the CPU-only baseline, which keeps KV only in GPU and host memory and recomputes evicted prefixes, and of LMCache, which offloads them to NVMe, for four model sizes, each with a different KV footprint per token (Table 3). Because of the read amplification of Figure 3, retrieval dominates LMCache’s time at every size, accounting for 80–88% of it. Even so, LMCache matches CPU-only at 14B and finishes up to 2.2 × sooner at larger models, where CPU-only, which must recompute every evicted prefix, spends far longer in its again computing and repeatedly storing it. Since retrieval is the major fraction of the total serving time, accelerating it speeds up inferences. KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , Only Read Only Write Conc. Read Conc. Write Only Read Only Write Conc. Read Conc. Write 0200 400 600 800  
+
+> Per-Chunk Latency (ms) 12.5 MiB chunks, 4 ranks
+> NVMe PFS
+
+Figure 8: Per-chunk I/O latency of reads and writes alone (‘Only’) and concurrent (‘Conc.’, 50:50). 40 [1428] 60 [1428] 80 [1428]   
+
+> Per rank host memory and [disk traffic] (in GB)
+> 0.0 0.3 0.6 0.9
+> LMCache Mean TTFT (s)
+> 0.76 0.81 0.90
+> Qwen-Coder
+> 40 [1412] 60 [380] 80 [20] 03698.13 3.55 2.32
+> Chutes
+
+Figure 9: LMCache mean TTFT against host memory; brackets give storage reads per rank. Cache-friendly Random Round-robin 
+
+> Arrival order
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> LMCache Mean TTFT (s)
+> 0.42 1.61 42.8
+> High rate: 2.4 req/s
+> Low (1.0) Med (1.5) High (2.4)
+> Arrival rate (req/s)
+> 0.36 0.90 42.8
+> Order: round-robin
+
+Figure 10: LMCache mean TTFT on Qwen-Coder against arrival order (left) and arrival rate (right). 
+
+O3: Second-tier bandwidth sits idle while the local device suffers read/write interference . To measure the bandwidth avail-able to KV offloading, we run an io_uring MPI microbenchmark that mirrors the inference pattern: four ranks, matching the tensor-parallel degree, issue O_DIRECT chunk reads and writes, one file per chunk, in isolation and concurrently (Figure 7). Two observa-tions follow. First, in isolation the node-local NVMe reads only 2.2 × (Testbed-1) and 3.2 × (Testbed-2) faster than the PFS, which is shared by all compute nodes. Yet during inference the PFS carries no traffic beyond model loading, so its bandwidth is available for free. On cloud providers, fast storage tiers such as AWS FSx [5] support tens of GB/s of throughput cheaper than GPUs, making inferences both faster and cheaper than using more GPUs for re-computations. Second, when one device serves reads and writes together, as interleaved retrieval and flushing force it to, the two interfere: 1 TB of concurrent reads and writes (512 GB each) takes 6% longer on Testbed-1 and 27% longer on Testbed-2 than running them in isolation. The read bandwidth a device delivers during inference therefore depends on what else it is doing, and a division of reads across devices computed from their isolated bandwidths is mis-sized for the concurrency in which inference runs. 
+
+O4: Per-chunk latency is heavy-tailed and per-tier band-width fluctuates . Even a well-chosen division of reads meets un-stable per-chunk latency, especially on the shared PFS. On Testbed-2 with four ranks (Figure 8), isolated NVMe reads have a p50 of 123 ms and a p99 of 216 ms; under concurrent reads and writes the p99 reaches 898 ms, 7.3 × the isolated median, and PFS reads show a p99 of 795 ms against a 102 ms median. The tails have different origins: write amplification and garbage collection on the NVMe [20, 64], and cluster-wide contention on the PFS (Figure 4(a)) [17, 68]. To-gether with the tensor-parallel ranks that contend for reads and writes on the NVMe, they make the chunk retrieval latency and bandwidth fluctuate across different inference steps, making static split of prefixes across storage tiers suboptimal (detailed in § 5). 
+
+O5: Host memory relative to the working set decides whether storage is on the critical path . Whether storage reads happen at all depends on how much KV is touched between two uses of a prefix compared with how much host memory holds. Figure 9 varies host memory per rank while the 32B model serves two online production traces (§ 6.1): Qwen-Coder and Chutes at their medium arrival rates (50% of times vLLM’s scheduling queue was idle, and requests didn’t have to wait, detailed in § 6.1). On Qwen-Coder, with sessions interleaved round-robin, the KV touched between reuses far exceeds host memory: doubling it from 40 to 80 GB per rank changes the storage read volume by less than 1% (1428.3 to 1428.2 GB per rank), and LMCache’s mean TTFT stays between 0.76 and 0.90 s. On Chutes, the same doubling brings almost every reuse within memory: storage reads fall by 98.6% (1412 to 20 GB per rank), and LMCache’s mean TTFT falls 3.5 ×, from 8.13 to 2.32 s. This analysis demonstrates two sub-observations: (a) when the working set between reuses is large (beyond host memory capacity), and only faster storage retrieval can; and (b) When it fits in the faster tiers, storage leaves the critical path, and no storage-side optimization (e.g., BiDAW [24], 3FS [8], PyKVCache [28], etc.), ours included, can accelerate the workload. Appendix A.3 adds KVStream to this sweep (Figure 35). 
+
+O6: Arrival/Scheduling order and arrival rate shape both the demand and the queue . Figure 10 (left) serves the same Qwen-Coder trace with the 32B model at a high arrival rate (2.4 req/s, § 6.1), with the same output lengths and host memory (80 GB per rank), in three arrival orders. In the cache-friendly order of the source trace (similar to BiDAW [24], SGLang’s LPM, PEEK [63], and PyKV-Cache [28]), consecutive turns of a session arrive close together: the median reuse distance, the KV touched between two uses of a chunk, is 13 GB per rank, far below host memory (80 GB/rank), because of which only 291.3 GB (instead of 1692 GB) per rank is read from storage, leading to LMCache’s mean TTFT of 0.42 s. In-terleaving whole sessions at random (representative of real-world multi-session concurrent serving [38]), with turn/request order per-session preserved, raises the median reuse distance to 67 GB and storage reads to 1300 GB per rank, leading to mean TTFT of 1.61 s. And finaly, interleaving them round-robin (giving each concurrent session fair/equal priority) raises it to 278 GB and 1692 GB per rank, leading to 42.8 s mean TTFT. Order is a property of the arrivals, and the more sessions it interleaves between two turns of one session, the longer every reuse distance. Next, Figure 10 (right) fixes the order (round-robin) and raises the arrival rate from low through medium to high. The mean number of requests in flight grows from 3.4 to 128, and LMCache’s mean TTFT grows 120 ×, from 0.36 to 42.8 s, most of it waiting behind slow retrievals. Scheduling or arrival order sets the volume to be read from storage, and rate sets how many requests wait behind each read. A server that must re-spect arrival order cannot choose the cache-friendly order; it can only make the reads it is given faster (extended in Appendix A.3). Review version, , Avinash Maurya et al. 
+
+Takeaways . O1–O4 expose losses that a storage engine can recover: retrieval is serialized per request (O1) and dominates the step (O2), the PFS bandwidth sits idle while the local device suffers read/write interference (O3), and per-tier bandwidth fluctuates with heavy tails (O4). O5 and O6 lie outside any storage engine’s control: host memory, arrival/scheduling order, and arrival rate decide how much of the working set reaches storage and how many requests wait behind each read, and therefore how much a faster storage read path can speed up the inference. 
+
+## 4 KVStream System Design and Implementation 
+
+KVStream minimizes the retrieval term 𝑇 ret  
+
+> 𝑖
+
+that dominates each step (O2) under three design goals: it serves batches in the order the engine schedules them, without reordering requests to suit its cache; it predicts nothing about future demand or bandwidth; and it needs no tuning at run time. Four I/O mechanisms address the gaps of § 3: M1 pools a step’s storage reads (O1), M2 keeps writes off the devices while a step reads (O3), M3 replicates every chunk on every tier to use the idle PFS (O2, O3), and M4 routes each read by completion rather than by a fixed split (O4). 
+
+## 4.1 KVStream ’s I/O Mechanisms 
+
+M1: Parallel, batched prefix retrieval . A forward pass batches many requests to keep the GPU busy and cannot begin until the prefixes of all of them are on the GPU. KVStream therefore treats a step’s storage reads as one pool rather than as a sequence of per-request pipelines (O1). It classifies the matched chunks of all re-quests by where they reside, submits every storage-resident chunk into one parallel I/O queue, and drains it with a single completion loop. Pooling is what makes the remaining mechanisms possible: the pool can be divided among tiers, and a tier that finishes early can take more of it. Pooling also simplifies I/O management in three ways. Buffers are allocated in bulk, removing the per-request block-management and scheduling overhead that a one-at-a-time pipeline pays repeatedly. One completion-drain loop serves all requests, so reads finish in any order without per-request synchronization. And host-to-device transfers pipeline naturally: each chunk ships to the GPU as soon as it arrives, overlapping the PCIe transfer with the remaining storage reads instead of alternating between the two. 
+
+M2: Deferred writes . The KV generated in a step must be per-sisted for future reuse. Under tensor parallelism, all ranks finish together and flush their KV at once, competing for write bandwidth. Meanwhile, the next step needs a different set of prefixes read back, and those reads are on the critical path. Letting the writes run against these reads delays retrieval, and read/write interference amplifies the delay (O3, Figure 4(c)). KVStream prioritizes reads and defers writes: new KV is buffered in host memory and flushed during the following forward pass, when the devices are otherwise idle for reads. A retrieval is always followed by a forward pass that leaves such an idle window, and the window is usually long enough for a step’s writes to drain. Deferral moves writes in time but does not remove them: every chunk is still written, and a flush that outlasts the forward pass overlaps the next step’s reads. § 5.3 states when this happens, and § 6.5 measures how often. 
+
+M3: Multi-path replication . When requests arrive in an order the server does not control, which chunks a step will need cannot be predicted, so any placement that commits each chunk to one tier risks loading too much of a step’s demand onto one tier and too little onto another, and the bandwidth each tier will deliver at read time is unknown as well (O4). Rather than guess, KVStream 
+
+writes each chunk to every tier. Storage capacity is plentiful relative to the working set, and because writes are deferred behind the forward pass, the second copy normally stays off the read path; it still consumes write bandwidth, which § 5.3 weighs against the read bandwidth it unlocks. Replication gives the engine full flexibility: any part of any prefix can be read from whichever tier is free, which enables the routing below and lets a step draw on the aggregate, otherwise idle bandwidth of all tiers (O3). The scheme is not specific to NVMe and PFS; any further tier, such as CXL-attached memory or a second NVMe, adds read bandwidth with no placement or migration policy to maintain. 
+
+M4: Completion-driven meet-in-the-middle routing . Repli-cation lets KVStream read any part of any prefix from any tier, which it exploits with a meet-in-the-middle strategy. For two tiers, it reads the beginning of a prefix from the NVMe and the end from the PFS, in batches of 𝑚 chunks, and lets the two directions meet in the middle, as Cake does between loading and recomputing KV [27]. A tier that finishes its batch immediately pulls the next outstanding chunks, so a faster or momentarily less contended tier advances its cursor further and takes on more work. This has four consequences: each tier stays saturated, since neither waits on the other; the sched-uling and polling overhead of reaping many small one-by-one reads is avoided; tail latency is masked, because both tiers rarely stall at once, so the healthy tier absorbs the stragglers of O4; and no bandwidth measurement, prediction, or interleaving schedule is needed, since the engine adapts purely by completion. The cursors need not synchronize at the meeting point: a small overlap re-reads a few chunks into the same host buffer, and because the content is identical, the first arrival makes the chunk GPU-ready while the redundant read completes harmlessly. § 5.2 shows that this routing attains the aggregate-bandwidth bound. 
+
+## 4.2 I/O Lifecycle of an Iteration 
+
+Algorithm 1: I/O lifecycle of one iteration                                                  
+
+> Input : batch 𝐵 of iteration 𝑖 +1; writes W𝑖 deferred from iteration
+> 𝑖 ; batch size 𝑚
+> 1enqueue_writes( W𝑖 )// stage on all tiers; don’t submit
+> 2𝐶 gpu , 𝐶 cpu , 𝐶 disk ←prefix_match( 𝐵 )// all reqs. at once
+> 3submit_reads( 𝐶 disk ,𝑚 )// NVMe from front, PFS from back
+> 4foreach 𝑐 ∈𝐶 cpu do h2d( 𝑐 )
+> 5while not all chunks are on the GPU do
+> 6𝑐, src ←wait_any()
+> 7if src is a storage tier then
+> 8h2d( 𝑐 )
+> 9claim_next( src, 𝑚 )// next 𝑚 unread chunks
+> 10 mark 𝑐 GPU-ready
+> 11 flush_writes() // submit the staged writes
+> 12 forward( 𝐵 )// overlaps the writes KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, ,
+
+Algorithm 1 combines the four mechanisms in one iteration. It runs on each tensor-parallel rank, and the inference engine drives the iterations. Line 1 stages the writes deferred from the previous iteration on every tier (§ 4.1) but does not submit them, so the reads that follow meet no write contention. Line 2 matches the prefixes of all requests in the batch that the engine scheduled [67] and classifies each matched chunk by where it resides: on the GPU, in host memory, or only on storage. Line 3 submits all storage-resident chunks as one pool. The NVMe reads from the front of the list and the PFS from the back, 𝑚 chunks at a time, while Line 4 starts copying host-resident chunks to the GPU. Lines 5–10 drain completions from any source. When a storage read completes, its chunk moves to the GPU, and its tier claims the next 𝑚 unread chunks (Line 9). Near the meeting point, the tiers read at most 2 𝑚 
+
+chunks twice. Line 11 submits the staged writes. The forward pass (Line 12) overlaps them and the device-to-host copies of the KV it produces, which the next iteration stages in Line 1. 
+
+## 4.3 Implementation 
+
+KVStream ’s I/O engine is a standalone C++ library with no CUDA dependency, so it carries over to other GPU architectures. It is-sues asynchronous O_DIRECT reads and writes through Linux’s 
+
+io_uring , with separate rings for reads and writes, so that waiting on one never stalls the other. A nanobind binding exposes it to Python with zero-copy buffers. KVStream plugs into LMCache [10] as a storage backend: the adapter between LMCache and the infer-ence engine calls KVStream ’s batch-level API at the start of each it-eration, during prefix matching. The engine keeps using LMCache’s existing interface, so vLLM [31] and other engines that integrate LMCache get multi-tier retrieval, completion-driven routing, and deferred writes without code changes. In SGLang [70], KVStream 
+
+is a storage backend of the hierarchical cache (HiCache). There it writes synchronously and does not overlap retrieval, because HiCache reuses a host page as soon as a write returns and finishes or abandons a prefetch before it schedules the request. 
+
+## 5 Performance Model of Iteration Breakdown and I/O Bounds 
+
+We now return to the iteration of Equation 1 to answer three ques-tions: how many bytes a step must read from storage (§ 5.1), how fast several tiers can read them and why a static split cannot (§ 5.2), and when faster reads improve end-to-end performance (§ 5.3). Table 1 maps each workload and system factor to the term of the model that it moves, the observation that motivates it, and the experiment that tests it. 
+
+## 5.1 Retrieval Demand as Function of Reuse Distance and Memory Capacity 
+
+Let the retrieval demand 𝐷 𝑖 of step 𝑖 be the bytes of its matched prefixes, per rank, that miss both GPU and host memory and must be read from storage. Over a serving session, 𝐷 = Í𝑖 𝐷 𝑖 is set by two properties of the workload and one of the deployment. The workload reuses a volume 𝑉 of prefix KV in total, the matched prefix tokens times the per-rank KV bytes per token, so 𝑉 grows with input length, prefix reuse, and model size (Table 3). Whether a reused chunk is still in memory depends on its reuse distance 𝑑 :
+
+Table 1: Factors of the performance model: the term each moves, where it is observed, and evaluated.                                 
+
+> Workload or system fac-tor Model term Observed Evaluated
+> Host memory capacity demand 𝐷 via capacity 𝑀
+> (§ 5.1) O5 § 6.5 Arrival order demand 𝐷 via reuse dis-tance 𝑑 (§ 5.1) O6 § 6.5 Input length, prefix reuse, KV per token demand 𝐷 via reused vol-ume 𝑉 (§ 5.1) O2 § 6.3 Tier bandwidth, R/W and TP contention, tails bound and static penalty (§ 5.2) O3, O4 § 6.4 Output length forward time 𝑇 fwd ,re-trieval share (§ 5.3) O2 § 6.5 Arrival rate and burstiness queueing (§ 5.3) O6 § 6.2 Replicated writes write path 𝑇 wr , write cost (§ 5.3) O3 § 6.5
+
+the bytes of distinct KV touched between two consecutive uses of the chunk, that is, the working set between those uses. Under LRU eviction a reuse hits in memory exactly when 𝑑 does not exceed the GPU+host cache capacity 𝑀 , so 
+
+𝐷 = 𝑉 · Pr [ 𝑑 > 𝑀 ], (2) where the probability (Pr) is taken over all reuses in the session. Other policies, such as LFU or workflow-aware eviction [43, 44], change which chunks miss but not the dependence of 𝑑 on 𝑀 .Equation 2 separates what the deployment controls from what it does not. 𝑀 is a provisioning choice; 𝑑 is set by the dataset and by the order in which requests arrive or get scheduled, and interleaving more sessions between two turns of the same session lengthens reuse distance. One rule thus explains both O5 and O6 (§ 3). When nearly all reuse distances exceed 𝑀 , as on Qwen-Coder (Figure 9), where 𝑑 =278 GB per rank, against 𝑀 =40–80 GB, we get Pr [𝑑 > 𝑀 ] ≈ 1 at every memory size, and only faster retrieval helps. However, for the Chutes dataset (Figure 9), where 𝑑 =58GB, increasing 𝑀 from 40 GB to 80 GB, reduces most of the storage demand. We evaluate Equation 2 against measured reads in § 6.5. 
+
+## 5.2 Aggregate-Bandwidth Bound and the Static-Split Penalty 
+
+Retrieving 𝐷 𝑖 bytes requires fetching from storage-to-host and then host-to-device, whose bandwidth we denote by 𝑏 D2H . Let 𝑏 𝑘 (𝑖 ) be the read bandwidth that tier 𝑘 delivers to one rank during step 𝑖 ,under that step’s concurrent writes and tensor-parallel contention (not the bandwidth of an idle tier). Because the NVMe and PFS paths are independent (§ 2, Figure 4), their read bandwidths are additive, and no retrieval schedule 𝑇 ret  
+
+> 𝑖
+
+can read faster than 𝑇 𝑖 , the aggregate-bandwidth bound , which is the classic optimum for dividing work among parallel servers, which finish together when each takes a share proportional to its current speed [45, 50, 56]: 
+
+𝑇 ret  
+
+> 𝑖
+
+≥ 𝑇 𝑖 = 𝐷 𝑖 
+
+min  𝑏 0 (𝑖 ) + 𝑏 1 (𝑖 ), 𝑏 D2H 
+
+ . (3) 
+
+KVStream applies it within every inference step, where the per-tier bandwidths change from step to step. Since device to host bandwidth 𝑏 D2H is typically magnitudes of order faster than storage tiers, the effective aggregate-bandwidth bound becomes 
+
+𝑇 𝑖 = 𝐷 𝑖 /( 𝑏 0 (𝑖 ) + 𝑏 1 (𝑖 )) . We measure a given retrieval policy (e.g., Review version, , Avinash Maurya et al. 
+
+static 80:20 from NVMe:PFS) by its gap , Í𝑖 𝑇 ret  
+
+> 𝑖
+
+/Í𝑖 𝑇 𝑖 − 1, both of which are computed based on bandwidth achieved at step 𝑖 .A policy reaches the bound exactly when it is work-conserving 
+
+across tiers, i.e., no tier is idle until all chunks for that step 𝑖 are retrieved. KVStream ’s routing is work-conserving by construction. Every chunk is on both tiers, and a tier that completes a batch immediately claims the next unread chunks from its end of the step’s list (Line 9 of Algorithm 1), so a momentarily faster tier reads more and the two tiers finish together. At step 𝑖 , the share 𝜑 of the demand 𝐷 that gets served by the faster tier (assuming tier-0 is fast, i.e., 𝑏 0 (𝑖 ) > 𝑏 1 (𝑖 )) is given by 
+
+𝜑 (𝑖 ) = 𝑏 0 (𝑖 )
+
+𝑏 0 (𝑖 ) + 𝑏 1 (𝑖 ) , (4) without any monitoring of bandwidths to redistribute the reads, and the retrieval time of KVStream ’s completion-driven routing is therefore 𝑇 𝑖 = 𝐷 𝑖 /( 𝑏 0 (𝑖 ) + 𝑏 1 (𝑖 )) , execept the only residual is each tier’s last batch of at most 𝑚 meet-in-the-middle chunks (§ 4.1, M4). A static policy commits each chunk to one tier when it is written, so the fraction 𝑔 of step 𝑖 ’s demand that the fast tier serves is fixed by placement rather than by the bandwidths at read time. The tiers read in parallel, cannot help the other finish, so the step ends when the slower one does, 
+
+𝑇 stat  
+
+> 𝑖
+
+= max 
+
+ 𝑔 𝐷 𝑖 
+
+𝑏 0 (𝑖 ) , (1 − 𝑔 ) 𝐷 𝑖 
+
+𝑏 1 (𝑖 )
+
+
+
+, (5) and dividing by the aggregate-bandwidth bound gives its penalty, 
+
+𝑇 stat 
+
+> 𝑖
+
+𝑇 𝑖 
+
+= max 
+
+ 𝑔 𝜑 (𝑖 ) , 1 − 𝑔 
+
+1 − 𝜑 (𝑖 )
+
+
+
+≥ 1, (6) with equality only when 𝑔 = 𝜑 (𝑖 ) for step 𝑖 . Each argument of Equation 6 is a tier’s load relative to its share of the bandwidth, so a split tuned to one bandwidth mix pays when the mix moves in either direction. A 75:25 split meets the aggregate-bandwidth bound for step 𝑖 if NVMe and PFS have 3 GB/s and 1 GB/s read throughputs, respectively; but it is 12.5% slower than the bound when the NVMe slows to 2 GB/s, and slower than the NVMe alone when the PFS slows to 0.5 GB/s. The penalty is first-order in the deviation, |𝜑 − 𝑔 |/ 𝑔 when the fast tier lags and |𝜑 − 𝑔 |/( 1 − 𝑔 ) when it leads, so the session-average penalty grows roughly linearly with the mean deviation of 
+
+𝜑 (𝑖 ) from 𝑔 . The share deviates for three reasons (O3, O4): tensor-parallel ranks contend for the NVMe, which also absorbs writes; other jobs and heavy tails modulate the PFS; and bursty arrivals land bursts of writes on the devices while they read. KVStream ’s completion-driven routing removes the coupling using bandwidth centric instantaneous read distribution 𝜑 (𝑖 ), so Equation 6’s 𝑇 stat  
+
+> 𝑖
+
+≈
+
+𝑇 𝑖 for varying bandwidths. We evaluate in § 6.4 both predictions: the gap of a static split widens with the deviation of 𝜑 (𝑖 ) from 𝑔 ,while completion-driven routing stays at the bound. 
+
+## 5.3 End-to-End Gains and Losses 
+
+Equations 3–6 concern a single step. However, in real-world deploy-ments serving continuous stream of requests, the effective overall savings or overheads achieved by KVStream (or other storage-tier optimizations) depend on the following. 
+
+Service time . Routing a step’s reads over both tiers instead single tier reduces retrieval from 𝐷 𝑖 /𝑏 0 (𝑖 ) to 𝐷 𝑖 /( 𝑏 0 (𝑖 ) + 𝑏 1 (𝑖 )) , that is, by a fraction 1 −𝜑 (𝑖 ) of the single-tier’s retrieval time. However, since a step’s time 𝑇 𝑖 is composed of both 𝑇 ret and the time for forward pass 
+
+𝑇 fwd (Equation 1), the gain of step 𝑖 is capped by retrieval’s share of the step (Amdahl’s law [7]): large when retrieval dominates, as in O2, and negligible when most matched prefixes come from memory or when long outputs or decodes stretch 𝑇 fwd . In offline serving, the engine is saturated and throughput is inversely proportional to step time, so a closed-loop run measures this capacity gain. 
+
+Queueing . In online serving, a request’s TTFT is its own step time plus the time it waits in the scheduling queue for previous requests to complete. Faster retrieval therefore helps twice: the batch that retrieves finishes sooner, and the queue behind it drains faster, so every waiting request starts sooner. At low load, the TTFT gain is the per-request saving due to faster retrievals, which is small; however, at moderate or higher loads, when baseline approaches experience saturation due to slower storage reads, faster draining of waiting queue with KVStream accumulates the TTFT gains across all batches, accelerating real-time serving. 
+
+Losses . The cost of replication does not shrink with demand. Let 
+
+𝑊 𝑖 be the volume of new KV that step 𝑖 persists per rank (fixed by workload) and 𝑤 𝑘 the per-rank write bandwidth of tier 𝑘 . The newly generated unique KV cache gets flushed from the GPU using asynchronous transfers between GPU, host, and storage tier (§ 4.1). The writes stay off the critical path as long as 𝑊 𝑖 /min 𝑘 𝑤 𝑘 ≲ 𝑇 fwd 
+
+> 𝑖 +1
+
+on average, with the buffer absorbing short bursts. This happens when arrivals leave idle gaps and when steps append little new KV to long reused prefixes (multi-turn conversations [46] and agentic workflows [26, 59]). Otherwise writes impact critical path in two ways: interference , when reads and writes share the devices and each tier delivers less read bandwidth (O3), and backpressure , when the staging buffer fills and the device-to-host copy of new KV waits, which lengthens 𝑇 wr  
+
+> 𝑖
+
+. A second tier therefore pays when storage reads are large relative to the replicated writes, and it gains little or loses when they are small: when the working set between reuses fits in memory (O5), when the arrival order keeps reuse distances short (O6), or when reuse is sparse. § 6.5 measures the gains and losses corrresponding to these effects. 
+
+## 6 Performance Evaluation 6.1 Experimental Setup 
+
+Testbeds . Table 2 summarizes the two HPC testbeds. Their host-to-GPU memory ratios, 1.6:1 and 3.2:1, are similar to AWS p6 , p5 ,and p4 instances [2–4]. Both testbeds have 2 ×1.6 TB NVMe SSDs in RAID-0 as node-local storage, and every approach uses this array as its NVMe tier, so single-tier offloading already stripes its reads over two drives. Testbed-1 and Testbed-2 mount a 4 PB VAST PFS and 100 PB Lustre file systems (HPE ClusterStor E1000), respectively. The software stack is vLLM [31] v0.15.0, LMCache [10] v0.3.14, and PyTorch v2.9.1 with CUDA v12.8. 
+
+Models . We evaluate four models from 14B to 110B parameters (Table 3). Their KV size grows from 160 KB per token at 14B to 320 KB at 70B and 110B, while compute grows with depth, so KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , 
+
+Table 2: Testbed configurations used in evaluations (R/W: read/write bandwidth).                 
+
+> Feature Testbed-1 Testbed-2
+> GPUs per node 4×H100-80GB 4×A100-40GB Host memory (GB) 512 512 D2H/H2D (GB/s) 55 25 NVMe (RAID-0) 2×1.6 TB 2×1.6 TB NVMe R/W (GB/s) 13.7 / 4.6 11.6 / 5.1 Parallel FS VAST FS Lustre FS PFS R/W (GB/s) 6.2 / 7.1 3.6 / 2.8
+
+Table 3: Models used for evaluation. KV sizes are BF16 totals over all tensor-parallel ranks.                  
+
+> Model KV/token KV/chunk Arch. (KB) (MB) Ref.
+> 14B (Qwen3-14B) 160 40 [48, 65] 32B (DS-R1-Qwen-32B) 256 64 [13, 19] 70B (DS-R1-Llama-70B) 320 80 [12, 19] 110B (Qwen1.5-110B) 320 80 [9, 47]
+
+the four sizes span the balance between recomputing a prefix and reading it back. All models use GQA with 8 KV heads and a head dimension of 128 (compressing KV cache by up to 8 × compared to standard MHA). We use TP=4 (2 KV heads per layer per GPU), and the default LMCache block size of 256 tokens produces 10–20 MB per GPU. 
+
+Workloads . We use three offline datasets and three online traces as detailed below, whose prefix reuse rate, is 80–96%, and the study in § 6.5 dilutes it down to 4%. 
+
+• LooGLE [33]: A long-document question-answering benchmark with documents spanning 2K–32K tokens. We use a merged sub-set consisting of long-dependency QA, short-dependency QA, and short-dependency cloze tasks, totaling ∼3.2K requests and 
+
+∼71M input tokens. 
+
+• NarrativeQA [30]: A reading comprehension benchmark, requir-ing understanding of entire narratives. We select a random subset of 2.5K queries, having an average of 46K tokens/request. This is representative of very large context-lengths, producing 15K unique prefix blocks. 
+
+• CUAD [21]: A dataset of legal contracts annotated for clause extraction. Each contract serves as a long-context prefix shared across multiple legal queries. We use 10K requests, averaging 11K tokens/request, producing 12K unique KV prefix blocks. For the online tests, each request is sent at its scheduled arrival time, based on the following traces. 
+
+• Qwen-Coder [59]: ∼7K requests from 716 code-generation ses-sions of a Qwen serving cluster on Alibaba Bailian. Its output size averages to 109 tokens, and prompts average only 7.1K tokens, a hard case for storage offloading. 
+
+• Chutes [38]: agentic sessions from a year-long production trace of the Chutes serving platform, with prompts of up to 130K tokens (62K on average), and outputs of 60 tokens. 
+
+• SWE-bench agentic [26]: 4000 requests from 130 coding-agent sessions resolving SWE-bench issues, with Poisson arrivals at 1.25 req/s. The average input and output token lengths for this trace averages at 19K and 95 tokens, respectively. 
+
+Compared approaches . For all approaches, ≈320GB of host memory was used (80 GB/rank, and 40 GB/rank for Chutes traces outside the memory sweep of § 6.5), with the rest for compiled graphs, metadata management, coordination, and I/O buffers. 
+
+• CPU-only : vLLM’s prefix caching [57] in spare GPU memory, extended by LMCache to host memory only [37]. It is the baseline without storage offloading (recomputes on cache miss). 
+
+• LMCache : LMCache with host memory and node-local NVMe [10]. It flushes each KV chunk of each rank as one file, with multi-threaded, asynchronous O_DIRECT I/O, and reads each chunk from the fastest tier that holds it. KVStream extends this state-of-the-art connector. 
+
+• Mooncake Store : Mooncake’s KV store [46], used through Moon-cake’s own vLLM connector. Its memory pool and transfer buffers hold 80 GB per rank, and allows disk offloading only to a single tier, which in our case is the node-local NVMe, which is faster than PFS (Table 2). 
+
+• SGLang HiCache : SGLang [70] with its native radix-tree-based hierarchical cache, which keeps KV in 80 GB of host memory per rank and in files on the node-local NVMe (allows only a single storage tier). It represents a second serving engine with its own multi-tier cache. 
+
+• KVStream : our engine, an LMCache backend (§ 4.3) that reads from the local NVMe and the PFS. 
+
+Key Evaluation Metrics . For online traces, the primary metrics are TTFT (mean, p50, and p90) and SLO attainment, the fraction of offered requests whose TTFT meets a deadline. Since our scope primarily applies for long-input workloads with few decodes (60– 100 tokens in real-world traces outlined above), TTFT is the most prominent metrics from a user’s perspective. For offline traces, the primary metric is throughput: the total tokens processed divided by the wall-clock time to serve the whole dataset. To explain the results, we also report per-step retrieve, compute, and store times, the read bandwidth of each tier, the storage read and write volume per rank, and the gap to the effective aggregate-bandwidth bound (§ 5.2). 
+
+Arrival rate factor . To evaluate the request processing through-put of different approaches, we speed up or slow down the real-arrival timestamps of the Qwen-Coder and Chutes traces. This speed up factor does not change the order of request scheduling or arrival, and is only representative of under-vs-over-provisioned inference datacenters. We make three classification of this arrival rate factor based on the server’s peak processing capacity when us-ing KVStream , which is 2.9 req/s on Qwen-Coder, and 0.46 req/s on Chutes. The load 𝜌 is the arrival rate divided by the node’s capacity. A load of 33% thus means that requests arrive at one third of the rate at which the node can serve them. We call a rate low below 35% load, medium near 50%, and high above 65%. For the Qwen-Coder dataset (smaller in input length), the arrival rate for low, moderate, and high loads amount to 1.0 req/s, 1.5 req/s, and 2.4 req/s, respec-tively. For the Chutes dataset (high, 62K input tokens on average), the arrival rate for low, moderate, and high amounts to 0.18 req/s, 0.23 req/s, and 0.32 req/s, respectively. Chutes’ arrivals are bursty, so its busiest 10-minute window reaches 54–107% load. Waiting grows as 𝜌 /( 1 − 𝜌 ) (§ 5.3), which is 0.5–0.6 at the low rates, 1.0 at the medium rates, and 2.2–4.7 at the high rates. At a low rate few Review version, , Avinash Maurya et al. 0.1 1 10 100 
+
+> TTFT SLO (s)
+> 020 40 60 80 100
+> Requests met (%)
+> CPU-only Mooncake Store SGLang HiCache LMCache KVStream
+
+Figure 11: TTFT SLO attainment, first 3550 requests (SWE-bench agentic, 32B, Testbed-2). Low (1.0) Med (1.5) High (2.4)   
+
+> Request Arrival Rate (req/s)
+> 02468
+> TTFT speedup (LMCache / KVStream)
+> 1.1 1.6 3.1 1.0 1.1 9.1 1.1 1.3 2.6
+> Qwen-Coder
+> Mean p50 p90
+> Low (0.18) Med (0.23) High (0.32) 0123
+> 1.2 1.7 2.0 1.2 1.5 3.1 1.3 1.6 1.9
+> Chutes
+
+Figure 12: Mean, p50, and p90 TTFT speedup over LMCache vs. offered arrival rate (32B). Low (1.0) Med (1.5) High (2.4)  
+
+> Request Arrival Rate (req/s)
+> 0.01 0.02 0.05 0.1 0.2 0.5
+> Retrieve time per req. (s)
+> 1.18x 1.27x 1.28x
+> KVStream LMCache
+> Low (1.0) Med (1.5) High (2.4) 2510 20 50 100 200
+> Requests in flight
+> 1.05x 1.20x 2.36x
+
+Figure 13: Retrieve time per request and requests in flight vs. arrival rate (Qwen-Coder). 
+
+requests queue, so TTFT shows only the per-request saving; at a high rate the queue dominates TTFT and amplifies savings across step. 
+
+## 6.2 Online Serving: TTFT, SLOs, Load, and Reuse 
+
+All online runs use one Testbed-2 node, and measure the fraction of requests against different TTFT SLO(s) in Figure 11. Against, TTFT SLO of 1s, 84% of requests meet the deadline with KVStream ,followed by 70% with LMCache, 55% with Mooncake Store, 37.7% with CPU-only, and 34% with SGLang’s HiCache disk backend approach. SGLang HiCache is the fastest system while the working set fits in host memory (median TTFT 0.19 s over the first 1200 requests), but its file tier slows it once requests spill to storage. For the remainder of evaluations, we fix the serving engine to vLLM and vary other parameters. Furthermore, since LMCache has lower mean TTFT (1.15 s) and p50 (0.53 s) compared to Mooncake, which has mean TTFT of 1.18 s and p50 of 0.92s, we consider LMCache as the stronger state-of-the-art baseline in the remainder of evaluations. Appendix A.1 repeats this comparison in SGLang, where KVStream beats HiCache and Mooncake (Figure 31). In the next set of experiments in Figure 12, we raise the ar-rival rate from low to medium to high (§ 6.1). On Qwen-Coder, 
+
+KVStream ’s mean-TTFT speedup over LMCache grows from 1.07 ×
+
+to 1.61 × to 3.12 ×, whereas on Chutes, the speedup grows from 1.23 × to 1.71 × to 2.01 ×. To associate these gains to faster retrievals vs queueing delays, for the Qwen-Coder dataset, we observe in Fig-ure 13, per request, KVStream spends 15–22% less time retrieving than LMCache at every rate (0.067–0.095 s against 0.078–0.120 s). Meanwhile, the requests that wait behind each retrieval grow from 3.3 to 54.3 with KVStream , and from 3.4 to 128 with LMCache. This demonstrates the queue, not the per-request saving, carries the growth. At low request arrival rate, the average in-flight re-quest difference between KVStream and LMCache is low (Figure 13 (right)), which amplifies with higher arrival rate, and despite nomi-nal retrieval speedup (Figure 13 (left)), the gains amplify over the serving lifetime to achieve up to 3.12 × faster TTFT compared to LMCache. In our next set of experiments, we study burst arrivals by varying the coefficient of variation (CV) of the arrivals up to 8 (beyond the CV=4.3 of production arrivals [61]) on the SWE-bench agentic traces. Despite variable CV, each run processes the same fixed set of 4000 requests, and their TTFT mean and p90 are reported in Figure 14. We observe that compared to LMCache, KVStream ’s mean-TTFT advantage is 2.12 × at an arrival CV of 1 and 6.07 × at 4. It is 1.69–1.78 × at 2–3, and 1.17 × at 8 (the stress point beyond the production CV). We also observe that the TTFT p90 of KVStream 
+
+also consistently outperforms the compared approaches, absorbing burstiness impact. We then synthetically vary the prefix reuse volume of the SWE-bench traces by controlling the input prefix chain, and run all approaches for all 4000 requests. This studies (a) the impact of lower reuse volume 𝑉 , described in Equation 2, and (b) and higher write:read proportion, which in turn also includes the cost of write amplification due to multi-tier replication with KVStream . Figure 15 dilutes the reuse of the SWE-bench trace with every other knob fixed. We observe that KVStream ’s TTFT mean and p90 outperform both approaches, and against LMCache the advantage peaks at 6.0 ×
+
+at 88% reuse. Below that, each rank writes more new KV while it reads less back: at 77% reuse the two systems are on par (0.97 ×) and at 4% reuse KVStream ’s speedup falls to 0.81 ×, and the advantage falls to 0.8 × compared to LMCache, showing KVStream ’s failure envelope. 
+
+## 6.3 Closed-Loop Offline Dataset Results 
+
+Closed-loop offline serving submit large batches of requests to the inference engine, which leads to queuing of all requests at once. Since offline serving keeps the engine saturated, we measure the peak processing throuhgputs (total tokens processed divided by total time) of different approaches (which does not include queue-ing delays). On one Testbed-1 node (H100-80GB GPUs), KVStream 
+
+delivers higher throughput than both baselines at every model size (Figure 16). It reaches 1.17 ×, 1.37 ×, 1.48 ×, and 1.49 × the throughput of LMCache at 14B, 32B, 70B, and 110B, and 1.15 × to 3.22 × that of CPU-only. The advantage grows with model size for two reasons. A larger KV footprint per token leaves fewer prefixes in host memory (based on hardware, so same for all models), so more reads go to storage. And recomputation grows with model depth faster than KV grows: the 70B model is 5 × larger than the 14B model but holds only 2 × more KV per token (Table 3). The gain comes entirely from retrieval. LMCache and KVStream spend nearly the same com-pute and store time at each size (Figure 32 in Appendix A.2), so replication adds no visible cost to an offline step. KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , 1 2 3 4 8  
+
+> Arrival burstiness (CV)
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Mean TTFT (s), bars  CPU-only LMCache KVStream
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> p90 TTFT (s), lines
+
+Figure 14: Mean (bars) and p90 (lines) TTFT vs. arrival burstiness (SWE-bench agentic). 4 77 88 94 95   
+
+> Prefix reuse rate (%)
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> Mean TTFT (s), bars  CPU-only LMCache KVStream
+> 10 −1
+> 10 0
+> 10 1
+> 10 2
+> 10 3
+> p90 TTFT (s), lines
+
+Figure 15: Mean (bars) and p90 (lines) TTFT vs. prefix reuse rate (SWE-bench agentic). 14B 32B 70B 110B    
+
+> Model Size (in B of parameters)
+> 050 100 150 200
+> Throughput (K tok/s)
+> 148 44 19 14 145 52 32 30 170 71 47 44
+> CPU-only LMCache KVStream
+
+Figure 16: Throughput across model sizes (LooGLE, TP=4, Testbed-1). LooGLE NarrativeQA CUAD  
+
+> Dataset
+> 020 40 60 80 100
+> Throughput (K tok/s)
+> 43.8 31.4 46.0 51.9 69.2 85.2 71.1 83.5 89.8
+> CPU-only LMCache KVStream
+
+Figure 17: Throughput across datasets (32B, TP=4, Testbed-1). 14B 32B 70B 110B      
+
+> Model Size (in B of parameters)
+> 0246810 12 14 16 18
+> Agg. Read BW (GB/s)
+> 6.0 6.6 6.7 6.6 8.1 11.2 11.4 11.8
+> LMCache (NVMe) KVStream NVMe KVStream PFS
+
+Figure 18: Read bandwidth by tier (LooGLE, TP=4, Testbed-1). 16 64 128 256      
+
+> Output Sequence Length (OSL)
+> 020 40 60 80
+> Throughput (K tok/s)
+> 44 40 38 32 52 61 41 34 71 73 55 44
+> CPU-only LMCache KVStream
+
+Figure 19: Throughput vs. output sequence length (32B, Testbed-1). 
+
+Across datasets at 32B (Figure 17), KVStream is 1.37 ×, 1.21 ×, and 1.05 × faster than LMCache on LooGLE, NarrativeQA, and CUAD, and 1.62 × to 2.66 × faster than CPU-only. The gain is smallest on CUAD, whose requests are the shortest (11K tokens on average, against about 22K on LooGLE and 46K on NarrativeQA), consistent with a smaller retrieval share of its serving step (§ 5.3). Figure 18 shows why: KVStream reads at the combined bandwidth of both tiers. Over the four ranks of a node, LMCache reads 6.0–6.7 GB/s from the NVMe. KVStream reads about as much from the NVMe, adds 2.8–4.9 GB/s from the PFS, and reaches 8.1–11.8 GB/s in total. Both systems retrieve similar volume of prefixes from the storage tier (Figure 33 in Appendix A), attributing this speedup to faster parallel reads of KVStream .In our next set of experiments, we evaluate the effect of in-creasing output length on the throughput in Figure 19. Given the auto-regressive, iterative nature of decode phases, we observe each step/request spends larger fraction of it’s time on decodes, thereby diluting retrieval’s share on the iteration. As modelled in the service time of § 5.3, the throughput speedup obtained by faster retrievals is therefore capped by Amdahl’s law. We see in Figure 19 that on LooGLE and Testbed-1, from 16 to 256 output tokens, KVStream ’s advantage over LMCache stays between 1.19 × and 1.37 ×.
+
+## 6.4 Attaining the Aggregate-Bandwidth Bound 
+
+In the next series of experiments, we test the two predictions of § 5.2: if completion-driven routing attains the aggregate-bandwidth bound 𝑇 𝑖 (Eq. 3), and if a static split pays the penalty of Equa-tion 6, which grows with the mismatch between its share 𝑔 and the bandwidth share 𝜑 (𝑖 ) (Eq. 4). We use 17 runs of the 32B model on LooGLE on Testbed-2, and for every step, kvsim computes the bound and 𝜑 (𝑖 ) (Eq. 4) from the run’s per-tier byte and time counters. On a quiet file system, four static placements put 60–90% of each prefix’s chunks on the NVMe. A static placement controls where chunks go, not where reads go: host memory serves the initial chunks of many prefix chain which reside on the NVMe, so the NVMe serves a smaller share 𝑔 of the storage demand: 27–74% instead of 60–90% which are stored on it. We first check the model run by run in Figure 20: Equation 5 predicts the gap of every static run within 3%, and KVStream ’s runs sit within 4.3% of the bound. The model thus explains the retrieval time of both policies, so the gap to the bound is a faithful measure of what each policy loses. Next, Figure 21 sweeps the static share 𝑔 on the quiet file system. As Equation 6 predicts, the gap is V-shaped in 𝑔 : it is smallest (8.0%) when 𝑔 matches the mean bandwidth share ( ≈ 0.55), and it grows on either side, up to 67.7%. Even the best static split pays, because 
+
+𝜑 (𝑖 ) moves from step to step on a quiet file system too (O4), and a fixed 𝑔 matches it only on average. KVStream has no share to tune, since completion-driven routing sets its split as reads complete, and it stays at the bound. End to end, KVStream ’s throughput is 4.6% above that of the best static split and 24.8% above that of the worst, so even a well-tuned static split leaves throughput on the table. For next experiments, a co-located fio job adds periodic, bursty, or steady traffic on the PFS, representative of other jobs sharing it. Figure 22 shows that this traffic widens the spread of 𝜑 (𝑖 ) (Eq. 4) and, for steady traffic, shifts its mean from 0.55 to 0.62, away from the static split’s fixed 𝑔 = 0.55. The static gap thus grows with the mean mismatch |𝜑 (𝑖 ) − 𝑔 |, from 8.0% on the quiet file system to 11.8–23.6%, whereas KVStream stays within 4.3% of the bound under every pattern, because completion-driven routing rebalances the tiers at every step without monitoring their bandwidths (§ 4.1, M4). Review version, , Avinash Maurya et al. 0 20 40 60 
+
+> Predicted gap (%)
+> 020 40 60
+> Measured gap (%)
+> Static, quiet Static, contention KVStream
+
+Figure 20: Measured vs. predicted gap to the bound, one point per run (32B, LooGLE, Testbed-2). 0.2 0.3 0.4 0.5 0.6 0.7 0.8 
+
+> NVMe share of storage reads
+> 020 40 60
+> Gap to bound (%)
+> +8%
+> Static split, measured Static split, model KVStream (emergent share)
+
+Figure 21: Gap to the bound vs. the NVMe share of storage reads on a quiet file system. 0.0 0.1 0.2 0.3   
+
+> Mean |φ(i) − g|
+> 020 40 60
+> Gap to bound (%)
+> KVStream, 7 runs
+> Static, quiet Static, contention Model
+
+Figure 22: Gap to the bound vs. mean mismatch between 𝑔 and the bandwidth share 𝜑 (𝑖 ).
+
+## 6.5 Demand and Write Cost: Host Memory and Arrival Order 
+
+In the next series of experiments, we test Equation 2, which predicts the storage demand from the reuse distance 𝑑 and the cache capacity 
+
+𝑀 , by varying host memory (40, 60, and 80 GB per rank) on the three online traces. Figure 23 shows that the prediction tracks the measured storage reads across all of them, from 20 to 2410 GB per rank (correlation 0.998). One rule produces three shapes, depending on where the reuse distances lie relative to 𝑀 . On Qwen-Coder, they lie far beyond every memory size (median 278 GB per rank), so reads stay flat at 1428 GB per rank, and only faster retrieval helps. On SWE-bench, most session turns recur beyond the largest memory size, so reads decline only gradually (17% from 40 to 80 GB). On Chutes, the reuse distances straddle the memory sizes, so storage reads drastically reduce– 70 × from 40 to 80 GB. The same rule holds across arrival orders: at the same memory, Qwen-Coder reads 5.8 × more in round-robin order than in its cache-friendly order, and Equation 2 predicts each order within 26%. More host memory therefore takes disk I/O off the critical path only when a workload’s reuse distances straddle it, while long, interleaved sessions keep spilling. Appendix A.3, Figure 35 extends this evaluation. Replication, in contrast, writes every new chunk to both tiers, so its write volume is fixed by the workload (e.g., 1100 GB per rank for Qwen-Coder in every order), while its read benefit scales with the demand above. Figure 24 therefore plots the TTFT speedup against the storage reads relative to the replicated writes. In both workloads, the speedup follows this ratio, as § 5.3 predicts. On Qwen-Coder, moving from the cache-friendly to the random and round-robin orders raises reads from 0.27 to 1.18 and 1.54 of the writes, and the speedup from 1.05 × to 1.95 × and 3.12 × (per order in Appendix A, Figure 36). On Chutes, more host memory lowers reads from 3.6 to 0.05 of the writes, and the speedup falls from 1.71 × to 0.98 ×.Multi-tier replication thus pays when storage reads dominate the replicated writes, the regime of interleaved multi-session serving that respects arrival order, and it stays within 2% of single-tier offloading when the working set fits in host memory. Deferred writes keep most of this write traffic off the read path (§ 4.1, M2). On LooGLE, SWE-bench, and Chutes at 40–60 GB, writes overlap only 10–14% of the NVMe’s read time, because each forward pass is long enough to drain the step’s writes (§ 5.3). Qwen-Coder’s short prompts leave less time, so its writes overlap 28–50% of the NVMe’s read time. Figure 25 shows why order decides whether this cost pays: each tier writes 0.19 GB/s per rank in both orders, whereas reads peak at 1.27 GB/s in round-robin order and at only 0.21 GB/s in the cache-friendly order, where the writes nearly match the reads they serve. Figure 37 follows the round-robin run over time: the writes are exactly replicated, and the PFS serves close to its share of the read bandwidth (Appendix A.3). 
+
+## 6.6 Scaling and Ablations 
+
+In the next series of evaluations, we scale KVStream out with data parallelism (DP) from 4 to 32 Testbed-2 nodes (16 to 128 GPUs) on NarrativeQA, where every replica has its own NVMe but all repli-cas share the PFS, the highest PFS concurrency in our evaluation. 
+
+KVStream keeps a 1.23–1.36 × throughput advantage over LMCache (which operates on local NVMes, running in embarassingly parallel fashion, unaffected by other replicas) at every scale (Figure 26), because each replica adapts to the contention on its own: at any iteration, some replicas read more than 50% of their chunks from the PFS while others read less than 20% (Figure 27), without any coordination across nodes. Tail latency stays stable as well (Fig-ure 28): KVStream ’s p90 step time stays near 2.7 s at every scale, against 4.0 s for LMCache at 4 nodes, and even its p99 at 32 nodes remains 1.4 × below LMCache’s. Table 4 then adds the mechanisms of § 4.1 to LMCache one at a time. Offline, batched retrieval (M1) and deferred writes (M2) change throughput by less than 1%, because a single NVMe caps the read bandwidth however its reads and writes are scheduled (O1, O3). The gain comes from the second tier: replicating every chunk on the PFS and reading a fixed 70:30 split (M3) raises throughput to 1.24 × LMCache’s, and completion-driven routing (M4) raises it to 1.48 ×, because it sets the split as reads complete instead of fixing it (§ 6.4). For online serving, at the high arrival rate, the queue amplifies these step-level savings (§ 5.3): batched retrieval (M1) shortens the step by only 4.8%, yet due to faster queue drains, it lowers mean TTFT 1.54 ×, and deferred writes (M2) add little on top (1.58 ×). A static split, in contrast, raises mean TTFT to 3.9 × LMCache’s. Each new turn of a session appends its chunks at the end of the prefix, so a split by prefix position lands most new KV on the PFS, which then serves 47% of the reads with only 15% of the read bandwidth; its reads take 3.2 × the bound, close to the 3.1 × that Equation 6 predicts. As in § 6.4, the placement controls where chunks go, not where reads go. With replication and completion-driven routing (M3 and KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , 40 60 80 
+
+Host memory per rank (GB) 
+
+> 10 1
+> 10 2
+> 10 3
+> Storage reads (GB)
+> Qwen-Coder Chutes SWE-bench Eq. 2
+
+Figure 23: Storage reads per rank vs. host memory: measured and predicted by Equation 2. 0.1 1
+
+Storage reads / replicated writes  
+
+> 123
+> TTFT speedup (LMCache / KVStream)
+> cache-friendly random round-robin
+> 80 GB 60 GB 40 GB
+> Qwen-Coder, arrival order Chutes, host memory
+
+Figure 24: TTFT speedup over LMCache vs. storage reads relative to replicated writes (32B). 0.0 0.6 1.2      
+
+> Read (GB/s)
+> NVMe PFS round-robin cache-friendly
+> 0500 1000 1500 2000 2500
+> Time into run (s)
+> 0.0 0.2 0.4
+> Write per tier (GB/s)
+
+Figure 25: Per-rank read and write throughput of Qwen-Coder (high arrival rate, two orders). 4[16 GPUs] 8[32 GPUs] 16 [64 GPUs] 32 [128 GPUs] 
+
+Number of Nodes [GPUs] 
+
+> 0500 1000 1500 2000 2500 Agg. Throughput (K tok/s) 46 92 185 369 203 412 822 1646 269 561 1086 2032
+> CPU-only LMCache KVStream
+
+Figure 26: Throughput under data-parallel scaling to 32 nodes (NarrativeQA, 32B, Testbed-2). 020      
+
+> Read BW per infer. inst. (GB/s)
+> NVMe Read BW PFS Read BW
+> 250 500 750 1000 1250 1500
+
+Iteration 
+
+> 0.0 0.5 1.0
+> PFS Retrieve Fraction  PFS Fraction (mean) min-max range
+
+Figure 27: Per-replica read bandwidth and PFS share at 32 nodes: mean and min–max range. 4[16 GPUs] 8[32 GPUs] 16 [64 GPUs] 32 [128 GPUs] 
+
+Number of Nodes [GPUs] 
+
+> 0246Avg. Per-Step Latency (s) 4.0 3.9 4.0 3.9 4.9 4.8 4.8 4.8 2.7 2.6 2.7 2.7 3.3 3.2 3.3 3.5 LMCache p90 LMCache p99 KVStream p90 KVStream p99
+
+Figure 28: p90 and p99 step time under data-parallel scaling, averaged over replicas (Testbed-2). 
+
+M4), KVStream ’s PFS share of reads (22%) follows the PFS’s share of the read bandwidth in that run (24%), its reads take 1.02 × the bound, and its mean TTFT is 2.39 × below LMCache’s. This further show that near saturation, accumulation of small changes in step time lead to large TTFT gains (§ 5.3). Finally, since full replication doubles the writes, we replay two replication policies in kvsim on the same traces based on the instan-taneous per-tier per-step bandwidth and forward iteration times. With the first replication policy, we replicating chunks to the al-ternate storage tier after a tier turns slow, which leads to 1.19 ×
+
+write amplification instead of 2 × write amplification in KVStream ,but it stays 12–74% above the aggregate-bandwidth bound. This is because the repair (replication) arrives after the step has already stalled or suffered from slow reads. With the second policy, repli-cating a fixed 40% of each prefix’s chunks, leads to 1.43 × write amplification but is up to 5% slower than the aggregate-bandwidth bound of KVStream .
+
+## 7 Beyond Our Testbeds: Hardware Trends, Other Tiers, and Composition 
+
+We now discuss how KVStream ’s results carry beyond our testbeds, to larger memories, other tiers, and many nodes, and how it com-poses with orthogonal techniques: KV compression, request re-ordering, and disaggregated serving. 
+
+Larger memories . Larger nodes raise the cache capacity 𝑀 of Equation 2, so reuses whose distance falls below 𝑀 stop reaching storage. A Vera Rubin node holds 288 GB of HBM and 750 GB of 
+
+Table 4: Incremental ablation from LMCache to KVStream . Of-fline: throughput, 70B, LooGLE, Testbed-1, M3 reads a fixed 70:30 NVMe:PFS split; Online: mean TTFT, 32B, Qwen-Coder in round-robin order at the high arrival rate, Testbed-2, M3 places each chunk on one tier, 80:20 by prefix position, with-out replication. 
+
+CPU-only LMCache + engine, + de-ferred + 2nd tier, +completion-(NVMe) batched I/O writes static split driven routing (M1) (M2) (M3) (M4) Offline thruput (tok/s) [Higher better] 18513 31977 32115 32177 39631 47210 
+
+vs. CPU-only 1.00 × 1.73 × 1.73 × 1.74 × 2.14 × 2.55 ×
+
+Online mean TTFT (s) [Lower better] 340.7 31.1 20.2 19.8 122.1 13.0 
+
+vs. CPU-only 1.00 × 10.9 × 16.9 × 17.3 × 2.79 × 26.2 ×
+
+host memory per GPU [54], enough for most reuses of our round-robin Qwen-Coder trace, where KVStream would gain little, as on Chutes at 80 GB (§ 6.5). However, context lengths and session counts grow as well: a 1M-token session of a 70B model holds 320 GB of Review version, , Avinash Maurya et al. 
+
+KV (Table 3), so a node that keeps 100 such sessions resumable needs about eight times the memory of a Vera Rubin node. Such workloads still spill, and the bandwidth of every storage path then sets their retrieval time. 
+
+Other second tiers . Equation 3 depends only on bandwidth, so any tier on a path independent of the node-local NVMe can serve as the second tier: a managed file system or object store attached to a cloud instance [5, 6], remote NVMe, or CXL-attached memory. The added tier need not be as fast as the first, since completion-driven routing lets a slower tier simply claim fewer chunks. Its write path, however, must keep up with the replicated writes to beat single-tier systems (§ 5.3). 
+
+Many nodes . Each node routes its own reads by completion, so nodes that share the PFS adapt without coordination: a node that finds the PFS congested reads more from its NVMe, which keeps 
+
+KVStream ’s advantage at up to 128 GPUs (§ 6.6). Coordination could still save capacity and writes, for example by keeping one shared PFS copy of a prefix that several nodes reuse (particularly useful when dynamically scaling nodes up/down), which we leave to future work. 
+
+KV compression . Compressing KV by a factor 𝑟 divides both the reused volume and every reuse distance by 𝑟 , so in Equation 2 it acts like 𝑟 times less volume and 𝑟 times more memory: 𝐷 𝑟 =
+
+(𝑉 /𝑟 ) · Pr [𝑑 > 𝑟𝑀 ]. Compression thus removes the demand of workloads whose reuse distances sit near memory capacity, but not the spill of long agentic and coding sessions whose working sets exceed memory by more than 𝑟 : 100 resumable 128K-token sessions of a 70B model still need about 500 GB of KV after 8 ×
+
+compression, more than the 320 GB of host memory our nodes devote to KV. Compression and KVStream therefore compose: the former shrinks what spills from memory, and the latter reads the spill at the aggregate bandwidth of multiple storage tiers. 
+
+Request reordering . Reuse-aware schedulers [24, 52, 63, 70] lower the demand of Equation 2 by moving the serving order to-ward a cache-friendly one, and KVStream lowers the time per byte of whatever demand remains. Where the order is free, as in offline batches, the two compose, although in our cache-friendly order (similar schedule to BiDAW [24]– which lack public implemen-tation) which such reordering approaches use, some KV reaches storage and a second tier adds little (§ 6.5). Where it is not free to shuffle requests, as in online serving under per-request latency objectives or in multi-turn sessions whose turns depend on earlier outputs, the arrivals set the demand, and only the read path can be made faster. 
+
+Disaggregated prefill and decode . Disaggregated serving runs prefill and decode on separate instances and moves KV between them through pooled memory and the network [14, 22, 46, 58, 71]. It changes where KV is produced and consumed, not how a prefix comes back from storage, so KVStream ’s routing extends directly: a prefill step can read from the storage tiers or memory of both the prefill and the decode node as well as from the PFS, adding the bandwidth of each independent path to Equation 3. 
+
+## 8 Conclusions 
+
+Once prefix KV outgrows GPU and host memory, storage bandwidth governs long-context LLM serving, yet the parallel file system or cloud file store that nodes already mount sits idle. We cast prefix retrieval as aggregate-bandwidth scheduling over the the available storage tiers. KVStream batches a step’s reads, defers writes behind the forward pass, replicates every chunk on every tier, and routes each read by completion. Our performance model shows that this attains the aggregate-bandwidth bound for any per-tier bandwidths, whereas any static split loses as the bandwidths drift or fluctuate, and that the end-to-end gain grows with the storage demand left by memory, arrival order, and with the load queued behind each read. In our evaluation on up to 128 GPUs, KVStream retrieves within 5% of the aggregate bandwidth bound, delivers up to 1.49 ×
+
+higher throughput than LMCache for offline/batched workloads, and lowers mean TTFT by up to 6.1 × under bursty arrivals. Future work will reduce the replicated writes and add object stores as bandwidth sources. 
+
+## References                     
+
+> [1] Joshua Ainslie, James Lee-Thorp, Michiel de Jong, Yury Zemlyanskiy, Federico Lebrón, and Sumit Sanghai. 2023. GQA: Training Generalized Multi-Query Transformer Models from Multi-Head Checkpoints. In Proceedings of the 2023 Conference on Empirical Methods in Natural Language Processing (EMNLP) . 4895– 4901. doi:10.18653/v1/2023.emnlp-main.298 [2] Amazon Web Services. 2026. Amazon EC2 P4d Instances – AWS .https://aws. amazon.com/ec2/instance-types/p4/ Accessed: April 7, 2026. [3] Amazon Web Services. 2026. Amazon EC2 P5 Instances – AWS .https://aws. amazon.com/ec2/instance-types/p5/ Accessed: April 7, 2026. [4] Amazon Web Services. 2026. Amazon EC2 P6e and P6 Instances - AWS .https: //aws.amazon.com/ec2/instance-types/p6 Accessed: October 8, 2026. [5] Amazon Web Services. 2026. Amazon FSx for Lustre. https://aws.amazon.com/ fsx/lustre/. Accessed: 2026-10-08. [6] Amazon Web Services. 2026. Amazon Simple Storage Service (S3). https://aws. amazon.com/s3/. Accessed: 2026-10-08. [7] Gene M. Amdahl. 1967. Validity of the Single Processor Approach to Achieving Large Scale Computing Capabilities. In Proceedings of the AFIPS Spring Joint Computer Conference . 483–485. [8] Wei An, Xiao Bi, Guanting Chen, Shanhuang Chen, Chengqi Deng, Honghui Ding, Kai Dong, Qiushi Du, Wenjun Gao, Kang Guan, Jianzhong Guo, Yongqiang Guo, Zhe Fu, Ying He, Panpan Huang, Jiashi Li, Wenfeng Liang, Xiaodong Liu, Xin Liu, Yiyuan Liu, Yuxuan Liu, Shanghao Lu, Xuan Lu, Xiaotao Nie, Tian Pei, Junjie Qiu, Hui Qu, Zehui Ren, Zhangli Sha, Xuecheng Su, Xiaowen Sun, Yixuan Tan, Min Tang, Shiyu Wang, Yaohui Wang, Yongji Wang, Ziwei Xie, Yi Xiong, Yanhong Xu, Shengfeng Ye, Shuiping Yu, Yukun Zhang, Liyue Zhang, Haowei Zhang, Mingchuan Zhang, Wentao Zhang, Yichao Zhang, Chenggang Zhao, Yao Zhao, Shangyan Zhou, Shunfeng Zhou, and Yuheng Zou. 2024. Fire-Flyer AI-HPC: A Cost-Effective Software-Hardware Co-Design for Deep Learning. In SC24: International Conference for High Performance Computing, Networking, Storage and Analysis . IEEE, 1314–1327. doi:10.1109/SC41406.2024.00089 [9] Jinze Bai, Shuai Bai, Yunfei Chu, et al. 2023. Qwen Technical Report. arXiv preprint arXiv:2309.16609 (2023). doi:10.48550/arXiv.2309.16609 [10] Yihua Cheng, Yuhan Liu, Jiayi Yao, Yuwei An, Xiaokun Chen, Shaoting Feng, Yuyang Huang, Samuel Shen, Kuntai Du, and Junchen Jiang. 2025. LMCache: An Efficient KV Cache Layer for Enterprise-Scale LLM Inference. arXiv preprint arXiv:2510.09665 (2025). doi:10.48550/arXiv.2510.09665 [11] DeepSeek-AI. 2024. DeepSeek-V2: A Strong, Economical, and Efficient Mixture-of-Experts Language Model. arXiv preprint arXiv:2405.04434 (2024). [12] deepseek-ai. 2025. deepseek-ai/DeepSeek-R1-Distill-Llama-70B · Hugging Face .https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Llama-70B Accessed: April 8, 2026. [13] deepseek-ai. 2025. deepseek-ai/DeepSeek-R1-Distill-Qwen-32B · Hugging Face .https://huggingface.co/deepseek-ai/DeepSeek-R1-Distill-Qwen-32B Accessed: April 8, 2026. [14] Jingqi Feng, Yukai Huang, Rui Zhang, Sicheng Liang, Ming Yan, and Jie Wu. 2025. WindServe: Efficient Phase-Disaggregated LLM Serving with Stream-based Dynamic Scheduling. In Proceedings of the 52nd Annual International Symposium on Computer Architecture . 1283–1295. doi:10.1145/3695053.3730999 [15] Bin Gao, Zhuomin He, Puru Sharma, Qingxuan Kang, Djordje Jevdjic, Junbo Deng, Xingkun Yang, Zhou Yu, and Pengfei Zuo. 2024. Cost-Efficient Large
+
+KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , 
+
+Language Model Serving for Multi-turn Conversations with CachedAttention. In 
+
+2024 USENIX Annual Technical Conference (USENIX ATC 24) . 111–126. [16] Shiwei Gao, Youmin Chen, and Jiwu Shu. 2025. Fast State Restoration in LLM Serving with HCache. In Proceedings of the Twentieth European Conference on Computer Systems . 128–143. doi:10.1145/3689031.3696072 [17] Mikaila J. Gossman, Bogdan Nicolae, and Jon C. Calhoun. 2024. Scalable I/O aggregation for asynchronous multi-level checkpointing. Future Generation Computer Systems 160 (2024), 420–432. doi:10.1016/j.future.2024.06.003 [18] Aaron Grattafiori, Abhimanyu Dubey, Abhinav Jauhri, Abhinav Pandey, Abhishek Kadian, Ahmad Al-Dahle, Aiesha Letman, Akhil Mathur, Alan Schelten, Alex Vaughan, et al. 2024. The Llama 3 Herd of Models. arXiv preprint arXiv:2407.21783 
+
+(2024). doi:10.48550/arXiv.2407.21783 [19] Daya Guo, Dejian Yang, He Zhang, et al. 2025. DeepSeek-R1: Incentivizing Reasoning Capability in LLMs via Reinforcement Learning. arXiv preprint arXiv:2501.12948 (2025). doi:10.48550/arXiv.2501.12948 [20] Jun He, Sudarsun Kannan, Andrea C. Arpaci-Dusseau, and Remzi H. Arpaci-Dusseau. 2017. The Unwritten Contract of Solid State Drives. In Proceedings of the Twelfth European Conference on Computer Systems (EuroSys) . 127–144. doi:10.1145/3064176.3064187 [21] Dan Hendrycks, Collin Burns, Anya Chen, and Spencer Ball. 2021. CUAD: An Expert-Annotated NLP Dataset for Legal Contract Review. In Proceedings of the Neural Information Processing Systems Track on Datasets and Benchmarks , J. Vanschoren and S. Yeung (Eds.), Vol. 1. https://datasets-benchmarks-proceedings.neurips.cc/paper_files/paper/ 2021/file/6ea9ab1baa0efb9e19094440c317e21b-Paper-round1.pdf [22] Ke Hong, Lufang Chen, Zhong Wang, Xiuhong Li, Qiuli Mao, Jianping Ma, Chao Xiong, Guanyu Wu, Buhe Han, Guohao Dai, et al. 2025. semi-PD: Towards Efficient LLM Serving via Phase-Wise Disaggregated Computation and Unified Storage. arXiv preprint arXiv:2504.19867 (2025). doi:10.48550/arXiv.2504.19867 [23] Cheng-Ping Hsieh, Simeng Sun, Samuel Kriman, Shantanu Acharya, Dima Rekesh, Fei Jia, Yang Zhang, and Boris Ginsburg. 2024. RULER: What’s the Real Context Size of Your Long-Context Language Models? arXiv preprint arXiv:2404.06654 
+
+(2024). doi:10.48550/arXiv.2404.06654 [24] Shipeng Hu, Guangyan Zhang, Yuqi Zhou, Yaya Wei, Ziyan Zhong, and Jike Chen. 2026. Bidaw: Enhancing {Key-Value } Caching for Interactive {LLM }
+
+Serving via Bidirectional {Computation–Storage } Awareness. In 24th USENIX Conference on File and Storage Technologies (FAST 26) . 101–116. https://www. usenix.org/conference/fast26/presentation/hu-shipeng [25] IBM Redbooks. 2026. Context Without Limits: A High-Performance KV Cache Platform for Large-Scale AI Inference . Technical Report. IBM. https://www. redbooks.ibm.com/docs/MD260021/MD260021.html [26] Carlos E. Jimenez, John Yang, Alexander Wettig, Shunyu Yao, Kexin Pei, Ofir Press, and Karthik Narasimhan. 2024. SWE-bench: Can Language Models Resolve Real-World GitHub Issues?. In International Conference on Learning Representations (ICLR) .[27] Shuowei Jin, Xueshen Liu, Qingzhao Zhang, and Z Morley Mao. 2024. Compute or load kv cache? why not both? arXiv preprint arXiv:2410.03065 (2024). doi:10. 48550/arXiv.2410.03065 [28] Joseph Kanichai, Tiziano De Matteis, and Animesh Trivedi. 2026. Building py-kvcache: A Performance Characterization of External KV Caching for vLLM with NVMe SSDs. arXiv preprint arXiv:2609.11744 (2026). [29] Feyza Duman Keles, Pruthuvi Mahesakya Wijewardena, and Chinmay Hegde. 2023. On The Computational Complexity of Self-Attention. In International conference on algorithmic learning theory . PMLR, 597–619. https://proceedings. mlr.press/v201/duman-keles23a.html [30] Tomáš Kočiský, Jonathan Schwarz, Phil Blunsom, Chris Dyer, Karl Moritz Her-mann, Gábor Melis, and Edward Grefenstette. 2018. The NarrativeQA Reading Comprehension Challenge. Transactions of the Association for Computational Linguistics 6 (2018), 317–328. doi:10.1162/tacl_a_00023 [31] Woosuk Kwon, Zhuohan Li, Siyuan Zhuang, Ying Sheng, Lianmin Zheng, Cody Hao Yu, Joseph E. Gonzalez, Hao Zhang, and Ion Stoica. 2023. Efficient Memory Management for Large Language Model Serving with PagedAttention. In Proceedings of the ACM SIGOPS 29th Symposium on Operating Systems Principles .doi:10.1145/3600006.3613165 [32] Wonbeom Lee, Jungi Lee, Junghwan Seo, and Jaewoong Sim. 2024. {InfiniGen }:Efficient generative inference of large language models with dynamic {KV }
+
+cache management. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI 24) . 155–172. doi:10.5555/3691938.3691947 [33] Jiaqi Li, Mengmeng Wang, Zilong Zheng, and Muhan Zhang. 2023. LooGLE: Can Long-Context Language Models Understand Long Contexts? arXiv preprint arXiv:2311.04939 (2023). doi:10.48550/arXiv.2311.04939 [34] Yuhang Li, Rong Gu, Chengying Huan, Zhibin Wang, Renjie Yao, Chen Tian, and Guihai Chen. 2025. HotPrefix: Hotness-Aware KV Cache Scheduling for Efficient Prefix Sharing in LLM Inference Systems. Proceedings of the ACM on Management of Data 3, 4, Article 250 (2025), 27 pages. doi:10.1145/3749168 [35] Jiaheng Liu, Dawei Zhu, Zhiqi Bai, Yancheng He, Huanxuan Liao, Haoran Que, Zekun Wang, Chenchen Zhang, Ge Zhang, Jiebin Zhang, et al. 2025. A Comprehensive Survey on Long Context Language Modeling. arXiv preprint arXiv:2503.17407 (2025). doi:10.48550/arXiv.2503.17407 [36] Yuhan Liu, Hanchen Li, Yihua Cheng, Siddhant Ray, Yuyang Huang, Qizheng Zhang, Kuntai Du, Jiayi Yao, Shan Lu, Ganesh Ananthanarayanan, et al. 2024. CacheGen: KV Cache Compression and Streaming for Fast Large Language Model Serving. In Proceedings of the ACM SIGCOMM 2024 Conference . 38–56. doi:10.1145/3651890.3672274 [37] LMCache. 2026. CPU RAM | LMCache . https://docs.lmcache.ai/kv_cache/storage_ backends/cpu_ram.html Accessed: April 7, 2026. [38] William Nixon, Jon Durbin, Florian Standhartinger, Haryadi S Gunawi, and Juncheng Yang. 2026. A Year in LLM Serving: Workload Evolution, Caching and Load-Balancing. arXiv preprint arXiv:2608.13573 (2026). [39] NVIDIA. 2026. NIXL: NVIDIA Inference Xfer Library. https://github.com/ai-dynamo/nixl. Accessed: 2026-10-08. [40] NVIDIA. 2026. NVIDIA GPUDirect Storage. https://docs.nvidia.com/gpudirect-storage/. Accessed: 2026-10-08. [41] NVIDIA Corporation. 2026. KVBM Overview (v0.8.1). NVIDIA Dynamo Documentation. https://docs.nvidia.com/dynamo/v-0-8-1/components/kvbm/ overview [42] OpenSFS. 2026. Lustre: A parallel file system that supports many requirements of leadership class HPC simulation environments. https://www.lustre.org/. Ac-cessed: April 7, 2026. [43] Bei Ouyang, Yifan Qiao, and Jiarong Xing. 2026. UniCache: Unifying Prefix Cache Eviction for Heterogeneous LLM Serving Workloads. Proceedings of the ACM on Measurement and Analysis of Computing Systems 10, 2, Article 54 (2026). doi:10.1145/3805652 [44] Zaifeng Pan, Ajjkumar Patel, Zhengding Hu, Yipeng Shen, Yue Guan, Wan-Lu Li, Lianhui Qin, Yida Wang, and Yufei Ding. 2025. KVFlow: Efficient Prefix Caching for Accelerating LLM-Based Multi-Agent Workflows. arXiv preprint arXiv:2507.07400 (2025). [45] David A. Patterson, Garth A. Gibson, and Randy H. Katz. 1988. A Case for Redundant Arrays of Inexpensive Disks (RAID). In Proceedings of the 1988 ACM SIGMOD International Conference on Management of Data . 109–116. [46] Ruoyu Qin, Zheming Li, Weiran He, Jialei Cui, Heyi Tang, Feng Ren, Teng Ma, Shangming Cai, Yineng Zhang, Mingxing Zhang, et al. 2024. Mooncake: A KVCache-centric Disaggregated Architecture for LLM Serving. ACM Transactions on Storage (2024). doi:10.1145/3773772 [47] Qwen. 2024. Qwen/Qwen1.5-110B-Chat · Hugging Face . https://huggingface.co/ Qwen/Qwen1.5-110B-Chat Accessed: April 8, 2026. [48] Qwen. 2025. Qwen/Qwen1.5-110B-Chat · Hugging Face . https://huggingface.co/ Qwen/Qwen3-14B Accessed: April 8, 2026. [49] Zebin Ren, Krijn Doekemeijer, Tiziano De Matteis, Christian Pinto, Radu Stoica, and Animesh Trivedi. 2025. An I/O Characterizing Study of Offloading LLM Models and KV Caches to NVMe SSD. In Proceedings of the 5th Workshop on Challenges and Opportunities of Efficient and Performant Storage Systems . 23–33. doi:10.1145/3719330.3721230 [50] Pablo Rodriguez and Ernst W. Biersack. 2002. Dynamic Parallel Access to Repli-cated Content in the Internet. IEEE/ACM Transactions on Networking 10, 4 (2002). doi:10.1109/TNET.2002.801413 [51] Ying Sheng, Lianmin Zheng, Binhang Yuan, Zhuohan Li, Max Ryabinin, Beidi Chen, Percy Liang, Christopher Ré, Ion Stoica, and Ce Zhang. 2023. FlexGen: High-Throughput Generative Inference of Large Language Models with a Single GPU. In International Conference on Machine Learning . PMLR, 31094–31116. https: //proceedings.mlr.press/v202/sheng23a.html [52] Vikranth Srivatsa, Zijian He, Reyna Abhyankar, Dongming Li, and Yiying Zhang. 2025. Preble: Efficient Distributed Prompt Scheduling for LLM Serving. In The Thirteenth International Conference on Learning Representations (ICLR) . https: //openreview.net/pdf?id=meKEKDhdnx [53] Hanshi Sun, Li-Wen Chang, Wenlei Bao, Size Zheng, Ningxin Zheng, Xin Liu, Harry Dong, Yuejie Chi, and Beidi Chen. 2024. Shadowkv: Kv cache in shadows for high-throughput long-context llm inference. arXiv preprint arXiv:2410.21465 
+
+(2024). doi:10.48550/arXiv.2410.21465 [54] The Register. 2026. Every Conference is an AI Conference as Nvidia Unpacks its Vera Rubin CPUs and GPUs at CES. https://www.theregister.com/2026/01/05/ ces_rubin_nvidia/. Accessed: October 8, 2026. [55] Ashish Vaswani, Noam Shazeer, Niki Parmar, Jakob Uszkoreit, Llion Jones, Aidan N Gomez, Łukasz Kaiser, and Illia Polosukhin. 2017. At-tention is All You Need. Advances in neural information process-ing systems 30 (2017). https://proceedings.neurips.cc/paper/2017/hash/ 3f5ee243547dee91fbd053c1c4a845aa-Abstract.html [56] Bharadwaj Veeravalli, Debasish Ghose, and Thomas G. Robertazzi. 2003. Divisible Load Theory: A New Paradigm for Load Scheduling in Distributed Systems. 
+
+Cluster Computing 6, 1 (2003), 7–17. [57] vLLM. 2026. Automatic Prefix Caching - vLLM . https://docs.vllm.ai/en/stable/ design/prefix_caching/ Accessed: April 7, 2026. [58] Chao Wang, Pengfei Zuo, Zhangyu Chen, Yunkai Liang, Zhou Yu, and Ming-Chang Yang. 2025. Prefill-decode aggregation or disaggregation? unifying both for goodput-optimized llm serving. arXiv preprint arXiv:2508.01989 (2025). doi:10. 48550/arXiv.2508.01989 Review version, , Avinash Maurya et al. 
+
+[59] Jiahao Wang, Jinbo Han, Xingda Wei, Sijie Shen, Dingyan Zhang, Chenguang Fang, Rong Chen, Wenyuan Yu, and Haibo Chen. 2025. {KVCache } Cache in the Wild: Characterizing and Optimizing {KVCache } Cache at a Large Cloud Provider. In 2025 USENIX Annual Technical Conference (USENIX ATC 25) . 465–482. [60] Yuxin Wang, Yuhan Chen, Zeyu Li, Xueze Kang, Yuchu Fang, Yeju Zhou, Yang Zheng, Zhenheng Tang, Xin He, Rui Guo, Xin Wang, Qiang Wang, Amelie Chi Zhou, and Xiaowen Chu. 2025. BurstGPT: A Real-World Workload Dataset to Op-timize LLM Serving Systems. In Proceedings of the 31st ACM SIGKDD Conference on Knowledge Discovery and Data Mining (KDD) . doi:10.1145/3711896.3737413 [61] Yuxing Xiang, Xue Li, Kun Qian, Yan Zhang, Wenyuan Yu, Ennan Zhai, Xin Jin, and Jingren Zhou. 2026. ServeGen: Workload Characterization and Generation of Large Language Model Serving in Production. In 23rd USENIX Symposium on Networked Systems Design and Implementation (NSDI 26) . 1845–1859. [62] Guangxuan Xiao, Yuandong Tian, Beidi Chen, Song Han, and Mike Lewis. 2024. Efficient Streaming Language Models with Attention Sinks. In International Conference on Learning Representations (ICLR) .[63] Bing Xie, Zhipeng Wang, Masahiro Tanaka, and Zhen Zheng. 2026. PEEK: Predictive Queue-Informed KV Cache Management for LLM Serving. arXiv preprint arXiv:2607.02525 (2026). [64] Shiqin Yan, Huaicheng Li, Mingzhe Hao, Michael Hao Tong, Swaminathan Sundararaman, Andrew A. Chien, and Haryadi S. Gunawi. 2017. Tiny-Tail Flash: Near-Perfect Elimination of Garbage Collection Tail Latencies in NAND SSDs. In 15th USENIX Conference on File and Storage Technologies (FAST) . 15–28. https://www.usenix.org/conference/fast17/technical-sessions/presentation/yan [65] An Yang, Baosong Yang, Beichen Zhang, et al. 2025. Qwen3 Technical Report. 
+
+arXiv preprint arXiv:2505.09388 (2025). doi:10.48550/arXiv.2505.09388 [66] Jiayi Yao, Hanchen Li, Yuhan Liu, Siddhant Ray, Yihua Cheng, Qizheng Zhang, Kuntai Du, Shan Lu, and Junchen Jiang. 2025. CacheBlend: Fast Large Language Model Serving for RAG with Cached Knowledge Fusion. In Proceedings of the Twentieth European Conference on Computer Systems . 94–109. doi:10.1145/3689031. 3696098 [67] Jie Ye, Jaime Cernuda, Avinash Maurya, Xian-He Sun, Anthony Kougas, and Bogdan Nicolae. 2025. Characterizing the Behavior and Impact of KV Caching on Transformer Inferences under Concurrency. In IPDPS’25: The 39th IEEE Inter-national Parallel and Distributed Processing Symposium . Milan, Italy. doi:10.1109/ IPDPS64566.2025.00108 [68] Orcun Yildiz, Matthieu Dorier, Shadi Ibrahim, Robert Ross, and Gabriel Antoniu. 2016. On the Root Causes of Cross-Application I/O Interference in HPC Storage Systems. In IEEE International Parallel and Distributed Processing Symposium (IPDPS) . 750–759. doi:10.1109/IPDPS.2016.50 [69] Zhenyu Zhang, Ying Sheng, Tianyi Zhou, Tianlong Chen, Lianmin Zheng, Ruisi Cai, Zhao Song, Yuandong Tian, Christopher Ré, Clark Barrett, Zhangyang Wang, and Beidi Chen. 2023. H2O: Heavy-Hitter Oracle for Efficient Generative Inference of Large Language Models. In Advances in Neural Information Processing Systems (NeurIPS) .[70] Lianmin Zheng, Liangsheng Yin, Zhiqiang Xie, Chuyue Sun, Jeff Huang, Cody H Yu, Shiyi Cao, Christos Kozyrakis, Ion Stoica, Joseph E Gonzalez, et al. 2024. SGLang: efficient execution of structured language model programs. Advances in neural information processing systems 37 (2024), 62557–62583. https://dl.acm. org/doi/10.5555/3737916.3739916 [71] Yinmin Zhong, Shengyu Liu, Junda Chen, Jianbo Hu, Yibo Zhu, Xuanzhe Liu, Xin Jin, and Hao Zhang. 2024. DistServe: Disaggregating Prefill and Decoding for Goodput-optimized Large Language Model Serving. In 18th USENIX Symposium on Operating Systems Design and Implementation (OSDI) .
+
+## A Additional Experimental Results 
+
+This appendix backs claims of the evaluation, and the body cites each figure where it makes the claim: Appendix A.1 extends § 6.2, Appendix A.2 extends § 6.3, and Appendix A.3 extends § 6.5. Setups follow § 6.1: online runs serve the 32B model on one Testbed-2 node, and offline runs serve LooGLE on one Testbed-1 node, all with TP=4. 
+
+## A.1 Online Serving 
+
+SLO attainment on the production traces . Figure 29 extends Figure 11 to Qwen-Coder and Chutes at the medium and high arrival rates (Chutes with 40 GB of host memory per rank). At the medium rate, the two systems’ curves nearly coincide: on Qwen-Coder, their median TTFTs differ by only 1.14 ×, yet 3.35 × fewer requests miss a 5 s SLO with KVStream . At the high rate, more requests wait behind each retrieval, and KVStream ’s curve lies well above LMCache’s on both traces: the gain concentrates in the queued requests, as § 5.3 predicts. 
+
+Retrieval versus queueing on Chutes . Figure 30 repeats the decomposition of Figure 13 on Chutes. Per request, KVStream re-trieves about 1.3 × faster at every rate, while the gap in requests in flight widens with the rate, so the queue, not the per-request saving, carries the speedup from 1.23 × to 2.01 × (§ 5.3). 
+
+A second serving engine . Figure 31 repeats the SWE-bench comparison of Figure 11 in SGLang and in vLLM, each with three storage backends. As HiCache’s storage backend (§ 4.3), KVStream 
+
+lowers SGLang’s mean TTFT 1.57 × against HiCache’s file backend and 1.22 × against Mooncake, although HiCache makes it write syn-chronously, without the deferred writes of M2. In vLLM, KVStream 
+
+has the lowest mean, p50, and p90 TTFT of the three backends, so the gain carries over to a second engine (MR-B.1). 
+
+## A.2 Offline Throughput 
+
+Where the time goes . Figure 32 adds KVStream to the break-down of Figure 6 (O2) into the retrieve, compute, and store phases of Equation 1. LMCache and KVStream spend nearly the same com-pute and store time at every model size, so the gain lies entirely in retrieval (§ 6.3): at 70B, KVStream serves LooGLE in 25 minutes, against 37 for LMCache and 64 for CPU-only. Replication adds no visible store time offline, because each forward pass is long enough for the deferred writes (M2) to drain. 
+
+Same demand, faster reads . Figure 33 shows which tier serves the matched chunks. LMCache and KVStream serve nearly the same shares from the GPU, host memory, and storage at every model size, so they face the same storage demand 𝐷 (Equation 2), and 
+
+KVStream wins by reading it at the combined bandwidth of both tiers (Equation 3, Figure 18). The storage share grows from about a third at 14B to about 60% at 70B and 110B, the first of the two reasons why the gain grows with model size (§ 6.3). 
+
+Host memory offline . Figure 34 raises host memory, the ca-pacity 𝑀 of Equation 2, from 60 to 100 GB per rank for the 32B model. Storage reads fall from 2,832 to 1,856 GB per rank and every approach speeds up, but LooGLE keeps spilling at every size, so 
+
+KVStream ’s advantage over LMCache stays at 1.37–1.41 ×. Chutes, whose reuse distances straddle host memory, behaves differently (Appendix A.3). 
+
+## A.3 Storage Demand and Write Cost 
+
+Host memory online . Figure 35 adds KVStream to the sweep of Figure 9 (O5), with the measured reads of Figure 23 in brackets. On Qwen-Coder, the reuse distances exceed every memory size (§ 5.1): the reads stay at 1428 GB per rank, and KVStream ’s mean TTFT stays near 0.56 s, against 0.76–0.90 s for LMCache. On Chutes, the reads fall from 1412 to 20 GB per rank and the speedup with them, from 1.71 × to 0.98 × (Figure 24): once memory holds the working set, the replicated writes have no reads to offset them (§ 5.3). 
+
+Arrival order . Figure 36 adds CPU-only and KVStream to the order study of Figure 10 (left, O6): Qwen-Coder at the high arrival rate, with 80 GB of host memory per rank. The order sets the reuse KVStream : Adaptive Parallel Storage Management for KV Caching in Large-Scale LLM Serving Review version, , 0.1 1 10 100 
+
+TTFT SLO (s) 
+
+> 025 50 75 100
+> Requests meeting SLO (%)
+
+Qwen-Coder    
+
+> KVStream LMCache Med rate High rate
+> 0.1 110 100
+
+Chutes 
+
+Figure 29: TTFT SLO attainment on the production traces at the medium and high arrival rates (Chutes at 40 GB of host memory per rank). Low (0.18) Med (0.23) High (0.32) 
+
+Request Arrival Rate (req/s)   
+
+> 0.2 0.5 12
+> Retrieve time per req. (s)
+> 1.31x 1.33x 1.36x
+> KVStream LMCache
+> Low (0.18) Med (0.23) High (0.32) 12510 20
+> Requests in flight
+> 1.19x 1.48x 1.65x
+
+Figure 30: Retrieve time per request and requests in flight vs. arrival rate (Chutes, 40 GB of host memory per rank). HiCache Mooncake KVStream LMCache Mooncake KVStream 
+
+02468
+
+> TTFT (s)
+> 3.3 2.6 2.1 1.1 1.2 0.7 3.0 2.7 2.2 0.5 0.9 0.4 7.2 4.8 4.2 3.3 2.3 1.3
+
+SGLang vLLM   
+
+> Mean p50 p90
+
+Figure 31: Mean, p50, and p90 TTFT with three storage backends per engine (SWE-bench agentic, first 3550 requests). 14B 32B 70B 110B 
+
+Model Size (in B of parameters) 
+
+025 50 75 100 125 
+
+> Total Time (minutes)
+> CPU-only (8) CPU-only (27) CPU-only (64) CPU-only (85) LMCache (8) LMCache (22) LMCache (37) LMCache (39) KVStream (7) KVStream (16) KVStream (25) KVStream (26)
+
+Retrieve Compute Store 
+
+Figure 32: Processing-time breakdown across models, with KVStream (LooGLE, Testbed-1). 0 20 40 60 80 100 
+
+Percentage of KV Chunks 
+
+110B 70B 32B 14B             
+
+> Model Size (B of params)
+> 39% (1.9TB) 61% (3.0TB) 39% (1.9TB) 61% (3.0TB) 36% (1.7TB) 64% (3.0TB) 36% (1.7TB) 63% (3.0TB) 43% (1.5TB) 56% (1.9TB) 44% (1.5TB) 55% (1.9TB) 65% (1.1TB) 34% (594GB) 67% (1.1TB) 32% (551GB) GPU CPU Disk LMCache KVStream
+
+Figure 33: Share of KV chunks served from each tier across models (LooGLE, Testbed-1). 60 70 80 90 100 
+
+Host Memory per Rank (GB) 
+
+020 40 60 80 100 
+
+> Throughput (K tok/s)
+
+38 41 44 49 54 44 48 52 56 61 62 67 71 78 84 CPU-only LMCache KVStream 
+
+Figure 34: Throughput vs. host memory per rank (32B, LooGLE, Testbed-1). 40 [1428] 60 [1428] 80 [1428] 
+
+Per rank host memory and [disk traffic] (in GB) 
+
+> 01
+> Mean TTFT (s)
+> 0.56 0.57 0.56 0.76 0.81 0.90
+
+Qwen-Coder 
+
+> KVStream mean LMCache mean p50 speedup p90 speedup
+> 40 [1412] 60 [380] 80 [20] 0510 15
+> 4.76 2.72 2.37 8.13 3.55 2.32
+
+Chutes 
+
+> 012
+> 012TTFT speedup (LMCache / KVStream)
+
+Figure 35: Mean TTFT and p50/p90 speedup vs. host memory at the medium arrival rates, with storage reads per rank in brackets. Cache-friendly Random Round-robin 
+
+Arrival order 
+
+10 −1 
+
+10 0
+
+10 1
+
+10 2
+
+10 3  
+
+> Mean TTFT (s), bars  CPU-only LMCache KVStream
+
+10 −1 
+
+10 0
+
+10 1
+
+10 2
+
+10 3
+
+> p90 TTFT (s), lines
+
+Figure 36: Mean (bars) and p90 (lines) TTFT under three arrival orders (Qwen-Coder, high arrival rate). 0 500 1000 1500 2000 2500 
+
+Time into run (s) 
+
+> 0200 400 600 800
+> Volume per 120 s (GB)  Sustained 15.64 GB/s
+> 0.24 0.25 0.28 0.24 0.29 0.28 0.29 0.27 0.27 0.27 0.25 0.27 0.28 0.22 0.23
+> NVMe Read PFS Read Write (per tier)
+
+Figure 37: The round-robin run of Figure 25: storage reads by tier and writes per tier per 120 s, summed over four ranks. 
+
+distances 𝑑 of Equation 2, and the reads grow 5.8 × from the cache-friendly to the round-robin order; KVStream ’s speedup follows them, from 1.05 × to 3.12 × (Figure 24), with the lowest p90 in every order. CPU-only completes only 6200 and 4600 of the 6934 requests within the hour in the random and round-robin orders, so its bars there are lower bounds. 
+
+Replicated writes over time . Figure 37 bins the round-robin run of Figure 25 into 120 s intervals, summed over four ranks. Writes are exactly replicated (rank 0 writes 549.7 GB to each tier) and flow throughout, whereas reads begin once the cache fills and stop when the trace stops offering work. The PFS serves 22–29% of each interval’s reads, close to its 24% share of the read bandwidth on Testbed-2 (Table 2): the split 1 − 𝜑 of Equation 4, which completion-driven routing (M4) reaches without measuring bandwidth.

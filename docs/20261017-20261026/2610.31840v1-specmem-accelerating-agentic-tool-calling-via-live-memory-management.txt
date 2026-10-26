@@ -1,0 +1,369 @@
+Title: SPECMEM: Accelerating Agentic Tool Calling via Live Memory Management
+
+URL Source: https://arxiv.org/pdf/2610.31840v1
+
+Published Time: Mon, 26 Oct 2026 00:09:47 GMT
+
+Number of Pages: 13
+
+Markdown Content:
+# SPEC MEM : Accelerating Agentic Tool Calling via Live Memory Management 
+
+Zihe Song 1 Wenting Zhao 2 Ye Liu 2 Yuanjie Zhu 1
+
+Ke Xu 1 Shanghao Li 1 Philip S. Yu 11Department of Computer Science, University of Illinois Chicago 
+
+> 2
+
+Salesforce Research 
+
+Abstract 
+
+Tool-calling agents are mostly optimized for accuracy; in deployment, however, their grow-ing cost is latency: every tool call is decoded autoregressively. Speculative decoding accel-erates this without changing the output, and re-trieved past calls make strong drafts under real use, where each user’s behavior tends to repeat. Yet existing systems keep no cross-session memory, or build the draft store once and never update it. We propose S PEC MEM , a tool-call memory kept alive and managed throughout de-ployment: verified calls are written back online into bounded per-user stores with LRU eviction, and a side-effect gate defers irreversible calls until verification confirms. On multi-session, multi-user query streams served by three open-weight models, a frozen store steadily loses acceptance while S PEC MEM holds it: a 27% 
+
+gap in mean accepted tokens ( +11% to +34% 
+
+across benchmarks, tracking how much novel work arrives after the store is built) and up to 
+
+1.74 × wall-clock speedup. Ablations attribute the gain almost entirely to keeping the store live; local per-user scoping adds no acceptance but closes a measured cross-user leakage chan-nel, and gating on declared side effects, rather than on retrieval confidence, is what eliminates irreversible mistakes. 
+
+1 Introduction 
+
+LLM agents increasingly act through tool calls: querying APIs, searching, and operating software on a user’s behalf (Qin et al., 2023; Yan et al., 2024). Most work on such agents targets accuracy :choosing the right tool with the right arguments (Li et al., 2023; Tang et al., 2023). In deployment, however, the cost that grows is latency : every call is decoded autoregressively, and an agent that pauses between steps is impractical for interactive use, however accurate it is. This paper is about making tool-calling agents faster without affecting what they output. A growing line of work targets exactly this ef-ficiency. Speculative decoding lets a cheap draft be verified by the target model, so the output is unchanged and the speedup rests on how often the draft is right (Leviathan et al., 2023; Chen et al., 2023). Moving from general decoding to agentic flows, speculation has been applied to the next tool call, its arguments, or the following observation (Sui et al., 2026; Saberi et al., 2026; Hooper et al., 2026; Chung et al., 2026), and to repeated output patterns cached across requests (Oliaro et al., 2025). Tool calls are highly templated, so among draft sources, a similar past call retrieved from memory 
+
+is especially likely to be right. The scenario that matters in practice is tool call-ing under real use: an agent serves many users over a long horizon, and each user’s behavior tends to repeat, asking for the weather, checking the same stock, or re-running yesterday’s query with today’s date. Whether this recurrence can make agentic tool calling faster is the problem we focus on. The closest work is T OOL SPEC (Xia et al., 2026), which retrieves similar past calls from a datastore as drafts and reports large speedups. Its store, however, is built once and then frozen (never updating, never evicting, and shared globally across users), so the recurrence a returning user keeps supplying is never reused (Figure 1). A gap therefore remains between static stores and an agent that stays efficient in this evolving scenario. To close this gap, we propose S PEC MEM , a tool-call memory that is kept alive and managed throughout deployment. Managing such a memory raises three coupled problems. Because calls accu-mulate across sessions, the store must stay bounded yet fresh as the user behavior drifts ( lifecycle ). Be-cause the agent serves many users, retrieval must draw either on one shared global store or on each user’s own history, a choice that decides whose calls can appear in whose drafts ( scope ). And because tools act on the world, a draft executed 1arXiv:2610.31840v1 [cs.CL] 22 Oct 2026 User u, session s                             
+
+> Apple s closing price
+> and volume today?
+> No memory schema-only draft
+> {"arguments": {"data_points": null, }}
+> Static datastore (ToolSpec-style)
+> global, frozen at build; nearest stored call:
+> get_stock_data(symbol="MSFT", data_points=["price"])
+> Live per-user store (ours)
+> reuse us own prior call:
+> get_stock_data(symbol="GOOG", data_points=["price", "volume"])
+> Draft-then-verify decoder
+> gpt-oss-120b, greedy
+> draft tool call
+> Accepted tokens
+> =mean accepted tokens (MAT)
+> Live per-user memory (grows; LRU eviction)
+> get_stock_data(symbol="GOOG", data_points=["price", "volume"])
+> session
+> s−1
+> detailed_weather_forecast(...) session s−3
+> observe target
+> →write back top-1 cosine
+> Aggregate MAT
+> (full run, n=6,814/arm): ours 19.96 | static 15.70 | none 5.92
+> Verify by token longest-common-prefix (target =28 tokens):
+> ours 17/28 accepted
+> static 9/28 accepted (its stale price-only entry)
+> no mem. 7/28 accepted
+> {"arguments": {"data_points": ["price", "volume"], "symbol": "AAPL"}, "name": "get_stock_data"}
+> shared scaffold (7 tok) ours accepts through symbol=" (17 tok) cut at the ticker: model decodes the rest
+
+Figure 1: A frozen T OOL SPEC -style datastore vs. S PEC MEM on a recurring call: user u checked Google’s stock the day before and now asks for Apple’s. Each arm drafts a candidate call for a draft-then-verify decoder over the fixed served model (acceptance = token longest-common-prefix). S PEC MEM retrieves u’s own GOOG call, accepted up to the changed ticker ( 17 of 28 target tokens) with only the remainder decoded; the frozen T OOL SPEC -style store’s stale build-time entry accepts 9, the schema-only draft 7 (full-run MAT 19 .96 vs. 15 .70 and 5.92 ). Only the live store writes the verified target back, so its advantage grows across sessions. 
+
+before verification can commit an irreversible ac-tion, such as sending an email ( side effects ; safety here in the systems sense, not content moderation). SPEC MEM answers all three with online write-back into bounded, locally scoped stores under LRU eviction, and a side-effect gate that defers execu-tion of any call not declared safe until verification confirms (Figure 1). Overall, S PEC MEM deliv-ers up to 1.74 × wall-clock decode speedup over vanilla decoding and a +27% post-warmup accep-tance gain over the frozen store, widening to +46% 
+
+by the final session. Our experiments yield three findings. First, live-ness drives acceptance: on multi-session, multi-user query streams served by real open-weight models, the frozen store degrades across sessions while the live store holds, an ablation attributes es-sentially the entire gain to online write-back, and the gap scales with the share of novel calls arriv-ing after the store is built ( +11% to +27% across 
+
+τ 2-bench domains (Barres et al., 2025), +34% on Seal-Tools (Wu et al., 2024)). Second, local scop-ing adds almost nothing to acceptance but closes a measured leakage channel: under a global store, 
+
+14 –68% of a user’s drafts came from other users’ histories. Third, retrieval confidence cannot make speculative execution safe, since a stale draft’s sim-ilarity can be indistinguishable from a correct one’s, whereas gating on declared side effects removes irreversible mistakes by construction. In sum, this paper (i) formulates persistent tool-call memory as a lifecycle problem (write-back, partitioning, eviction, execution gating), instanti-ated in S PEC MEM (§3); (ii) shows that a frozen store degrades while a live one holds, quantifies how the gap scales with post-freeze novelty, and attributes the gain to liveness rather than to store scope, eviction, or the choice of retriever, while measuring the cross-user draft leakage a global store incurs (§4–§5); (iii) identifies speculative ex-ecution of side-effecting tools as a hazard that con-fidence thresholds do not remove, and proposes a schema-level side-effect gate that does, defined on declared side effects rather than idempotency (§5.2); and (iv) validates the findings across three model families and six benchmarks (BFCL, Seal-Tools, live multi-turn τ 2-bench traces, API-Bank, ToolAlpaca, and ToolBench), including real wall-clock measurement (§4.3–§5.4). 
+
+2 Related Work 
+
+Speculative decoding for tool-calling agents. 
+
+Draft-then-verify decoding accelerates inference without changing the output distribution (Leviathan et al., 2023; Chen et al., 2023); drafts can come from self-drafting heads (Cai et al., 2024; Li et al., 2024b,a), parallel decoding (Fu et al., 2024), or, most relevant here, from retrieval : REST veri-fies recurring n-grams from a datastore (He et al., 2024) and S UFFIX DECODING grows an online suf-2fix cache (Oliaro et al., 2025), which we adopt as a live token-match baseline (§5.1); see Xia et al. (2024) for a survey. Retrieval drafting suits agents because tool calls are highly templated and recur-rent (Yao et al., 2022; Schick et al., 2023; Qin et al., 2023; Liu et al., 2024a), the repetition a memory exploits. Closest in spirit, online speculative decod-ing (Liu et al., 2024b) fine-tunes a neural drafter under distribution shift; we ask the same liveness question for retrieval stores, where staying live is a write-back, not a training loop. A concen-trated 2024–2026 wave then speculates over agent actions: the next tool call (Sui et al., 2026), tool ob-servations (Saberi et al., 2026), on-device (Chung et al., 2026), concurrent I/O overlap (Hooper et al., 2026), and forked, beam, and multimodal variants (Bai et al., 2026; Song, 2026; Huang et al., 2026). But none keep a persistent cross-session memory :each speculates from within-task context and dis-cards it. 
+
+The closest prior datastore, and its gap. The closest prior system to ours is T OOL SPEC (Xia et al., 2026), which maintains a historical tool-call datastore retrieved by embedding similarity with a schema-aware FSM and reports 3.5–4.2×
+
+speedups. Its evaluation store, however, is fixed and globally shared, with no online write-back, eviction, or gating of side-effecting tools; its ap-pendix explicitly leaves memory management to future work. S PEC MEM targets exactly this gap, treating the store as a lifecycle and evaluating the cross-session dynamics that a fixed store cannot sustain. 
+
+Agent memory, caching, and tool safety. Agent memory systems keep bounded, updated, user-scoped stores (MemGPT (Packer et al., 2023), MemoryBank (Zhong et al., 2023), Generative Agents (Park et al., 2023), Reflexion (Shinn et al., 2023), A-MEM (Xu et al., 2025), Agent Workflow Memory (Wang et al., 2024)), but for knowledge or skill recall, not speculative drafts; semantic caches like GPTCache (Bang, 2023) evict for response reuse , where a stale hit costs correctness rather than acceptance. On tool-use safety, ToolEmu (Ruan et al., 2023), R-Judge (Yuan et al., 2024), ToolSword (Ye et al., 2024), and GuardAgent (Xi-ang et al., 2024) document that tool-use risk is real and graded , and speculative-execution engines buffer side effects until commit (Nightingale et al., 2005). Yet the systems above uniformly assume tools are safe to execute speculatively (Ghost Tool Calls (Mohammadi et al., 2026) gates privacy , a complementary axis); this motivates our severity-weighted cost of being wrong and the hard gate (§5.2). 
+
+3 Methodology 
+
+Our methodology consists of three components: (1) data construction extending single-shot tool-calling benchmarks into the multi-user, multi-session scenario we target (§3.2); (2) S PEC MEM , a tool-call memory maintained as a managed lifecy-cle behind a speculative decoder (§3.3); and (3) a 
+
+side-effect gate governing when a drafted call may execute before verification (§3.4). 
+
+3.1 Preliminaries 
+
+Speculative decoding lets a cheap source propose a draft that the target model verifies in one forward pass, accepting the longest correct token prefix and re-decoding from the first mismatch (Leviathan et al., 2023; Chen et al., 2023); the output is un-changed, so the speedup depends only on how much of the draft is accepted. In tool calling the draft is a candidate call, and a similar past call re-trieved from a datastore makes a strong one (Xia et al., 2026). Our setting is a deployment in which a fixed served model serves many users over many sessions; the object of study is the datastore: how it is scoped, updated, bounded, and gated as user behavior evolves. 
+
+3.2 Extending benchmarks to the deployment scenario 
+
+Public tool-calling benchmarks are single-shot pools of one-off tasks with no notion of users or time, so we extend them into multi-user, multi-session query streams. Benchmark tasks are parti-tioned across U simulated users; each user’s tasks are then re-issued as queries over ordered sessions, and every recurrence perturbs the task’s numeric argument values, so a user’s queries repeat in struc-ture but not verbatim. Session 0 is a cold start for every arm, and part of each user’s tasks first appear only in later sessions, so novel work keeps arriv-ing after warmup. The construction is benchmark-agnostic (we instantiate it on BFCL and Seal-Tools, §4.1) and identical across arms, so it cannot favor any one of them (synthetic structure: §6). 
+
+3.3 SPEC MEM : live memory management 
+
+Given this scenario, S PEC MEM maintains the draft store as a managed lifecycle rather than a static 3index (Figure 1). 
+
+Retrieval-based drafting. Each user owns a store: an ordered map keyed by user id, holding 
+
+(embed (query ), canonical_call ) pairs from that user’s history. At draft time, S PEC MEM embeds the incoming query and retrieves the user’s nearest entry by cosine similarity; if the similarity clears 
+
+τ =0 .35 , the stored call is returned as the draft and promoted to most recently used. If the user’s store is empty or too dissimilar (the cold-start case), SPEC MEM backs off to a small shared store seeded from population history, and finally to a schema-only skeleton (tool name plus argument placehold-ers), whose tokens any correct call to that schema must share as a prefix. 
+
+Online write-back and bounded eviction. Af-ter every verified call, S PEC MEM inserts the con-firmed call, keyed by its query embedding, into the issuing user’s store. Write-back is unconditional: the target’s output is produced in full regardless of how much of the draft was accepted, and the confirmed call is the freshest evidence of the user’s current behavior. Each user’s store is bounded at capacity C (48 in full-scale runs); on overflow the least recently used entry is evicted (LFU is a drop-in alternative). Store scope (local per-user keying vs. global) and lifecycle (bounded and evicting) are thus the variables that distinguish S PEC MEM from a frozen global store. 
+
+3.4 Gating speculative execution of side-effecting tools 
+
+Speculative execution hides tool latency by run-ning the drafted tool before verification completes. For a read-only tool a wrong speculation wastes work; for a tool with externally visible side effects (transfer_funds , drop_table , . . . ) it commits harm that verification then rejects too late. We emphasize that the relevant property is not idempo-tency: an idempotent operation can still be harm-ful (deleting a file twice yields the same state as deleting it once, but a wrongly drafted deletion is still a loss), and a nominally non-idempotent call can be safe inside a transaction or dry run. The property that matters is whether executing the call before verification can commit an unrecoverable, externally visible effect. We therefore tag each tool with a safe_to_speculate flag as part of its declared schema: true for read-only or side-effect-free calls and for calls whose effects are transac-tionally buffered or compensatable, false for irre-versible side-effecting calls, whether idempotent or not. We then apply a schema-level side-effect gate : only flagged-safe drafts may be speculatively executed; all others are still drafted and verified speculatively, but execution is deferred until ver-ification confirms. Call-dependent cases (e.g. a payment that is safe only when an idempotency key is supplied) need a per-call ternary gate, which strictly dominates the binary flag (§6). 
+
+Cost of being wrong. A raw count treats moving money and sending a duplicate message alike, so we score each unsafe tool with a severity σ(t) ∈
+
+[1 , 10] (σ=0 if safe to speculate). A policy’s cost of being wrong is P σ(t) over its wrong irreversible speculative executions. We compare naive (execute every accepted draft), a confidence gate (execute an unsafe draft only above a similarity threshold 
+
+τc, plausible but insufficient), and our side-effect gate . The gate defers only execution, not drafting: speculation on safe calls is unaffected; the cost is forgoing speculative execution on unsafe drafts, including correct ones (quantified in §5.2). 
+
+4 Experiments 
+
+4.1 Experimental setup Data. We instantiate the construction of §3.2 on the BFCL v4 simple/multiple/parallel pool (Yan et al., 2024). Each of 40 simulated users is as-signed 15 benchmark tasks, disjoint across users. Session 0 (warmup) issues 8 of each user’s tasks once; the remaining 7 first appear spread across sessions 1–11, so novel work keeps arriving after warmup. Each of sessions 1–11 issues 6 queries per user, drawn from the tasks seen so far and weighted toward recently arrived ones, with nu-meric argument values perturbed on every recur-rence. This yields 2,960 queries per seed ( 8,880 
+
+over 3 seeds); queries the model declines are ex-cluded from all arms symmetrically, leaving 6,814 
+
+scored post-warmup queries per arm (full account-ing in Appendix A.1). We use BFCL’s single-turn categories because our accept unit is one drafted call scored against one target call; §5.4 repeats the protocol on Seal-Tools. 
+
+Models. All experiments serve gpt-oss-120b 
+
+(OpenAI, 2025), an open-weight, natively tool-calling mixture-of-experts model ( ∼5B active of 
+
+120 B total parameters), served with sglang on one NVIDIA H200 behind an OpenAI-compatible end-point; query embeddings use all-MiniLM-L6-v2 .4Each unique query is answered once by the served model with greedy decoding. Compute budget, licenses, and package versions are given in Ap-pendix B. We will release the harness, stream gen-erator, and raw result files. 
+
+Baselines. Two draft sources serve as baselines, sharing S PEC MEM ’s target model, embedder, and query stream; we refer to the three compared policies as arms . No memory drafts the schema-only skeleton, the lower bound. Static datastore 
+
+(T OOL SPEC -style) retrieves by cosine similarity from one global store populated during warmup and then frozen (it never ingests and never evicts), matching T OOL SPEC ’s evaluation setting. 
+
+Metrics. The payoff of a draft is its longest com-mon token prefix with what the target would emit (§3.1). We decode the target’s tool-call stream once per query (arm-independent) and score each arm’s draft by token-level LCP, reporting mean accepted tokens (MAT) , the accepted fraction of the target stream, and the exact rate (draft identical to tar-get). Calls are canonicalized (sorted keys) before scoring, so acceptance reflects semantic agreement rather than wire-format noise. MAT is a controlled proxy , distinct from two related measurements: (a) wire-format token acceptance in a deployed de-coder, which additionally depends on a trained drafter’s distribution, tokenization, and acceptance sampling (§6); and (b) the wall-clock speedups of the real external speculative loop in §4.3, reported separately. MAT is always measured against the served model’s greedy output; the arms differ only in the draft they retrieve. 
+
+4.2 Acceptance results 
+
+We first examine whether a continuously updated store improves acceptance after warmup (Table 1). SPEC MEM reaches 19 .96 MAT, compared with 
+
+15 .70 for the frozen store and 5.92 for the no-memory baseline, whose schema-only draft carries no history. The gain over the frozen store is +4 .26 
+
+MAT ( +27% relative), with a higher accepted frac-tion ( 0.621 vs. 0.492 ) and exact-match rate ( 0.444 
+
+vs. 0.314 ). A paired bootstrap over the seed-0 re-play places the absolute gap at +3 .73 MAT ( 95% 
+
+CI [3 .37 , 4.10] ); the gap is positive for every user and every session, and negative for only 5.8% of recurring tasks. The aggregate numbers alone do not capture the temporal behavior, which Figure 2 reports per ses-sion. At session 1 the two stores are nearly tied, 0 2 4 6 8 10 Session index 6810 12 14 16 18 20 22 Mean accepted tokens (MAT)      
+
+> Draft acceptance vs. session
+> No memory (schema draft) Static datastore (ToolSpec-style) Ours (personal + evict)
+> 0246810 Session index 0.2 0.3 0.4 0.5 0.6 Accepted fraction of target
+> Accepted fraction vs. session
+
+Figure 2: Per-session MAT on the BFCL stream (3 seeds). The frozen store and S PEC MEM are nearly tied at session 1; the frozen store then degrades while SPEC MEM holds and the no-memory floor stays flat. 0 1 2 3 4 5 6 7 8 9 10 11 session index 0510 15 20 25 30 mean accepted tokens (MAT)            
+
+> warmup
+> Freshness over time ( 2-bench, 3 domains)
+> ToolSpec + SpecMem (ours, live) ToolSpec / static (frozen) Vanilla AR (no memory)
+> 12345678910 11 session index 0510 15 20 25 30 35 40 SpecMem over frozen (%)
+> Advantage grows as novel calls accumulate
+
+Figure 3: Per-session MAT on τ 2-bench ( 3 domains, 
+
+3 seeds). At session 1 both stores tie near 31 MAT; the frozen T OOL SPEC /static store then degrades into a 
+
+20 –25 band while S PEC MEM holds at 27 –32 . Right: 
+
+the advantage over the frozen store grows from ∼1% 
+
+(session 1) to a peak of ∼37% (session 10; 34% at the final session 11) as novel per-user calls accumulate, an effect a single-session benchmark cannot expose. 
+
+both close to 21 MAT. The frozen store then de-grades into a 13 .5–14 .9 band: it can only replay its warmup snapshot, while later sessions perturb the very argument tokens it drafts. S PEC MEM instead holds at 18 .9–21 .5 by ingesting each session’s veri-fied calls, and the gap widens to +46% by the final session. The no-memory baseline stays flat near 
+
+5.9 throughout. The one non-monotonicity, a rise to 21 .5 at session 9, reflects the novel-task sched-ule rather than noise. Figure 3 shows the same dynamics on τ 2-bench. The frozen store’s deficit therefore grows over time rather than remaining constant. 
+
+4.3 Wall-clock results 
+
+We now compare against T OOL SPEC on its own four benchmarks (API-Bank (Li et al., 2023), ToolAlpaca (Tang et al., 2023), BFCL v4 (Yan et al., 2024), and ToolBench (Qin et al., 2023)): to control a fair comparison, we reimplement it with its components enabled (confidence-gated retrieval and the schema-aware FSM) inside our harness, 1
+
+so every arm shares the same served models, serv-
+
+> 1
+
+Official code: https://github.com/hemingkx/ ToolSpec ; substitutions are listed in Appendix A.2. 
+
+5Table 1: Post-warmup acceptance (sessions 1–11, 3 seeds; per-arm n: BFCL 6,814 , Seal-Tools 7,592 ). Metrics as defined in §4.1; exact rate = draft identical to target.                                
+
+> Benchmark Arm MAT MAT seed-std Accepted frac Exact rate BFCL No memory (schema draft) 5.92 ±0.07 0.190 0.00 Static datastore (frozen) 15.70 ±0.20 0.492 0.314
+> Ours (local, live, evict) 19.96 ±0.05 0.621 0.444
+> Seal-Tools No memory (schema draft) 4.60 ±0.06 0.176 0.007 Static datastore (frozen) 15.68 ±0.27 0.568 0.435
+> Ours (local, live, evict) 21.04 ±0.37 0.753 0.640
+
+Table 2: Wall-clock decode speedup vs. vanilla autore-gressive decoding (p50) on T OOL SPEC ’s four bench-marks. Bottom rows: MAT for S PEC MEM and for a live token-match store at the same footprint ( 3 seeds).                             
+
+> Method API-Bank ToolAlp. BFCLv4 ToolBench Vanilla AR 1.00 ×1.00 ×1.00 ×1.00 ×
+> TOOL SPEC (reimpl.) 1.21 ×1.66 ×1.06 ×1.58 ×
+> +SPEC MEM (ours) 1.62 ×1.74 ×1.18 ×1.69 ×
+> SPEC MEM MAT 19 .120 .920 .521 .0
+> Live token-match MAT 19 .120 .419 .820 .7
+
+ing stack, and per-user session protocol. Speedup is real wall-clock over vanilla autoregressive de-coding, measured with an external speculative de-coding loop using serving-stack timers. The reimplementation and the static arm of §4.1 yield identical speedups (MAT within 0.04 ): the confidence gate and FSM rarely engage when re-trieval is reliable, so the gap to S PEC MEM in Ta-ble 2 is not a weak-baseline artifact. Our reimple-mentation’s speedups ( 1.06 –1.66 ×) are lower than the 3.5–4.2× reported on T OOL SPEC ’s own stack, as expected under the substitution: different served models and serving stack, an external speculative loop whose per-step client overhead bounds the achievable speedup, and BFCL v4 rather than v2. Absolute speedups are therefore not comparable across papers; the within-table contrasts, which hold these factors fixed, are. Two observations complete the comparison. First, on standard single-session benchmarks SPEC MEM never regresses the reimplemented TOOL SPEC speedup, matching or exceeding it on all four (Table 2); the ∼9.4/9.5 ms per query that persistence spends on retrieval and write-back is included in the timed loop, so persistence incurs no measurable penalty even where it provides no benefit, and the advantage persists under concur-rent load (effective output throughput over vanilla decoding rises from 2.9× to 3.3× as concurrency grows from 1 to 32 ). Second, on multi-session τ 2-
+
+Table 3: Ablation: post-warmup MAT as each lifecy-cle component is toggled (full scale, mean ±std over 3
+
+seeds).                   
+
+> Arm live? per-user? evicts? MAT Static (frozen) ———15 .66 ±.11
+> Global, live+evict ✓—✓20 .06 ±.35
+> Local, live, unbnd ✓✓—19 .96 ±.29
+> Ours ✓✓✓19 .91 ±.29
+
+bench (§5.4) the frozen store’s disadvantage grows as novel calls accumulate (Figure 3), which single-session benchmarks cannot expose. 
+
+5 Analysis 
+
+5.1 Ablation: attributing the gain 
+
+SPEC MEM differs from the frozen store in three respects: it remains live (continuing to ingest af-ter warmup), it scopes the store locally per user, and it evicts . The aggregate gap alone cannot at-tribute the gain among these factors, so we toggle each independently across four arms replayed on a shared target stream, using the same three stream seeds as the headline run (Table 3). The live global 
+
+arm serves as an attribution control rather than a deployment candidate: it separates liveness from store scope and measures the cross-user leakage of a shared store. 2
+
+The decomposition is stable across all three seeds: keeping the store live accounts for essen-tially the entire gain. A global store that keeps growing and evicting but is shared by all users, at the same total footprint, already reaches 20 .06 
+
+MAT, covering the full gap to the frozen store. Adding per-user partitioning then changes MAT by −0.15 and eviction by −0.05 , both negative in every seed. Nor is the gain an artifact of the   
+
+> 2This separately run ablation regenerated its own greedy targets, so its rows differ from Table 1’s by at most 0.06 MAT (batched decoding is not bit-reproducible). Every contrast is within one run, so the attribution is unaffected.
+
+6retriever: an arm that replaces our embedding re-trieval with S UFFIX DECODING -style exact token matching recovers it as well (Table 2, bottom rows). Note that the full configuration is therefore not the acceptance-optimal point: the live global arm is slightly higher ( 20 .06 vs. 19 .91 ). We neverthe-less recommend the local, evicting configuration: a global store serves one user drafts from another user’s history, and local scoping obtains isolation at a cost of only ∼0.15 MAT (quantified below). Although local scoping and eviction do not im-prove acceptance, they are what make a live store deployable. Eviction bounds growth: a capacity sweep shows that the headline capacity of 48 costs only 0.04 –0.05 MAT relative to an unbounded store, and acceptance degrades materially only be-low a capacity of about 32 at this stream’s ∼74 
+
+queries per user. Partitioning provides isolation: re-playing the live global store, we find that 14 –68% 
+
+of drafts served to a user were written by a different 
+
+user (rising with task overlap), a cross-user draft-provenance rate that a deployment keeping users’ histories separate would want at zero (cf. Moham-madi et al., 2026). A per-user store removes this channel by construction, at ∼0 acceptance cost in our disjoint-user regime. Local retrieval adds no acceptance in the headline stream because dis-joint users already route each query to their own calls, so we also constructed the regime where it plausibly could win: users sharing tasks but hold-ing fixed, user-specific argument realizations. Even there the live global store is marginally better (local costs 1.3–7.2% MAT as overlap rises). Embedding retrieval already routes most queries to the right user’s entries, so the case for partitioning rests on isolation, not accuracy. Six further sweeps confirm the picture. With ar-gument perturbation turned off, the frozen store still loses 29% to novel tasks arriving after the freeze. Five randomized data constructions pre-serve the direction, with liveness carrying 100 –
+
+104% of the gap. Session-reset and TTL arms at-tribute about three quarters of the win to genuine cross-session memory. A warmup-budget sweep shrinks the gap to ∼2% once warmup covers ev-ery task, confirming that the decay reflects post-warmup novelty rather than an inadequate warmup. We do not claim that real query streams necessar-ily drift this way; our claim is that a frozen store degrades when post-warmup arrival and recurrence are present. Finally, the decomposition replicates on gemma-4-31B-it , where the live global arm re-covers 4.00 of the 4.04 MAT gap, so the finding holds on both a mixture-of-experts and a dense model. In summary, liveness accounts for the ac-ceptance gain, while local scope and eviction pro-vide isolation and boundedness. 
+
+5.2 Side-effect gating for speculative execution 
+
+We next evaluate speculative execution of tools with irreversible side effects: executing a drafted call before verification completes commits its side effect even if the draft is subsequently rejected, and we quantify this cost under three gating poli-cies. The experiment is reported once: the gate decides from each tool’s declared annotation, not the LLM’s output, so its numbers are model-independent (§5.3). The registry contains 14 side-effecting tools marked unsafe to speculate, span-ning money movement, data loss, security, infras-tructure, and communication, each with an author-assigned ordinal severity σ ∈ [1 , 10] , plus 7 safe tools ( σ=0 ). Each 400 -call stream mixes in unsafe calls at rate 0.45 ; the draft is the user’s last call to the same tool, and is wrong exactly when the user now targets a different object. Results average 5
+
+stream seeds. Table 4 compares the three policies of §3.4 by the severity-weighted cost of being wrong. Naively executing every accepted draft incurs a weighted cost of 800 from 124 wrong irreversible execu-tions. A confidence gate, which executes an un-safe draft only when retrieval confidence exceeds a threshold, helps but does not solve the problem: at τc=0 .7 it cuts the cost to 255 , yet still commits 
+
+40 bad actions, including maximum-severity ones. The reason is that retrieval confidence and side-effect safety are orthogonal: a stale draft can re-main highly similar to the query yet be wrong. Our primary evidence for this is measured, not simu-lated: on real BFCL replays, wrong drafts occur at retrieval similarity up to 0.9995 , indistinguish-able from correct drafts at the ceiling, so a thresh-old of 0.9 still fires 33 –60% of wrong drafts, and the threshold that reaches zero harm is a stream-dependent tail value unknowable in advance. The side-effect gate’s zero cost, by contrast, holds by construction (refusing to execute unsafe tools triv-ially commits no harm), so the experiment’s value is quantifying the price of that refusal against the harm confidence gating admits: the gate defers the ∼41 correct unsafe drafts per stream to post-verification execution while keeping all ∼214 safe speculations. The policy ranking is unchanged un-7Table 4: Side-effect-gating simulation ( 400 -call streams, 5 seeds; setup in §5.2). Weighted cost = P σ over wrong irreversible speculative executions; rate = per drafted unsafe call; safe spec-exec = executions causing no irreversible harm.                     
+
+> Policy Weighted cost Bad actions Rate/opp. Worst sev. Safe spec-exec Naive spec-exec 800 124 0.75 10 255 Confidence gate 255 40 0.24 10 244
+> Side-effect gate (ours) 000.00 0214
+
+der a raw error count ( 124 /40 /0) and a three-tier severity map ( 243 /78 /0), so it is not an artifact of the [1 , 10] weights. These results indicate that confidence-based gating reduces but does not elim-inate harm, whereas gating on declared side effects eliminates it by construction. 
+
+5.3 Generalization across served models 
+
+A single target model cannot tell us whether the gap reflects the memory policy or an ar-tifact of gpt-oss-120b . We therefore repeat the identical full-scale protocol (same harness, stream, arms, and seeds) on two additional open-weight, natively tool-calling models, each mea-sured against its own greedy output with its own tokenizer: gemma-4-31B-it , a dense 30 .7B model served with sglang, and Nemotron-3-Super-120B ,a hybrid-SSM model ( 12 B active of 120 B total) served with vLLM. The three models span ven-dor, scale, architecture, quantization, and tool-call serialization format. Per-model gating numbers are not re-measured: the side-effect gate keys off each tool’s declared annotation rather than the LLM that drafted the call, so its numbers are identical across served models by construction. Every model reproduces the same holds-versus-degrades dynamics, with a +27 –29% post-warmup gap and a +45 –48% final-session gap. De-cline rates differ by model ( ∼18% /8% /2% of unique queries for gpt-oss /Nemotron/ gemma ); each model’s declined queries are excluded from its arms symmetrically. Since the gap reproduces within two points across models that share none of these axes, we conclude it is a property of the mem-ory lifecycle rather than of any one target model. 
+
+5.4 Seal-Tools and live multi-turn τ 2-bench traces 
+
+Cross-model replication reuses the same stream, so it cannot rule out an artifact of the BFCL-derived pool. We therefore repeat the identical protocol (same construction, scale, arms, seeds, and head-line model) on Seal-Tools (Wu et al., 2024), a self-instruct function-calling benchmark ( 700 -task test split, 4,076 tools) constructed independently of BFCL. Only about half of its queries contain perturbable numerals, so recurrences are domi-nated by exact repeats. The result replicates and is slightly stronger (Table 1, bottom): the frozen store degrades from 22 .6 MAT into a 13 .2–14 .6
+
+band while S PEC MEM holds at 19 .9–22 .3, a +34% 
+
+post-warmup gap and +54% in the final session. Exact repeats help both stores at warmup but do not prevent the frozen store’s decay from post-warmup task arrival. 
+
+τ 2-bench. To leave the single-shot regime en-tirely, we run the full 278 -task τ 2-bench set (Bar-res et al., 2025) live across the airline, retail, and telecom domains, with the served gpt-oss-120b 
+
+as the agent and a live GPT-4.1 user simulator, so both states and targets are on-policy; the resulting 
+
+1,753 decision points feed the identical protocol over 3 seeds. The frozen store reaches 23 .44 ±1.02 
+
+MAT and S PEC MEM 28 .64 ±.69 , a +22% gap over-all. The per-domain gaps track each domain’s share of novel calls, as the ablation predicts: airline and retail, where most calls are unique ( 82% /56% ), give +27% , matching BFCL, while telecom, dom-inated by one shared diagnostic workflow ( 14% 
+
+unique calls), gives +11% ; when little novel work arrives, a frozen store remains adequate. 
+
+6 Conclusion 
+
+We studied how persistent tool-call memory for speculative agents should be managed in long-lived, multi-user deployments: online write-back sustains acceptance as the stream evolves, local scope and eviction provide isolation and boundedness, and future systems should keep draft stores live and gate speculative execution on declared side effects, not retrieval confidence. 8Limitations 
+
+Simulated repetition structure. Our users and sessions are synthetic: benchmark tasks partitioned across simulated users with numeric-variant per-turbation, not organic logs. The gap’s magni-tude therefore depends on how much users repeat their tools and how much novel work arrives af-ter warmup, a dependence we measure directly (§5.1); its direction is robust across seeds, drift rates, data constructions, and benchmarks. We sur-veyed public candidates for real per-user, multi-session tool-call traces (LMSYS-Chat-1M, Wild-Chat, ToolBench, API-Bank, and the TraceLab agent traces) and none provide per-user session structure together with the query and argument content our accept metric needs; un-redacted multi-session agent telemetry remains the decisive test. 
+
+Metric and integration scope. MAT scores one retrieved draft per query against the served model’s greedy output over canonicalized calls; it omits the multi-turn-selection and irrelevance categories some benchmarks also test, and absolute values are not comparable to trained drafters (Li et al., 2024b). Wall-clock speedups use a faithful external specula-tive loop with real serving-stack timers rather than an engine-integrated hook. The retrieval thresh-old τ =0 .35 and the single embedder are fixed, not swept, and the dynamics are confirmed on three open-weight model families but not on deployed proprietary agents. 
+
+Side-effect gate scope. The gate relies on cor-rect per-tool safe_to_speculate annotations and treats side-effect safety as binary; on call-dependent tools a per-call ternary gate strictly dom-inates and is the natural refinement. Rollback, com-pensating actions, and learned idempotency infer-ence are open directions. 
+
+Ethical Considerations 
+
+Persistent memory and speculative execution for tool-calling agents introduce privacy and opera-tional safety risks. A globally shared memory may expose one user’s interaction history through drafts retrieved for another user, motivating our use of per-user memory partitioning. Incorrect specula-tive execution may also trigger irreversible actions before verification completes; S PEC MEM there-fore defers tools declared unsafe to speculate until verification is complete. These protections still depend on correct tool annotations and should be complemented in deployment by access control, auditing, sandboxing, and human confirmation for high-impact actions. Our experiments use public benchmarks and simulated users rather than real user logs. 
+
+References                          
+
+> Huajun Bai, Weiwei Lv, Huichuan Zheng, Youyou Lu, and Jiwu Shu. 2026. SPORK: Self-speculative forking to accelerate agentic LLM inference. arXiv preprint arXiv:2607.03333 .Fu Bang. 2023. GPTCache: An open-source semantic cache for LLM applications enabling faster answers and cost savings. In Proceedings of the 3rd Work-shop for Natural Language Processing Open Source Software (NLP-OSS) .Victor Barres, Honghua Dong, Soham Ray, Xujie Si, and Karthik Narasimhan. 2025. τ2-bench: Evaluat-ing conversational agents in a dual-control environ-ment. arXiv preprint arXiv:2506.07982 .Tianle Cai, Yuhong Li, Zhengyang Geng, Hongwu Peng, Jason D. Lee, Deming Chen, and Tri Dao. 2024. Medusa: Simple LLM inference acceleration frame-work with multiple decoding heads. In Proceedings of the 41st International Conference on Machine Learning (ICML) .Charlie Chen, Sebastian Borgeaud, Geoffrey Irving, Jean-Baptiste Lespiau, Laurent Sifre, and John Jumper. 2023. Accelerating large language model decoding with speculative sampling. arXiv preprint arXiv:2302.01318 .Jinha Chung, Byeongjun Shin, Jiin Kim, and Minsoo Rhu. 2026. Agent-X: Full pipeline acceleration of on-device AI agents. arXiv preprint arXiv:2605.10380 .ArXiv:2605.10380; accepted at MobiSys 2026. Yichao Fu, Peter Bailis, Ion Stoica, and Hao Zhang. 2024. Break the sequential dependency of LLM in-ference using lookahead decoding. In Proceedings of the 41st International Conference on Machine Learn-ing (ICML) .Zhenyu He, Zexuan Zhong, Tianle Cai, Jason D. Lee, and Di He. 2024. REST: Retrieval-based specu-lative decoding. In Proceedings of the 2024 Con-ference of the North American Chapter of the As-sociation for Computational Linguistics (NAACL) .ArXiv:2311.08252. Coleman Hooper, Minwoo Kang, Suhong Moon, Nicholas Lee, Eric Wen, John Wawrzynek, Michael W. Mahoney, Yakun Sophia Shao, Amir Gholami, and Kurt Keutzer. 2026. Speculative inter-action agents: Building real-time agents with asyn-chronous I/O and speculative tool calling. arXiv preprint arXiv:2605.13360 .
+
+9Haoyu Huang, Jinfa Huang, Zhongwei Wan, Xiawu Zheng, Rongrong Ji, and Jiebo Luo. 2026. SpecEyes: Accelerating agentic multimodal LLMs via spec-ulative perception and planning. arXiv preprint arXiv:2603.23483 . ArXiv:2603.23483; accepted at ECCV 2026. Yaniv Leviathan, Matan Kalman, and Yossi Matias. 2023. Fast inference from transformers via spec-ulative decoding. In Proceedings of the 40th Interna-tional Conference on Machine Learning (ICML) .Minghao Li, Yingxiu Zhao, Bowen Yu, Feifan Song, Hangyu Li, Haiyang Yu, Zhoujun Li, Fei Huang, and Yongbin Li. 2023. API-Bank: A comprehen-sive benchmark for tool-augmented LLMs. arXiv preprint arXiv:2304.08244 .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024a. EAGLE-2: Faster inference of lan-guage models with dynamic draft trees. arXiv preprint arXiv:2406.16858 .Yuhui Li, Fangyun Wei, Chao Zhang, and Hongyang Zhang. 2024b. EAGLE: Speculative sampling re-quires rethinking feature uncertainty. In Proceed-ings of the 41st International Conference on Machine Learning (ICML) .Weiwen Liu, Xu Huang, Xingshan Zeng, Xinlong Hao, Shuai Yu, Dexun Li, Shuai Wang, Weinan Gan, Zhengying Liu, et al. 2024a. ToolACE: Winning the points of LLM function calling. arXiv preprint arXiv:2409.00920 .Xiaoxuan Liu, Lanxiang Hu, Peter Bailis, Alvin Che-ung, Zhijie Deng, Ion Stoica, and Hao Zhang. 2024b. Online speculative decoding. In Proceedings of the 41st International Conference on Machine Learning (ICML) .Bardia Mohammadi, Lars Klein, Akhil Arora, and Lau-rent Bindschaedler. 2026. Ghost tool calls: Issue-time privacy for speculative agent tools. arXiv preprint arXiv:2606.02483 .Edmund B. Nightingale, Peter M. Chen, and Jason Flinn. 2005. Speculative execution in a distributed file sys-tem. In Proceedings of the 20th ACM Symposium on Operating Systems Principles (SOSP) .Gabriele Oliaro, Zhihao Jia, Daniel Campos, and Aurick Qiao. 2025. SuffixDecoding: Extreme speculative decoding for emerging ai applications. In Advances in Neural Information Processing Systems (NeurIPS), Spotlight .OpenAI. 2025. gpt-oss-120b and gpt-oss-20b model card. https://huggingface.co/openai/ gpt-oss-120b .Charles Packer, Sarah Wooders, Kevin Lin, Vivian Fang, Shishir G. Patil, Ion Stoica, and Joseph E. Gonzalez. 2023. MemGPT: Towards LLMs as operating sys-tems. arXiv preprint arXiv:2310.08560 .Joon Sung Park, Joseph C. O’Brien, Carrie J. Cai, Meredith Ringel Morris, Percy Liang, and Michael S. Bernstein. 2023. Generative agents: Interactive simulacra of human behavior. arXiv preprint arXiv:2304.03442 .Yujia Qin, Shihao Liang, Yining Ye, Kunlun Zhu, Lan Yan, Yaxi Lu, Yankai Lin, Xin Cong, Xiangru Tang, Bill Qian, et al. 2023. ToolLLM: Facilitating large language models to master 16000+ real-world APIs. 
+
+arXiv preprint arXiv:2307.16789 .Yangjun Ruan, Honghua Dong, Andrew Wang, Sil-viu Pitis, Yongchao Zhou, Jimmy Ba, Yann Dubois, Chris J. Maddison, and Tatsunori Hashimoto. 2023. Identifying the risks of LM agents with an LM-emulated sandbox. arXiv preprint arXiv:2309.15817 .Mehrdad Saberi, Keivan Rezaei, and Soheil Feizi. 2026. SpecHop: Continuous speculation for accel-erating multi-hop retrieval agents. arXiv preprint arXiv:2605.21965 .Timo Schick, Jane Dwivedi-Yu, Roberto Dessì, Roberta Raileanu, Maria Lomeli, Luke Zettlemoyer, Nicola Cancedda, and Thomas Scialom. 2023. Toolformer: Language models can teach themselves to use tools. 
+
+arXiv preprint arXiv:2302.04761 .Noah Shinn, Federico Cassano, Edward Berman, Ash-win Gopinath, Karthik Narasimhan, and Shunyu Yao. 2023. Reflexion: Language agents with verbal reinforcement learning. arXiv preprint arXiv:2303.11366 .Yanfei Song. 2026. B-PASTE: Beam-aware pattern-guided speculative execution for resource-constrained LLM agents. arXiv preprint arXiv:2604.16469 .Yifan Sui, Han Zhao, Rui Ma, Zhiyuan He, Hao Wang, Jianxun Li, Kaiqiang Xu, Kai Chen, and Yuqing Yang. 2026. Parallelizing tool execution and llm genera-tion for low-latency agent serving. arXiv preprint arXiv:2603.18897 .Qiaoyu Tang, Ziliang Deng, Hongyu Lin, Xianpei Han, Qiao Liang, Boxi Cao, and Le Sun. 2023. ToolAlpaca: Generalized tool learning for language models with 3000 simulated cases. arXiv preprint arXiv:2306.05301 .Zora Zhiruo Wang, Jiayuan Mao, Daniel Fried, and Graham Neubig. 2024. Agent workflow memory. 
+
+arXiv preprint arXiv:2409.07429 .Mengsong Wu, Tong Zhu, Han Han, Chuanyuan Tan, Xiang Zhang, and Wenliang Chen. 2024. Seal-tools: Self-instruct tool learning dataset for agent tuning and detailed benchmark. arXiv preprint arXiv:2405.08355 .Heming Xia, Yongqi Li, Cunxiao Du, Mingbo Song, and Wenjie Li. 2026. ToolSpec: Accelerating tool call-ing via schema-aware and retrieval-augmented spec-ulative decoding. arXiv preprint arXiv:2604.13519 .ArXiv preprint (v1 April 2026, v2 May 2026). 
+
+10 Heming Xia, Zhe Yang, Qingxiu Dong, Peiyi Wang, Yongqi Li, Tao Ge, Tianyu Liu, Wenjie Li, and Zhi-fang Sui. 2024. Unlocking efficiency in large lan-guage model inference: A comprehensive survey of speculative decoding. In Findings of the Asso-ciation for Computational Linguistics: ACL 2024 ,pages 7655–7671, Bangkok, Thailand. Association for Computational Linguistics. Zhen Xiang, Linzhi Zheng, Yanjie Li, Junyuan Hong, Qinbin Li, Han Xie, Jiawei Zhang, Zidi Xiong, Chulin Xie, et al. 2024. GuardAgent: Safeguard LLM agents by a guard agent via knowledge-enabled reasoning. arXiv preprint arXiv:2406.09187 .Wujiang Xu, Zujie Liang, Kai Mei, Hang Gao, Jun-tao Tan, and Yongfeng Zhang. 2025. A-MEM: Agentic memory for LLM agents. arXiv preprint arXiv:2502.12110 .Fanjia Yan, Huanzhi Mao, Charlie Cheng-Jie Ji, Tianjun Zhang, Shishir G. Patil, Ion Stoica, and Joseph E. Gonzalez. 2024. Berkeley function calling leaderboard. https://gorilla.cs.berkeley. edu/blogs/8_berkeley_function_calling_ leaderboard.html .Shunyu Yao, Jeffrey Zhao, Dian Yu, Nan Du, Izhak Shafran, Karthik Narasimhan, and Yuan Cao. 2022. ReAct: Synergizing reasoning and acting in language models. arXiv preprint arXiv:2210.03629 .Junjie Ye, Sixian Li, Guanyu Li, Caishuang Huang, Songyang Gao, Yilong Wu, Qi Zhang, Tao Gui, and Xuanjing Huang. 2024. ToolSword: Un-veiling safety issues of large language models in tool learning across three stages. arXiv preprint arXiv:2402.10753 .Tongxin Yuan, Zhiwei He, Lingzhong Dong, Yiming Wang, Ruijie Zhao, Tian Xia, Lizhen Xu, Binglin Zhou, Fangqi Li, Zhuosheng Zhang, et al. 2024. R-Judge: Benchmarking safety risk awareness for LLM agents. arXiv preprint arXiv:2401.10019 .Wanjun Zhong, Lianghong Guo, Qiqi Gao, He Ye, and Yanlin Wang. 2023. MemoryBank: Enhancing large language models with long-term memory. arXiv preprint arXiv:2305.10250 .
+
+11 A Experimental Details 
+
+A.1 Stream details Query accounting. Session 0 (warmup) issues each user’s 8 warmup tasks exactly once; ses-sions 1–11 issue 6 queries each, so one seed con-tributes 40 ×(8+11 ×6) = 2 ,960 queries and three seeds give 8,880 . Exact repeats and perturbation collisions leave 5,535 unique query strings (BFCL; 
+
+5,088 on Seal-Tools), each answered once by the served model with greedy decoding; no target is fabricated. The model declines a tool call on 982 
+
+unique queries (BFCL; 238 on Seal-Tools); those are excluded from all arms symmetrically, leav-ing n=6 ,814 (BFCL) and n=7 ,592 (Seal-Tools) scored post-warmup queries per arm. Session 0 is a cold start for every arm, so all headline compar-isons are on sessions 1–11. ( exact_rate ≈0 for the no-memory arm is expected: a schema-only draft matches a concrete call only when that call takes no arguments (never on BFCL, 0.7% on Seal-Tools).) 
+
+Arrival schedule. Warmup covers half of each user’s task set ( 8 of 15 tasks, warmup_frac =0.5). Post-warmup sessions draw each user’s queries from their full task set with unwarmed (novel) tasks weighted 3:1 over warmed ones, spreading first appearances across sessions 1–11 (arrival = spread ); burst and late alternatives, and warmup fractions up to 1.0, were additionally swept (stable in direction throughout). The head-line gap should be read at this operating point: as the warmup sweep shows, it shrinks to ∼2% when warmup covers every task. 
+
+Scope of exclusions. Declined queries are removed from all arms symmetrically, so com-parisons are internally valid but conclusions ap-ply to the subpopulation of queries on which the served model issues a tool call at all ( 82% of unique queries for gpt-oss on BFCL, 95% on Seal-Tools). 
+
+τ 2-bench trace generation. For the live τ 2-bench experiments (§5.4), one canonical trace is generated per task and served model (a single trial): the served model acts as the agent against a live GPT-4.1 user simulator, and the 278 tasks yield 
+
+1,753 post-warmup decision points. All memory arms then replay the same trace, so arms differ only in the draft they retrieve; multiple trials would alter the success statistics of the underlying benchmark but not this within-trace acceptance comparison. The seeds reported there are stream-construction seeds for the replay, which reuses cached targets. 
+
+Pool choice. The disjoint-per-user design needs users × tasks = 600 distinct examples, hence 600 
+
+of BFCL’s 800 -task simple/multiple/parallel pool. We restrict to the single-turn categories because our accept unit is one drafted call scored against one target call; BFCL’s multi-turn and irrelevance-detection categories evaluate dialogue-level tool selection, which this protocol does not measure (§6). 
+
+A.2 TOOL SPEC -style reimplementation 
+
+We reimplement T OOL SPEC inside our harness rather than running its official release ( https: //github.com/hemingkx/ToolSpec ), which tar-gets its own models and serving stack; reimple-mentation lets every arm share our served models, session protocol, and timers. We reproduce its two mechanisms over a fixed, global store shared across users: (i) confidence-gated retrieval (re-turn the nearest stored call only above a similar-ity threshold, vs. the static proxy that returns its nearest neighbor unconditionally); (ii) a schema-aware FSM surrogate (on a cold miss, emit a struc-turally valid draft for the nearest function rather than a far wrong call). This is provably at least as strong as the static proxy; on every stream here the two frozen arms produce identical wall-clock speedups (MAT within 0.04 ; exactly identical on 
+
+τ 2-bench), so the gap to S PEC MEM is not a weak-baseline artifact. For Table 2 we run each of T OOL -SPEC ’s own four benchmarks (API-Bank, ToolAl-paca, BFCL v4, ToolBench from its OpenBMB release) through the identical per-user/session con-struction ( 10 tasks/user, min(40 , |D| /10) users, 12 
+
+sessions, 3 seeds), with targets from the served 
+
+gpt-oss-120b . Wall-clock uses the external spec-decode loop (real sglang timers, ignore_eos forc-ing exact token counts). We use BFCL v4 (su-perset of the v2 T OOL SPEC used) and our own served models rather than T OOL SPEC ’s check-points, stated as a substitution rather than an ex-act reproduction; we therefore call this a reimple-mentation throughout. Retrieval/write-back cost 
+
+∼9.4/9.5 ms/query, inside the timed loop. 
+
+B Reproducibility Details 
+
+B.1 Artifact Licenses 
+
+The models and benchmarks used in this work were released under licenses permitting research use. GPT-OSS-120B and Gemma-4-31B-IT 12 are distributed under the Apache License 2.0, while Nemotron-3-Super-120B is governed by the NVIDIA Nemotron Open Model License. BFCL, Seal-Tools, ToolAlpaca, and ToolBench are dis-tributed under the Apache License 2.0; API-Bank and τ 2-bench are distributed under the MIT Li-cense. Our release will contain only our experi-mental harness, stream-construction code, configu-rations, and derived results. 
+
+B.2 Compute and Implementation Details Models. We serve three open-weight, natively tool-calling models: gpt-oss-120b (mixture-of-experts, 120 B total, ∼5B active parameters, MXFP4), gemma-4-31B-it (30 .7B, dense), and 
+
+Nemotron-3-Super-120B (hybrid-SSM, 120 B to-tal, 12 B active). Query embeddings use 
+
+all-MiniLM-L6-v2 (22 M parameters), run on CPU. The live τ 2-bench user simulator is GPT-4.1, accessed through the OpenAI API. 
+
+Computing infrastructure and budget. Experi-ments ran on NVIDIA H200 GPUs: one GPU each for gpt-oss-120b and gemma-4-31B-it , and four for Nemotron-3-Super-120B (tensor parallelism 
+
+4). The full study required approximately 20 H200 GPU-hours of active compute. 
+
+Hyperparameters. Targets are decoded greed-ily. SPEC MEM uses top-1 cosine retrieval with threshold τ = 0 .35 and a per-user capacity of 48 
+
+entries under LRU eviction, fixed in pilot runs and held constant across all benchmarks and models; capacity is swept in §5.1. Stream-construction pa-rameters are given in §3.2 and Appendix A.1; all runs use stream seeds 0, 1, 2.
+
+Software. The harness runs on Python 
+
+3.10 with PyTorch 2.9.1 and Transformers 
+
+5.6.0; models are served with sglang 0.5.11 
+
+(gpt-oss-120b , gemma-4-31B-it ) and vLLM 
+
+0.18 (Nemotron-3-Super-120B ) behind OpenAI-compatible endpoints. 13
