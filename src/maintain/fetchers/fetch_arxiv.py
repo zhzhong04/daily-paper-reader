@@ -3,7 +3,6 @@ import json
 import os
 import re
 import sys
-import time
 from datetime import datetime, timedelta, timezone
 
 SRC_DIR = os.path.abspath(os.path.join(os.path.dirname(__file__), "..", ".."))
@@ -296,8 +295,8 @@ def fetch_category_in_windows(
 ) -> datetime | None:
     """
     按时间窗口抓取单个大类。
-    - 失败粒度降为“单窗口失败”，不会丢掉整个分类；
-    - 若窗口仍然过大导致 500，可继续在上层按更小窗口重试（可选）。
+    - 较大的失败窗口拆分后重试。
+    - 重试后仍有失败窗口则中止，避免跳过未抓取区间。
     """
     max_published_new: datetime | None = None
 
@@ -353,40 +352,30 @@ def fetch_category_in_windows(
 
             log(f"   ✅ Finished {category} (win {idx}/{len(windows)}): Got {count} new papers.")
         except Exception as e:
-            # 单个窗口失败不影响其他窗口/分类
             log(f"   ❌ Error fetching category {category} (win {idx}/{len(windows)}): {e}")
-            # 回退：如果窗口仍然很大，尝试把该窗口再二分（仅一层，避免过度递归）
-            if split_on_error_depth > 0 and (win_end - win_start) >= timedelta(days=2):
-                mid = win_start + (win_end - win_start) / 2
-                mid = mid.replace(second=0, microsecond=0)
-                minute = timedelta(minutes=1)
-                left = (win_start, max(minute + win_start, mid - minute))
-                right = (mid, win_end)
-                log(
-                    f"   🔁 Retry by splitting window: "
-                    f"{left[0].strftime('%Y%m%d%H%M')}..{left[1].strftime('%Y%m%d%H%M')} | "
-                    f"{right[0].strftime('%Y%m%d%H%M')}..{right[1].strftime('%Y%m%d%H%M')}",
-                )
-                cat_max_left = fetch_category_in_windows(
-                    client=client,
-                    category=category,
-                    windows=[left],
-                    seen_ids=seen_ids,
-                    unique_papers=unique_papers,
-                    split_on_error_depth=split_on_error_depth - 1,
-                )
-                cat_max_right = fetch_category_in_windows(
-                    client=client,
-                    category=category,
-                    windows=[right],
-                    seen_ids=seen_ids,
-                    unique_papers=unique_papers,
-                    split_on_error_depth=split_on_error_depth - 1,
-                )
-                for candidate in (cat_max_left, cat_max_right):
-                    if candidate and (max_published_new is None or candidate > max_published_new):
-                        max_published_new = candidate
-            time.sleep(5)
+            if split_on_error_depth <= 0 or (win_end - win_start) < timedelta(days=2):
+                raise RuntimeError(f"arXiv 抓取失败：{category} ({start_str}..{end_str})") from e
+
+            mid = win_start + (win_end - win_start) / 2
+            mid = mid.replace(second=0, microsecond=0)
+            minute = timedelta(minutes=1)
+            left = (win_start, max(minute + win_start, mid - minute))
+            right = (mid, win_end)
+            log(
+                f"   🔁 Retry by splitting window: "
+                f"{left[0].strftime('%Y%m%d%H%M')}..{left[1].strftime('%Y%m%d%H%M')} | "
+                f"{right[0].strftime('%Y%m%d%H%M')}..{right[1].strftime('%Y%m%d%H%M')}",
+            )
+            candidate = fetch_category_in_windows(
+                client=client,
+                category=category,
+                windows=[left, right],
+                seen_ids=seen_ids,
+                unique_papers=unique_papers,
+                split_on_error_depth=split_on_error_depth - 1,
+            )
+            if candidate and (max_published_new is None or candidate > max_published_new):
+                max_published_new = candidate
         finally:
             group_end()
 
